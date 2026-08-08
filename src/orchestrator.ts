@@ -22,13 +22,26 @@ import type {
   JobRecord,
   JobRequest,
   JobStore,
+  RouteDiagnostic,
   StartJobResult,
   WorkerAdapter,
   WorkerEventSink,
-  WorkerHealth,
 } from './types.js';
 
 export type JobEventListener = (event: JobEvent, job: JobRecord) => Promise<void> | void;
+
+export const ROUTE_DIAGNOSTIC_TIMEOUT_MS = 30_000;
+
+export interface RouteDiagnosticOptions {
+  live?: boolean;
+  signal?: AbortSignal;
+}
+
+interface LiveProbeOutcome {
+  checked: boolean;
+  status: RouteDiagnostic['liveInference']['status'];
+  message: string;
+}
 
 export interface OrchestratorOptions {
   config: AgentKnotConfig;
@@ -39,11 +52,19 @@ export interface OrchestratorOptions {
   onEvent?: JobEventListener;
   now?: () => Date;
   fetch?: typeof globalThis.fetch;
+  /** The production default is the fixed 30-second control-plane probe timeout. */
+  diagnosticTimeoutMs?: number;
 }
 
 function errorDetails(error: unknown): { name: string; message: string } {
   if (error instanceof Error) return { name: error.name, message: error.message };
   return { name: 'Error', message: String(error) };
+}
+
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  if (typeof signal.reason === 'string' && signal.reason !== '') return new Error(signal.reason);
+  return new Error('Operation aborted');
 }
 
 function normalizeRequest(request: JobRequest): JobRequest {
@@ -79,6 +100,7 @@ export class Orchestrator {
   readonly #fetch: typeof globalThis.fetch;
   readonly #workspaceIsolation: WorkspaceIsolationManager;
   readonly #execution: JobExecution;
+  readonly #diagnosticTimeoutMs: number;
   readonly #recordMutations = new Map<string, Promise<void>>();
 
   constructor(options: OrchestratorOptions) {
@@ -89,6 +111,16 @@ export class Orchestrator {
     this.#now = options.now ?? (() => new Date());
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#workspaceIsolation = new WorkspaceIsolationManager(options.config, options.baseDirectory);
+    this.#diagnosticTimeoutMs = options.diagnosticTimeoutMs ?? ROUTE_DIAGNOSTIC_TIMEOUT_MS;
+    if (
+      !Number.isSafeInteger(this.#diagnosticTimeoutMs) ||
+      this.#diagnosticTimeoutMs < 1 ||
+      this.#diagnosticTimeoutMs > ROUTE_DIAGNOSTIC_TIMEOUT_MS
+    ) {
+      throw new Error(
+        `diagnosticTimeoutMs must be an integer between 1 and ${ROUTE_DIAGNOSTIC_TIMEOUT_MS}`
+      );
+    }
     this.#execution = {
       runtimeId: randomUUID(),
       pid: process.pid,
@@ -107,11 +139,141 @@ export class Orchestrator {
     return workspaceIsolationMode(this.#config);
   }
 
-  async doctor(routeName?: string): Promise<WorkerHealth & { route: string }> {
+  async doctor(routeName?: string, options: RouteDiagnosticOptions = {}): Promise<RouteDiagnostic> {
+    const live = options.live === true;
     const route = resolveRoute(this.#config, routeName);
     const adapter = this.#adapters.get(route.worker);
-    if (!adapter) return { ok: false, message: `No adapter for worker "${route.worker}"`, route: route.name };
-    return { ...(await adapter.doctor(route)), route: route.name };
+    if (!adapter) {
+      return {
+        ok: false,
+        message: `No adapter for worker "${route.worker}"; live inference was not checked`,
+        route: route.name,
+        liveInference: { checked: false, status: 'not-checked' },
+      };
+    }
+
+    const health = await adapter.doctor(route);
+    if (!live) {
+      return {
+        ...health,
+        route: route.name,
+        message: `${health.message}; live inference was not checked`,
+        liveInference: { checked: false, status: 'not-checked' },
+      };
+    }
+    if (!health.ok) {
+      return {
+        ...health,
+        route: route.name,
+        message: `${health.message}; live inference was not checked because the configuration/credential check failed`,
+        liveInference: { checked: false, status: 'not-checked' },
+      };
+    }
+    if (!adapter.probe) {
+      return {
+        ok: false,
+        message: `Live inference probe is unsupported for worker "${adapter.name}"`,
+        route: route.name,
+        ...(health.details === undefined ? {} : { details: { ...health.details } }),
+        liveInference: { checked: false, status: 'unsupported' },
+      };
+    }
+
+    const probe = await this.#runLiveProbe(adapter.probe.bind(adapter), route, options.signal);
+    if (probe.status === 'succeeded') {
+      return {
+        ...health,
+        ok: true,
+        route: route.name,
+        message: `${health.message}; live inference succeeded for ${route.provider}/${route.model} (thinking level ${route.thinkingLevel ?? 'default'})`,
+        ...(health.details === undefined
+          ? {}
+          : { details: { ...health.details, liveInference: 'succeeded' } }),
+        liveInference: { checked: probe.checked, status: probe.status },
+      };
+    }
+    return {
+      ok: false,
+      message: probe.message,
+      route: route.name,
+      ...(health.details === undefined
+        ? {}
+        : { details: { ...health.details, liveInference: probe.status } }),
+      liveInference: { checked: probe.checked, status: probe.status },
+    };
+  }
+
+  async #runLiveProbe(
+    adapterProbe: NonNullable<WorkerAdapter['probe']>,
+    route: ReturnType<typeof resolveRoute>,
+    outerSignal: AbortSignal | undefined
+  ): Promise<LiveProbeOutcome> {
+    if (outerSignal?.aborted) {
+      return {
+        checked: false,
+        status: 'aborted',
+        message: `Live inference probe aborted: ${abortError(outerSignal).message}`,
+      };
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    let resolveCancellation!: (outcome: { kind: 'timeout' | 'aborted' }) => void;
+    const cancellation = new Promise<{ kind: 'timeout' | 'aborted' }>((resolve) => {
+      resolveCancellation = resolve;
+    });
+    const onAbort = () => {
+      controller.abort(abortError(outerSignal as AbortSignal));
+      resolveCancellation({ kind: 'aborted' });
+    };
+    outerSignal?.addEventListener('abort', onAbort, { once: true });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error(`Live inference probe timed out after ${this.#diagnosticTimeoutMs}ms`));
+      resolveCancellation({ kind: 'timeout' });
+    }, this.#diagnosticTimeoutMs);
+
+    const probe = Promise.resolve()
+      .then(() => adapterProbe({ route, signal: controller.signal }))
+      .then(
+        () => ({ kind: 'completed' as const }),
+        (error: unknown) => ({ kind: 'failed' as const, error })
+      );
+
+    try {
+      const outcome = await Promise.race([probe, cancellation]);
+      if (outcome.kind === 'timeout' || timedOut) {
+        // A supported adapter must settle after abort. Waiting here keeps process and temporary
+        // workspace cleanup inside the diagnostic lifecycle instead of detaching it.
+        await probe;
+        return {
+          checked: true,
+          status: 'timeout',
+          message: `Live inference probe timed out after ${this.#diagnosticTimeoutMs}ms`,
+        };
+      }
+      if (outcome.kind === 'aborted' || outerSignal?.aborted) {
+        await probe;
+        const reason = outerSignal?.aborted ? abortError(outerSignal) : abortError(controller.signal);
+        return {
+          checked: true,
+          status: 'aborted',
+          message: `Live inference probe aborted: ${reason.message}`,
+        };
+      }
+      if (outcome.kind === 'failed') {
+        return {
+          checked: true,
+          status: 'failed',
+          message: `Live inference probe failed: ${errorDetails(outcome.error).message}`,
+        };
+      }
+      return { checked: true, status: 'succeeded', message: '' };
+    } finally {
+      clearTimeout(timeout);
+      outerSignal?.removeEventListener('abort', onAbort);
+      // The adapter receives the abort signal and owns its process/resource cleanup.
+    }
   }
 
   async get(id: string): Promise<JobRecord | undefined> {

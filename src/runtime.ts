@@ -7,7 +7,11 @@ import type {
   OrchestrationRequest,
   StartOrchestrationResult,
 } from './orchestration-types.js';
-import { Orchestrator, type JobEventListener } from './orchestrator.js';
+import {
+  Orchestrator,
+  type JobEventListener,
+  type RouteDiagnosticOptions,
+} from './orchestrator.js';
 import { FileJobStore } from './store.js';
 import type {
   JobArtifactList,
@@ -15,8 +19,8 @@ import type {
   JobArtifactVerificationReport,
   JobRecord,
   JobRequest,
+  RouteDiagnostic,
   StartJobResult,
-  WorkerHealth,
 } from './types.js';
 
 export interface CreateRuntimeOptions {
@@ -34,8 +38,8 @@ export class AgentKnotRuntime {
     return this.jobs.routes();
   }
 
-  doctor(routeName?: string): Promise<WorkerHealth & { route: string }> {
-    return this.jobs.doctor(routeName);
+  doctor(routeName?: string, options?: RouteDiagnosticOptions): Promise<RouteDiagnostic> {
+    return this.jobs.doctor(routeName, options);
   }
 
   get(id: string): Promise<JobRecord | undefined> {

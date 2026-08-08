@@ -119,3 +119,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0005](./0005-concurrent-job-event-persistence.md) | Incident | Resolved | Serialize concurrent job event persistence |
 | [0006](./0006-read-only-artifact-inspection.md) | Decision | Accepted | Keep artifact inspection read-only and identity-bound |
 | [0007](./0007-non-overlapping-task-pools.md) | Decision | Accepted | Prefer non-overlapping task pools over fixed batches |
+| [0008](./0008-route-diagnostics-false-ready.md) | Incident | Resolved | Separate configuration readiness from live Luna inference |

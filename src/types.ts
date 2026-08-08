@@ -181,10 +181,39 @@ export interface WorkerRunResult {
   metadata?: Record<string, unknown>;
 }
 
+export interface WorkerProbeInput {
+  route: ResolvedRoute;
+  signal: AbortSignal;
+}
+
+export interface WorkerProbeResult {
+  output: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface WorkerHealth {
   ok: boolean;
   message: string;
   details?: Record<string, unknown>;
+}
+
+export const ROUTE_DIAGNOSTIC_LIVE_STATUSES = [
+  'not-checked',
+  'succeeded',
+  'failed',
+  'unsupported',
+  'timeout',
+  'aborted',
+] as const;
+
+export type RouteDiagnosticLiveStatus = (typeof ROUTE_DIAGNOSTIC_LIVE_STATUSES)[number];
+
+export interface RouteDiagnostic extends WorkerHealth {
+  route: string;
+  liveInference: {
+    checked: boolean;
+    status: RouteDiagnosticLiveStatus;
+  };
 }
 
 export type WorkerEventSink = (
@@ -195,6 +224,11 @@ export type WorkerEventSink = (
 export interface WorkerAdapter {
   readonly name: string;
   doctor(route: ResolvedRoute): Promise<WorkerHealth>;
+  /**
+   * Optional one-shot live inference capability used by route diagnostics only.
+   * Implementations must honor signal and settle after abort.
+   */
+  probe?(input: WorkerProbeInput): Promise<WorkerProbeResult>;
   run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult>;
 }
 

@@ -29,7 +29,7 @@ Usage:
   agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME]
   agentknot orchestrate [prompt...] [--workspace PATH] [--source NAME] [--delegation MODE]
   agentknot serve [--host HOST] [--port PORT]
-  agentknot doctor [--route NAME]
+  agentknot doctor [--route NAME] [--live]
   agentknot routes [--json]
   agentknot jobs [--json]
   agentknot show JOB_ID
@@ -59,6 +59,10 @@ Orchestrate options:
   --delegation MODE   inherit, never, suggest, or force (default: inherit)
   --suggest           Alias for --delegation suggest
   --json              Print the terminal orchestration record as JSON
+
+Doctor options:
+  --route NAME        Exact configured route to diagnose
+  --live              Perform one real inference probe; no fallback
 `;
 }
 
@@ -172,8 +176,9 @@ async function main(argv: string[]): Promise<void> {
 
   if (command === 'doctor') {
     const route = takeOption(args, '--route');
+    const live = takeFlag(args, '--live');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-    const result = await runtime.doctor(route);
+    const result = await runtime.doctor(route, { live });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     if (!result.ok) process.exitCode = 1;
     return;

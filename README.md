@@ -27,7 +27,7 @@ This is an MVP. It already provides:
 - optional vendor-neutral Git worktree isolation with per-attempt patch artifacts;
 - read-only artifact listing, integrity/base verification, and bounded patch preview;
 - normalized text, tool, retry, lifecycle, artifact, and stderr events;
-- configuration validation, route diagnostics, and HTTP service liveness.
+- configuration validation, explicit configuration-only and opt-in live route diagnostics, and HTTP service liveness.
 
 Controllers still choose whether a request enters the leaf Job API or the orchestration API. AgentKnot cannot intercept arbitrary native Codex or Claude chats; a thin controller integration must call `agentknot orchestrate`, `POST /v1/orchestrations`, or `runtime.orchestrate()`.
 
@@ -100,6 +100,14 @@ export OPENCODE_API_KEY="..."
 ```
 
 Alternatively, start `pi`, run `/login`, and store the key under the `opencode-go` provider in Pi's credential file. AgentKnot accepts either Pi's auth file or the configured environment variable and never copies the key into a Job record.
+
+Route diagnostics have two deliberately different modes. `doctor` is the fast configuration, credential, and runtime check; its successful result explicitly says that live inference was not checked, so it does not prove that the provider accepted a request from the current network path. The Stage 1 live check is opt-in and remains route-neutral. For this repository, selecting `luna` resolves Pi, `opencode-go`, `gpt-5.6-luna`, and `thinkingLevel: "max"`:
+
+```bash
+node dist/src/cli.js doctor --route luna --live
+```
+
+`doctor --live` performs one bounded real inference probe with the exact selected worker, provider, model, and thinking level. Its 30-second control-plane timer triggers cooperative abort, and the supported Pi adapter supervises its child process, waits for cleanup, and removes an isolated temporary diagnostic workspace before returning. The command does not fall back to another route, returns the provider error and a nonzero exit status when inference is unavailable, and reports an honest unsupported result when the selected adapter has no probe capability. It creates no Job or artifact record, and normal `run` or orchestration execution does not perform an extra probe. A successful probe is point-in-time evidence for that exact route, not a guarantee that later jobs will succeed.
 
 Check the route, then run it against any target repository:
 

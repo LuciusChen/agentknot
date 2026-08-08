@@ -12,6 +12,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - `off`, `suggest`, and `auto` delegation configuration with per-request `inherit`, `never`, `suggest`, and `force` controls.
 - Git worktree patch artifacts that include tracked, non-ignored untracked, binary, and worker-committed changes.
 - Read-only artifact listing, SHA-256/size/base-commit verification, and bounded integrity-gated patch preview through TypeScript, CLI, and HTTP.
+- Opt-in `doctor --live --route NAME` diagnostics that perform one bounded real inference through the exact resolved route, without Job or artifact persistence; the repository promotion check covers Pi/OpenCode Go/Luna at `thinkingLevel: "max"`.
 - Product requirements, technical specification, evidence-gated roadmap, and decision/postmortem records.
 
 ### Changed
@@ -22,7 +23,8 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Planner instructions reserve parallel execution for independently verifiable subtasks without execution-order dependencies or overlapping expected write scopes; the scheduler starts only the available tasks up to the concurrency cap and refills slots as workers complete.
 - Controller metadata now follows one recursive JSON-compatible object contract across TypeScript and HTTP leaf/orchestration APIs.
 - Background Pi workers disable ambient skill discovery by default while retaining repository instructions.
-- The repository Luna route now uses Pi's `max` thinking level for both planning and delegated worker execution.
+- The repository Luna route now uses Pi's `max` thinking level for planning, delegated worker execution, and live diagnostic probes that select that route.
+- Configuration-only `doctor` output explicitly says that live inference was not checked; `doctor --live` uses a 30-second control-plane timeout, reports provider errors with a nonzero exit status, reports unsupported adapters honestly, never falls back to another route, and does not add a preflight to normal jobs.
 
 ### Fixed
 

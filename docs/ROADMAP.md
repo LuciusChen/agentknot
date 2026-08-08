@@ -102,8 +102,17 @@ Still outside this slice:
 
 - Add malformed JSONL, split UTF-8/frame, premature-exit, missing-settlement, timeout, and cancellation fixtures for Pi RPC.
 - Specify the requirement for adapters to settle after abort and supervise their child processes.
-- Ensure `doctor` evaluates the same effective environment and route inputs that `run` uses.
+- Ensure configuration-only `doctor` evaluates the same effective environment and route inputs that `run` uses.
 - Distinguish HTTP liveness from route readiness in naming and documentation.
+
+### Route-diagnostics slice admitted into Stage 1
+
+Stage 1 keeps route diagnostics fast by default while adding one explicit live-inference path for the observed false-ready failure mode.
+
+- Configuration-only `doctor` checks configuration, credentials, and runtime availability and explicitly says that live inference was not checked.
+- Opt-in `doctor --live --route NAME` performs one bounded real inference through the exact selected worker, provider, model, and thinking level; current real promotion evidence covers the repository Luna/max route.
+- The control plane uses a 30-second timeout, reports provider errors with failure status, and reports adapters without probe support as unsupported rather than ready.
+- The probe never falls back or selects another route, creates no Job or artifact records, and does not add a probe before normal job or orchestration execution.
 
 ### Artifact handoff work
 
@@ -125,6 +134,7 @@ Still outside this slice:
 - Every orchestration persists a valid plan before dispatch, never exceeds its child/depth/concurrency bounds, and leaves artifact integration upstream.
 - Observer and callback failures cannot change a correct execution result.
 - A supported adapter cannot leave a timed-out or cancelled job indefinitely active.
+- Configuration-only doctor output distinguishes runtime readiness from live inference; the opt-in probe is exact-route, bounded, honest about provider errors and unsupported adapters, and leaves no Job or artifact evidence.
 - Record and event sizes remain within documented limits under stress fixtures.
 - Every artifact is checksum-valid and applies against its recorded base in the supported Git matrix.
 - No source mutation, child-process leak, managed-worktree leak, duplicate/gapped event sequence, or cross-attempt state leak appears in the soak suite.

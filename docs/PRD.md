@@ -100,13 +100,15 @@ Version 0.0.1 currently implements:
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
 - read-only artifact listing, integrity/base verification, and bounded patch preview through TypeScript, CLI, and HTTP;
-- route diagnostics and configuration validation.
+- configuration validation and explicit configuration-only and opt-in live route diagnostics.
 - controller-neutral orchestration through CLI, HTTP, and TypeScript;
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
 - strict planner assessments followed by deterministic task-kind policy;
 - immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
 - bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with four active slots, and a configuration ceiling of six for each with concurrency never exceeding the child count;
 - fail-without-resume startup reconciliation for stale jobs and orchestration records.
+
+Route diagnostics have two explicit modes. The default `doctor` command is a fast configuration, credential, and runtime check and must say that live inference was not checked. The opt-in `doctor --live` path performs one bounded real inference through the exact selected worker, provider, model, and thinking level; its 30-second control-plane timer triggers cooperative abort, and a supported adapter must settle after abort and clean up its resources. It reports provider errors with failure status and unsupported adapters honestly, does not fall back or select another route, does not create Job or artifact records, and does not add a probe before normal jobs or orchestrations.
 
 The current file stores provide persistent audit snapshots and deterministically mark stale nonterminal jobs or orchestrations failed on startup when their recorded process is absent. They do not provide resumable execution, a restartable queue, journaling, multi-process coordination, PID-reuse protection, or automatic cleanup of worktrees left by a hard process crash.
 
@@ -149,6 +151,7 @@ The product remains on course when all of the following are true:
 
 - changing `source` from Codex to Claude changes audit metadata, not execution behavior;
 - changing provider or model is a route change unless a genuinely new worker runtime is required;
+- configuration-only `doctor` explicitly says live inference was not checked, while `doctor --live` performs only the bounded exact selected-route probe and leaves no Job or artifact record;
 - the same Job API works through CLI, HTTP, and TypeScript entry points;
 - the same orchestration policy and record shape work through CLI, HTTP, and TypeScript without controller-name branches;
 - every automatically dispatched child is admitted through the ordinary Job API only after its plan is persisted;
