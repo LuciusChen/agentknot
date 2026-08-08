@@ -54,6 +54,7 @@ The controller, worker, provider, and model are separate concepts:
 | Worktree creation, capture, cleanup | workspace manager | worker adapter |
 | Persistent snapshots | `JobStore` | live event listeners |
 | HTTP transport and active-request map | HTTP server | worker protocols |
+| Artifact listing, verification, and preview | orchestrator/workspace manager | worker adapter or execution loop |
 | Artifact acceptance/application | external controller or human | AgentKnot execution loop |
 
 Moving a responsibility across this table requires a SPEC update and a decision record before implementation.
@@ -210,6 +211,8 @@ A succeeded job has `result`, terminal timestamps, resolved route evidence, atte
 
 A failed or cancelled job has `error`, terminal timestamps, attempt count, ordered events, and any artifacts captured from failed attempts.
 
+Artifact inspection is a read-only orchestrator/workspace operation. The TypeScript API exposes `listArtifacts(jobId)`, `verifyArtifacts(jobId)`, and `previewArtifact(jobId, attempt)` with the language-neutral `JobArtifactList`, `JobArtifactVerificationReport`, and `JobArtifactPreview` payloads. Verification resolves only artifacts recorded on the selected job, validates their managed storage paths, recomputes size and SHA-256, and compares each recorded base commit with the current source repository `HEAD`. Missing, unreadable, path-mismatched, tampered, unsupported, or base-mismatched evidence returns stable issue codes and `valid: false`. Preview returns at most 1 MiB of UTF-8 Git patch text; content is `null` when file size or SHA-256 does not match, while a base mismatch is reported without hiding otherwise intact diagnostic content. Inspection never applies patches or mutates, commits, merges, or pushes the source repository.
+
 Cancellation is cooperative at the `WorkerAdapter` boundary. The orchestrator aborts the attempt signal and rejects a normal worker result received after abort. A custom adapter that never settles and ignores the signal can currently prevent completion indefinitely. The Pi adapter owns termination of the Pi child process.
 
 A timeout aborts the same attempt signal. It is not a universal hard kill independent of adapter behavior.
@@ -239,15 +242,15 @@ queued -> planning -> upstream/suggested -> succeeded
 
 Global modes are `off`, `suggest`, and `auto`. Omitted delegation configuration resolves to `off`. Configured `suggest` or `auto` requires `workspaceIsolation.mode: "git-worktree"`. The planner and every child are ordinary leaf jobs, so route snapshots, isolation, retries, events, artifacts, and cleanup use the existing job contract.
 
-The planner is a read-only model route and returns JSON only. AgentKnot rejects markdown fences, commentary, missing or unknown fields, invalid enums, oversize content, inconsistent recommendations, and plans above the configured child cap. The deterministic composer applies `delegate` and `keepUpstream` task-kind sets, assigns stable depth-one subtask IDs, captures exact execution prompts and routes, and hashes the plan. An over-cap plan is rejected rather than silently truncated.
+The planner is a read-only model route and returns JSON only. AgentKnot rejects markdown fences, commentary, missing or unknown fields, invalid enums, oversize content, inconsistent recommendations, and plans above the configured child cap. Planner instructions define `parallelizable: true` to require independently verifiable subtasks with no execution-order dependency and non-overlapping expected write scopes; each parallel subtask must state a bounded file/component scope and non-goals. This is a planning contract, not proof of actual patch disjointness. The deterministic composer applies `delegate` and `keepUpstream` task-kind sets, assigns stable depth-one subtask IDs, captures exact execution prompts and routes, and hashes the plan. An over-cap plan is rejected rather than silently truncated.
 
-When delegation dispatch limits are omitted, the product defaults to `maxChildren: 2` and `maxConcurrency: 2`; the configuration parser permits values from one through six, and `maxConcurrency` cannot exceed `maxChildren`. This repository's dogfood configuration explicitly sets both values to four, so that setting is not the product default.
+When delegation dispatch limits are omitted, the product defaults to `maxChildren: 2` and `maxConcurrency: 2`; the configuration parser permits values from one through six, and `maxConcurrency` cannot exceed `maxChildren`. This repository's dogfood configuration uses `maxChildren: 6` and `maxConcurrency: 4`, so those settings are not product defaults.
 
 The parent plan and `orchestration.planned` event are persisted before the first child starts. `suggest` persists the same evidence without dispatch. With fallback `upstream`, planner failure returns a persisted upstream decision and error evidence; with fallback `fail`, planner failure makes the parent terminally failed before a dispatchable plan is persisted. A successful self-orchestration demonstrates only that run's normal planner-to-plan-to-child path; it is not, by itself, evidence for planner fail-fast behavior under failure, timeout, cancellation, or semaphore wait.
 
 ### Dispatch and cancellation
 
-Planner and child jobs are launched through `Orchestrator.start()`. One shared semaphore caps all active planner and child worker executions across all parent orchestrations in one `OrchestrationService`; this is process-local and not a queue or multi-process admission control. A parent whose validated assessment has `parallelizable: false` receives an effective child concurrency of one even when the configured global cap is higher. If persistence of the parent planner-start or child-start evidence fails after leaf admission, AgentKnot cancels and awaits that admitted job before failing the parent. `maxDepth` is exactly one in v1, and the orchestration engine does not recursively submit its own children. Worker prompts prohibit recursive delegation, commit, push, merge, or artifact application. Because the local HTTP API is unauthenticated, v1 cannot prevent a worker with host access from independently invoking a new orchestration; depth one is an engine invariant, not a hostile-worker security boundary.
+Planner and child jobs are launched through `Orchestrator.start()`. One shared semaphore caps all active planner and child worker executions across all parent orchestrations in one `OrchestrationService`; this is process-local and not a restartable or multi-process queue. For a parallel parent, the dispatcher fills at most `maxConcurrency` slots from the persisted subtask pool, starts fewer workers when fewer tasks exist, and immediately admits the next pending subtask when a child settles. A parent whose validated assessment has `parallelizable: false` receives an effective child concurrency of one even when the configured global cap is higher. If persistence of the parent planner-start or child-start evidence fails after leaf admission, AgentKnot cancels and awaits that admitted job before failing the parent. `maxDepth` is exactly one in v1, and the orchestration engine does not recursively submit its own children. Worker prompts prohibit recursive delegation, commit, push, merge, or artifact application. Because the local HTTP API is unauthenticated, v1 cannot prevent a worker with host access from independently invoking a new orchestration; depth one is an engine invariant, not a hostile-worker security boundary.
 
 Cancellation first persists `cancelRequestedAt` and `orchestration.cancel.requested`, then aborts the planner or active children and prevents later children from launching. Cancellation is process-local and cooperative through the underlying adapter. The parent completes only after launched child jobs settle. One or more non-succeeded children make a delegated parent failed; AgentKnot does not integrate their patch artifacts.
 
@@ -294,6 +297,9 @@ GET  /v1/jobs
 GET  /v1/jobs/:id
 GET  /v1/jobs/:id/events
 POST /v1/jobs/:id/cancel
+GET  /v1/jobs/:id/artifacts
+GET  /v1/jobs/:id/artifacts/verify
+GET  /v1/jobs/:id/artifacts/:attempt/preview
 GET  /v1/delegation
 POST /v1/orchestrations
 GET  /v1/orchestrations

@@ -9,7 +9,15 @@ import type {
 } from './orchestration-types.js';
 import { Orchestrator, type JobEventListener } from './orchestrator.js';
 import { FileJobStore } from './store.js';
-import type { JobRecord, JobRequest, StartJobResult, WorkerHealth } from './types.js';
+import type {
+  JobArtifactList,
+  JobArtifactPreview,
+  JobArtifactVerificationReport,
+  JobRecord,
+  JobRequest,
+  StartJobResult,
+  WorkerHealth,
+} from './types.js';
 
 export interface CreateRuntimeOptions {
   configPath?: string;
@@ -36,6 +44,18 @@ export class AgentKnotRuntime {
 
   list(): Promise<JobRecord[]> {
     return this.jobs.list();
+  }
+
+  listArtifacts(id: string): Promise<JobArtifactList | undefined> {
+    return this.jobs.listArtifacts(id);
+  }
+
+  verifyArtifacts(id: string): Promise<JobArtifactVerificationReport | undefined> {
+    return this.jobs.verifyArtifacts(id);
+  }
+
+  previewArtifact(id: string, attempt: number): Promise<JobArtifactPreview | undefined> {
+    return this.jobs.previewArtifact(id, attempt);
   }
 
   run(request: JobRequest): Promise<JobRecord> {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -99,6 +99,109 @@ test('worktree jobs leave the source unchanged and capture binary/untracked patc
   await git(paths.root, 'apply', '--check', artifactPath);
   assert.equal(job.events.filter((event) => event.type === 'job.artifact').length, 1);
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+});
+
+test('artifact inspection reports integrity and base evidence without mutating the source', async () => {
+  const paths = await repository();
+  const adapter = new (class extends TestAdapter {
+    async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+      await writeFile(path.join(input.workspace, 'inspect-me.txt'), 'inspectable\n');
+      return { output: 'ok' };
+    }
+  })();
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory),
+    store: new MemoryJobStore(),
+    adapters: new Map([['test', adapter]]),
+  });
+
+  const job = await orchestrator.run({ prompt: 'inspect', workspace: paths.root });
+  const artifact = job.artifacts?.[0];
+  assert.ok(artifact);
+  const originalPatch = await readFile(artifact.path);
+  const sourceHead = (await git(paths.root, 'rev-parse', 'HEAD')).trim();
+  const sourceStatus = await status(paths.root);
+
+  const listed = await orchestrator.listArtifacts(job.id);
+  const verified = await orchestrator.verifyArtifacts(job.id);
+  const preview = await orchestrator.previewArtifact(job.id, 1);
+  assert.deepEqual(listed?.artifacts, [artifact]);
+  assert.equal(verified?.valid, true);
+  assert.equal(verified?.artifacts[0]?.file.exists, true);
+  assert.equal(verified?.artifacts[0]?.file.sizeMatches, true);
+  assert.equal(verified?.artifacts[0]?.file.sha256Matches, true);
+  assert.equal(verified?.artifacts[0]?.source.headMatchesBase, true);
+  assert.deepEqual(verified?.artifacts[0]?.issues, []);
+  assert.match(preview?.content ?? '', /inspect-me\.txt/);
+  assert.equal(preview?.format, 'git-patch');
+  assert.equal(preview?.encoding, 'utf-8');
+  assert.equal(preview?.truncated, false);
+  assert.equal(preview?.verification.valid, true);
+  assert.equal((await git(paths.root, 'rev-parse', 'HEAD')).trim(), sourceHead);
+  assert.equal(await status(paths.root), sourceStatus);
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+
+  await writeFile(artifact.path, Buffer.concat([originalPatch, Buffer.from('\n# tampered\n')]));
+  const tampered = await orchestrator.verifyArtifacts(job.id);
+  const withheld = await orchestrator.previewArtifact(job.id, 1);
+  assert.equal(tampered?.valid, false);
+  assert.deepEqual(tampered?.artifacts[0]?.issues, [
+    'artifact-size-mismatch',
+    'artifact-sha256-mismatch',
+  ]);
+  assert.equal(withheld?.content, null);
+  assert.equal(withheld?.verification.file.sha256Matches, false);
+
+  await writeFile(artifact.path, originalPatch);
+  await writeFile(path.join(paths.root, 'source-change.txt'), 'source\n');
+  await git(paths.root, 'add', '--', 'source-change.txt');
+  await git(paths.root, 'commit', '-qm', 'source changed after artifact');
+  const changedHead = (await git(paths.root, 'rev-parse', 'HEAD')).trim();
+  const changedStatus = await status(paths.root);
+  const mismatched = await orchestrator.verifyArtifacts(job.id);
+  const diagnosticPreview = await orchestrator.previewArtifact(job.id, 1);
+  assert.equal(mismatched?.valid, false);
+  assert.deepEqual(mismatched?.artifacts[0]?.issues, ['base-commit-mismatch']);
+  assert.match(diagnosticPreview?.content ?? '', /inspect-me\.txt/);
+  assert.equal(diagnosticPreview?.verification.valid, false);
+  assert.equal((await git(paths.root, 'rev-parse', 'HEAD')).trim(), changedHead);
+  assert.equal(await status(paths.root), changedStatus);
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+});
+
+test('artifact inspection reports missing managed files without exposing preview content', async () => {
+  const paths = await repository();
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory),
+    store: new MemoryJobStore(),
+    adapters: new Map([
+      [
+        'test',
+        new (class extends TestAdapter {
+          async run(_input: WorkerRunInput): Promise<WorkerRunResult> {
+            return { output: 'no changes' };
+          }
+        })(),
+      ],
+    ]),
+  });
+  const job = await orchestrator.run({ prompt: 'missing artifact', workspace: paths.root });
+  const artifact = job.artifacts?.[0];
+  assert.ok(artifact);
+  await rm(artifact.path);
+
+  const verification = await orchestrator.verifyArtifacts(job.id);
+  const preview = await orchestrator.previewArtifact(job.id, 1);
+  assert.equal(verification?.valid, false);
+  assert.deepEqual(verification?.artifacts[0]?.issues, ['artifact-file-missing']);
+  assert.equal(preview?.content, null);
+  assert.equal(preview?.verification.file.exists, false);
+
+  await symlink(path.join(paths.root, 'README.md'), artifact.path);
+  const linked = await orchestrator.verifyArtifacts(job.id);
+  const linkedPreview = await orchestrator.previewArtifact(job.id, 1);
+  assert.deepEqual(linked?.artifacts[0]?.issues, ['artifact-file-unreadable']);
+  assert.equal(linkedPreview?.content, null);
 });
 
 test('patches include tracked files committed after the job base commit', async () => {

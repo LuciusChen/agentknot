@@ -1,14 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
 import type { AgentKnotConfig, WorkspaceIsolationConfig } from './config.js';
-import type { JobArtifact } from './types.js';
+import type {
+  JobArtifact,
+  JobArtifactVerification,
+  JobArtifactVerificationIssue,
+} from './types.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 128 * 1024 * 1024;
+export const MAX_ARTIFACT_PREVIEW_BYTES = 1024 * 1024;
 const MANAGED_WORKTREE_NAME = /^job-job_[A-Za-z0-9_-]+-attempt-[1-9][0-9]*-[0-9a-f-]+$/;
 
 export interface WorkspaceInspection {
@@ -28,6 +33,11 @@ export interface IsolatedWorkspace {
 interface GitOutput {
   stdout: Buffer | string;
   stderr: Buffer | string;
+}
+
+interface InspectedArtifact {
+  verification: JobArtifactVerification;
+  bytes: Buffer | null;
 }
 
 function outputText(value: Buffer | string): string {
@@ -75,11 +85,9 @@ export class WorkspaceIsolationManager {
     if (this.#config.mode === 'none') {
       throw new Error('Git workspace inspection is unavailable in compatibility mode');
     }
-    const repository = path.resolve(
-      outputText((await git(['rev-parse', '--show-toplevel'], workspace)).stdout).trim()
-    );
+    const repository = await this.#repository(workspace);
     const prefix = outputText((await git(['rev-parse', '--show-prefix'], workspace)).stdout).trim();
-    const baseCommit = outputText((await git(['rev-parse', '--verify', 'HEAD^{commit}'], repository)).stdout).trim();
+    const baseCommit = await this.#currentHead(repository);
     const status = outputText(
       (await git(['status', '--porcelain=v1', '--untracked-files=all'], repository)).stdout
     );
@@ -91,6 +99,132 @@ export class WorkspaceIsolationManager {
     const relativeSubdirectory = prefix === '' ? '' : prefix.replace(/\/$/, '').split('/').join(path.sep);
     const sourceWorkspace = path.resolve(workspace);
     return { sourceWorkspace, repository, relativeSubdirectory, baseCommit };
+  }
+
+  async verifyArtifacts(
+    jobId: string,
+    workspace: string,
+    artifacts: JobArtifact[]
+  ): Promise<JobArtifactVerification[]> {
+    const source = await this.#sourceHead(workspace);
+    return Promise.all(
+      artifacts.map(async (artifact) => (await this.#inspectArtifact(jobId, artifact, source)).verification)
+    );
+  }
+
+  async previewArtifact(
+    jobId: string,
+    workspace: string,
+    artifact: JobArtifact
+  ): Promise<{
+    content: string | null;
+    truncated: boolean;
+    maxBytes: number;
+    verification: JobArtifactVerification;
+  }> {
+    const source = await this.#sourceHead(workspace);
+    const inspected = await this.#inspectArtifact(jobId, artifact, source);
+    const trustedBytes =
+      inspected.bytes !== null &&
+      inspected.verification.file.sizeMatches &&
+      inspected.verification.file.sha256Matches
+        ? inspected.bytes
+        : null;
+    return {
+      content:
+        trustedBytes === null
+          ? null
+          : trustedBytes.subarray(0, MAX_ARTIFACT_PREVIEW_BYTES).toString('utf8'),
+      truncated: trustedBytes !== null && trustedBytes.byteLength > MAX_ARTIFACT_PREVIEW_BYTES,
+      maxBytes: MAX_ARTIFACT_PREVIEW_BYTES,
+      verification: inspected.verification,
+    };
+  }
+
+  async #inspectArtifact(
+    jobId: string,
+    artifact: JobArtifact,
+    source: { repositoryAvailable: boolean; actualHead: string | null }
+  ): Promise<InspectedArtifact> {
+    const issues: JobArtifactVerificationIssue[] = [];
+    const expectedPath = path.resolve(
+      this.#artifactDirectory,
+      jobId,
+      `attempt-${artifact.attempt}.patch`
+    );
+    const managedPathMatches = path.resolve(artifact.path) === expectedPath;
+    if (!managedPathMatches) issues.push('artifact-path-mismatch');
+    if (artifact.kind !== 'git-patch') issues.push('artifact-kind-unsupported');
+
+    let bytes: Buffer | null = null;
+    let exists = false;
+    if (managedPathMatches && artifact.kind === 'git-patch') {
+      try {
+        exists = true;
+        const artifactStat = await lstat(expectedPath);
+        if (!artifactStat.isFile()) {
+          issues.push('artifact-file-unreadable');
+        } else {
+          bytes = await readFile(expectedPath);
+        }
+      } catch (error) {
+        exists = (error as NodeJS.ErrnoException).code !== 'ENOENT';
+        const code = (error as NodeJS.ErrnoException).code;
+        issues.push(code === 'ENOENT' ? 'artifact-file-missing' : 'artifact-file-unreadable');
+      }
+    }
+
+    const actualSize = bytes?.byteLength ?? null;
+    const actualSha256 = bytes === null ? null : createHash('sha256').update(bytes).digest('hex');
+    const sizeMatches = actualSize !== null && actualSize === artifact.size;
+    const sha256Matches = actualSha256 !== null && actualSha256 === artifact.sha256;
+    if (bytes !== null && !sizeMatches) issues.push('artifact-size-mismatch');
+    if (bytes !== null && !sha256Matches) issues.push('artifact-sha256-mismatch');
+    if (!source.repositoryAvailable) issues.push('source-repository-unavailable');
+    const headMatchesBase = source.actualHead !== null && source.actualHead === artifact.baseCommit;
+    if (source.repositoryAvailable && !headMatchesBase) issues.push('base-commit-mismatch');
+
+    const verification: JobArtifactVerification = {
+      artifact: structuredClone(artifact),
+      file: {
+        exists,
+        expectedSize: artifact.size,
+        actualSize,
+        sizeMatches,
+        expectedSha256: artifact.sha256,
+        actualSha256,
+        sha256Matches,
+      },
+      source: {
+        repositoryAvailable: source.repositoryAvailable,
+        expectedBaseCommit: artifact.baseCommit,
+        actualHead: source.actualHead,
+        headMatchesBase,
+      },
+      issues,
+      valid: issues.length === 0,
+    };
+    return { verification, bytes };
+  }
+
+  async #sourceHead(
+    workspace: string
+  ): Promise<{ repositoryAvailable: boolean; actualHead: string | null }> {
+    try {
+      const repository = await this.#repository(workspace);
+      const actualHead = await this.#currentHead(repository);
+      return { repositoryAvailable: actualHead !== '', actualHead: actualHead || null };
+    } catch {
+      return { repositoryAvailable: false, actualHead: null };
+    }
+  }
+
+  async #repository(workspace: string): Promise<string> {
+    return path.resolve(outputText((await git(['rev-parse', '--show-toplevel'], workspace)).stdout).trim());
+  }
+
+  async #currentHead(repository: string): Promise<string> {
+    return outputText((await git(['rev-parse', '--verify', 'HEAD^{commit}'], repository)).stdout).trim();
   }
 
   async create(

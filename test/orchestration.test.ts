@@ -217,7 +217,7 @@ const assessment: TaskAssessment = {
   ],
 };
 
-function testConfig(maxConcurrency = 1, workerMaxAttempts = 1): AgentKnotConfig {
+function testConfig(maxConcurrency = 1, workerMaxAttempts = 1, maxChildren = 2): AgentKnotConfig {
   return {
     version: 1,
     defaultRoute: 'worker',
@@ -240,7 +240,7 @@ function testConfig(maxConcurrency = 1, workerMaxAttempts = 1): AgentKnotConfig 
     delegation: {
       mode: 'auto',
       planner: { strategy: 'hybrid', route: 'planner' },
-      dispatch: { defaultRoute: 'worker', maxChildren: 2, maxDepth: 1, maxConcurrency },
+      dispatch: { defaultRoute: 'worker', maxChildren, maxDepth: 1, maxConcurrency },
       policy: {
         delegate: ['test-gap-analysis', 'documentation'],
         keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
@@ -250,13 +250,18 @@ function testConfig(maxConcurrency = 1, workerMaxAttempts = 1): AgentKnotConfig 
   };
 }
 
-function createServices(adapter: WorkerAdapter, maxConcurrency = 1, workerMaxAttempts = 1): {
+function createServices(
+  adapter: WorkerAdapter,
+  maxConcurrency = 1,
+  workerMaxAttempts = 1,
+  maxChildren = 2
+): {
   jobs: Orchestrator;
   jobStore: MemoryJobStore;
   orchestrations: OrchestrationService;
   orchestrationStore: MemoryOrchestrationStore;
 } {
-  const config = testConfig(maxConcurrency, workerMaxAttempts);
+  const config = testConfig(maxConcurrency, workerMaxAttempts, maxChildren);
   const jobStore = new MemoryJobStore();
   const jobs = new Orchestrator({
     config,
@@ -481,7 +486,7 @@ test('OrchestrationService enforces its concurrency cap across parent orchestrat
 test('OrchestrationService runs independent child jobs concurrently when the cap allows it', async () => {
   const workspace = await createGitWorkspace('agentknot-orchestration-parallel-');
   const adapter = new PlannerAndWorkerAdapter(assessment, 250);
-  const { orchestrations } = createServices(adapter, 2);
+  const { orchestrations } = createServices(adapter, 4, 1, 6);
 
   const record = await orchestrations.run({
     prompt: 'Review test gaps and documentation in parallel.',
@@ -493,6 +498,48 @@ test('OrchestrationService runs independent child jobs concurrently when the cap
   assert.equal(adapter.workerRuns, 2);
   assert.equal(adapter.peakWorkers, 2);
   assert.equal(adapter.peakRuns, 2);
+});
+
+test('OrchestrationService refills bounded worker slots from a larger task pool', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-task-pool-');
+  const pooledAssessment: TaskAssessment = {
+    ...assessment,
+    taskKinds: ['test-gap-analysis'],
+    subtasks: Array.from({ length: 6 }, (_, index) => ({
+      title: `Independent part ${index + 1}`,
+      kind: 'test-gap-analysis',
+      prompt: `Implement independent part ${index + 1} within its exclusive file scope.`,
+      acceptanceCriteria: [`Part ${index + 1} is independently verified`],
+    })),
+  };
+  const adapter = new PlannerAndWorkerAdapter(pooledAssessment, 500);
+  const { orchestrations } = createServices(adapter, 4, 1, 6);
+
+  const record = await orchestrations.run({
+    prompt: 'Run six independent scoped tasks through four worker slots.',
+    workspace,
+  });
+
+  assert.equal(record.status, 'succeeded');
+  assert.equal(record.children.length, 6);
+  assert.equal(adapter.workerRuns, 6);
+  assert.equal(adapter.peakWorkers, 4);
+  const firstCompletion = record.events.findIndex(
+    (event) => event.type === 'orchestration.child.completed'
+  );
+  assert.notEqual(firstCompletion, -1);
+  assert.equal(
+    record.events
+      .slice(0, firstCompletion)
+      .filter((event) => event.type === 'orchestration.child.started').length,
+    4
+  );
+  assert.equal(
+    record.events
+      .slice(firstCompletion + 1)
+      .filter((event) => event.type === 'orchestration.child.started').length,
+    2
+  );
 });
 
 test('OrchestrationService serializes children when the assessment marks them non-parallel', async () => {

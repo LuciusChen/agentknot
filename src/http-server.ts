@@ -7,7 +7,13 @@ import type {
   OrchestrationRequest,
   StartOrchestrationResult,
 } from './orchestration-types.js';
-import type { JobRequest, StartJobResult } from './types.js';
+import type {
+  JobArtifactList,
+  JobArtifactPreview,
+  JobArtifactVerificationReport,
+  JobRequest,
+  StartJobResult,
+} from './types.js';
 import type { JobRecord } from './types.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -99,6 +105,9 @@ export interface AgentKnotHttpRuntime {
   routes(): Array<{ name: string; worker: string; provider: string; model: string }>;
   get(id: string): Promise<JobRecord | undefined>;
   list(): Promise<JobRecord[]>;
+  listArtifacts(id: string): Promise<JobArtifactList | undefined>;
+  verifyArtifacts(id: string): Promise<JobArtifactVerificationReport | undefined>;
+  previewArtifact(id: string, attempt: number): Promise<JobArtifactPreview | undefined>;
   start(request: JobRequest): Promise<StartJobResult>;
   delegationPolicy?(): DelegationConfig;
   getOrchestration?(id: string): Promise<OrchestrationRecord | undefined>;
@@ -137,6 +146,44 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
         activeJobs.set(started.job.id, started);
         void started.completion.finally(() => activeJobs.delete(started.job.id));
         sendJson(response, 202, { job: started.job });
+        return;
+      }
+
+      const artifactMatch =
+        /^\/v1\/jobs\/([a-zA-Z0-9_-]+)\/artifacts(?:\/(verify|([1-9][0-9]*)\/preview))?$/.exec(pathname);
+      if (artifactMatch) {
+        const id = artifactMatch[1];
+        const action = artifactMatch[2];
+        if (!id) throw new Error('Missing job id');
+        if (method !== 'GET') {
+          sendJson(response, 405, { error: 'Method not allowed' });
+          return;
+        }
+        if (action === undefined) {
+          const artifacts = await runtime.listArtifacts(id);
+          if (!artifacts) {
+            sendJson(response, 404, { error: 'Job not found' });
+            return;
+          }
+          sendJson(response, 200, artifacts);
+          return;
+        }
+        if (action === 'verify') {
+          const verification = await runtime.verifyArtifacts(id);
+          if (!verification) {
+            sendJson(response, 404, { error: 'Job not found' });
+            return;
+          }
+          sendJson(response, 200, verification);
+          return;
+        }
+        const attempt = Number(artifactMatch[3]);
+        const preview = await runtime.previewArtifact(id, attempt);
+        if (!preview) {
+          sendJson(response, 404, { error: 'Artifact not found' });
+          return;
+        }
+        sendJson(response, 200, preview);
         return;
       }
 

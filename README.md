@@ -25,6 +25,7 @@ This is an MVP. It already provides:
 - durable job and orchestration snapshots with ordered events;
 - timeouts, retries, cancellation, and completion callbacks;
 - optional vendor-neutral Git worktree isolation with per-attempt patch artifacts;
+- read-only artifact listing, integrity/base verification, and bounded patch preview;
 - normalized text, tool, retry, lifecycle, artifact, and stderr events;
 - configuration validation, route diagnostics, and HTTP service liveness.
 
@@ -78,7 +79,7 @@ node dist/src/cli.js orchestrate \
   "Implement the approved feature and verify its public contract"
 ```
 
-The repository configuration dogfoods `mode: "auto"` with Luna as both planner and worker. The product defaults are `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; this repository explicitly sets both to 4 for dogfooding, while configuration permits at most 6 for each and never allows concurrency above the child count. The planner only returns a strict assessment. Deterministic policy then filters task kinds, persists the effective policy, exact worker prompts, plan hash, and route choices, and only then starts child jobs. A non-parallel assessment automatically reduces its parent to one active child. Product decisions, artifact integration, commits, and pushes remain with the upstream controller.
+The repository configuration dogfoods `mode: "auto"` with Luna as both planner and worker. The product defaults are `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; this repository uses a six-task pool with four active execution slots, while configuration permits at most 6 for each and never allows concurrency above the child count. The scheduler starts only the available tasks up to the cap and immediately refills a slot when a worker completes, so two tasks use two workers and six tasks use at most four at once. The planner only returns a strict assessment and is instructed to mark work parallel only when subtasks are independently verifiable, have no execution-order dependency, and have non-overlapping expected write scopes. Deterministic policy then filters task kinds, persists the effective policy, exact worker prompts, plan hash, and route choices, and only then starts child jobs. A non-parallel assessment automatically reduces its parent to one active child. Product decisions, artifact integration, commits, and pushes remain with the upstream controller.
 
 The successful self-orchestration was evidence for one normal planner-to-plan-to-child run, not standalone evidence of planner fail-fast behavior. Planner failure, timeout, cancellation, and waiting for a shared dispatch slot have separate outcomes and must be established by their deterministic tests; with the default `upstream` fallback, malformed or failed planner output is recorded in a persisted upstream plan, while `fail` terminates the parent before dispatch.
 
@@ -172,6 +173,16 @@ curl -sS http://127.0.0.1:7391/v1/jobs/JOB_ID/events
 curl -sS -X POST http://127.0.0.1:7391/v1/jobs/JOB_ID/cancel
 ```
 
+Inspect a completed job's patch artifacts without applying them:
+
+```bash
+agentknot artifacts JOB_ID --json
+agentknot artifact-verify JOB_ID --json
+agentknot artifact-preview JOB_ID 1 --json
+```
+
+The equivalent HTTP endpoints are `GET /v1/jobs/:id/artifacts`, `GET /v1/jobs/:id/artifacts/verify`, and `GET /v1/jobs/:id/artifacts/:attempt/preview`. Verification recomputes the recorded size and SHA-256 and compares the recorded base commit with the current source repository `HEAD`. Preview returns at most 1 MiB of UTF-8 Git patch text and withholds content when file integrity fails; a base mismatch remains visible in the verification evidence so the controller can inspect but must not promote blindly. These operations read job metadata, artifact bytes, and Git metadata only. They never apply, commit, push, or otherwise mutate the source repository.
+
 Set `callbackUrl` in the request to receive the terminal job snapshot by HTTP POST.
 
 Submit a goal to the policy-driven path:
@@ -223,7 +234,7 @@ The separation between worker and provider is deliberate. Workspace isolation is
     "planner": { "strategy": "hybrid", "route": "luna" },
     "dispatch": {
       "defaultRoute": "luna",
-      "maxChildren": 4,
+      "maxChildren": 6,
       "maxDepth": 1,
       "maxConcurrency": 4
     },
@@ -248,6 +259,9 @@ GET  /v1/jobs
 GET  /v1/jobs/:id
 GET  /v1/jobs/:id/events
 POST /v1/jobs/:id/cancel
+GET  /v1/jobs/:id/artifacts
+GET  /v1/jobs/:id/artifacts/verify
+GET  /v1/jobs/:id/artifacts/:attempt/preview
 GET  /v1/delegation
 POST /v1/orchestrations
 GET  /v1/orchestrations

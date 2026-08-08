@@ -83,6 +83,62 @@ export interface JobArtifact {
   baseCommit: string;
 }
 
+export const JOB_ARTIFACT_VERIFICATION_ISSUES = [
+  'artifact-path-mismatch',
+  'artifact-kind-unsupported',
+  'artifact-file-missing',
+  'artifact-file-unreadable',
+  'artifact-size-mismatch',
+  'artifact-sha256-mismatch',
+  'source-repository-unavailable',
+  'base-commit-mismatch',
+] as const;
+
+export type JobArtifactVerificationIssue = (typeof JOB_ARTIFACT_VERIFICATION_ISSUES)[number];
+
+export interface JobArtifactVerification {
+  artifact: JobArtifact;
+  file: {
+    exists: boolean;
+    expectedSize: number;
+    actualSize: number | null;
+    sizeMatches: boolean;
+    expectedSha256: string;
+    actualSha256: string | null;
+    sha256Matches: boolean;
+  };
+  source: {
+    repositoryAvailable: boolean;
+    expectedBaseCommit: string;
+    actualHead: string | null;
+    headMatchesBase: boolean;
+  };
+  issues: JobArtifactVerificationIssue[];
+  valid: boolean;
+}
+
+export interface JobArtifactList {
+  jobId: string;
+  artifacts: JobArtifact[];
+}
+
+export interface JobArtifactVerificationReport {
+  jobId: string;
+  artifacts: JobArtifactVerification[];
+  valid: boolean;
+}
+
+export interface JobArtifactPreview {
+  jobId: string;
+  artifact: JobArtifact;
+  format: 'git-patch';
+  encoding: 'utf-8';
+  content: string | null;
+  truncated: boolean;
+  maxBytes: number;
+  verification: JobArtifactVerification;
+}
+
 export interface JobExecution {
   runtimeId: string;
   pid: number;

@@ -117,3 +117,5 @@ Incident records should also include severity, user/controller impact, immediate
 | [0003](./0003-skill-minimal-pi-workers.md) | Decision | Accepted | Keep background Pi workers skill-minimal by default |
 | [0004](./0004-bounded-automatic-delegation.md) | Decision | Accepted | Put bounded automatic delegation in the control plane |
 | [0005](./0005-concurrent-job-event-persistence.md) | Incident | Resolved | Serialize concurrent job event persistence |
+| [0006](./0006-read-only-artifact-inspection.md) | Decision | Accepted | Keep artifact inspection read-only and identity-bound |
+| [0007](./0007-non-overlapping-task-pools.md) | Decision | Accepted | Prefer non-overlapping task pools over fixed batches |

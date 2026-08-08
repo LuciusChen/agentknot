@@ -11,13 +11,15 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Separate file and memory orchestration stores with ordered lifecycle events, cancellation propagation, and fail-without-resume startup reconciliation.
 - `off`, `suggest`, and `auto` delegation configuration with per-request `inherit`, `never`, `suggest`, and `force` controls.
 - Git worktree patch artifacts that include tracked, non-ignored untracked, binary, and worker-committed changes.
+- Read-only artifact listing, SHA-256/size/base-commit verification, and bounded integrity-gated patch preview through TypeScript, CLI, and HTTP.
 - Product requirements, technical specification, evidence-gated roadmap, and decision/postmortem records.
 
 ### Changed
 
 - Live event observers are advisory; observer failures are persisted without retrying or failing successful worker execution.
 - Stale nonterminal leaf jobs are marked failed once on startup instead of remaining indefinitely active.
-- Automatic delegation defaults to `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; each value is capped at 6 and concurrency cannot exceed the child count. The repository dogfood configuration explicitly sets both to 4 and uses Pi with OpenCode Go/Luna for planning and delegated workers.
+- Automatic delegation defaults to `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; each value is capped at 6 and concurrency cannot exceed the child count. The repository dogfood configuration uses a six-task pool with four concurrent Pi/OpenCode Go/Luna execution slots.
+- Planner instructions reserve parallel execution for independently verifiable subtasks without execution-order dependencies or overlapping expected write scopes; the scheduler starts only the available tasks up to the concurrency cap and refills slots as workers complete.
 - Controller metadata now follows one recursive JSON-compatible object contract across TypeScript and HTTP leaf/orchestration APIs.
 - Background Pi workers disable ambient skill discovery by default while retaining repository instructions.
 

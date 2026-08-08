@@ -121,6 +121,8 @@ export function buildPlannerPrompt(request: OrchestrationRequest, config: Delega
   return [
     'You are AgentKnot\'s read-only task classifier. Do not edit files, execute the requested work, or delegate.',
     'Assess whether bounded independent subtasks can be sent to background coding workers.',
+    'Optimize for useful parallelism, not the largest task count. Mark parallelizable true only when subtasks have no execution-order dependency and their expected write scopes do not overlap.',
+    'Each parallel subtask prompt must name its bounded file or component scope, explicit non-goals, and acceptance criteria. If work must share a contract or edit the same files, keep it in one subtask or mark the plan non-parallel.',
     `Return at most ${config.dispatch.maxChildren} useful subtasks. Final product decisions, artifact integration, commits, and pushes must remain upstream.`,
     `Preferred delegatable kinds: ${config.policy.delegate.join(', ')}.`,
     `Kinds that must remain upstream: ${config.policy.keepUpstream.join(', ')}.`,
@@ -149,6 +151,7 @@ function executionPrompt(parentPrompt: string, subtask: AssessedSubtask): string
   return [
     'You are executing one bounded subtask selected by AgentKnot.',
     'Do not recursively delegate. Do not commit, push, merge, or apply artifacts to another workspace.',
+    'Stay within the subtask\'s stated file/component scope. Report any necessary out-of-scope or overlapping change instead of silently broadening the edit.',
     '',
     'Parent task:',
     parentPrompt,

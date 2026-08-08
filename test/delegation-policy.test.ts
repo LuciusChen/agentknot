@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { DelegationConfig } from '../src/config.js';
-import { composeDelegationPlan, parseTaskAssessment } from '../src/delegation-policy.js';
+import { buildPlannerPrompt, composeDelegationPlan, parseTaskAssessment } from '../src/delegation-policy.js';
 import type { OrchestrationRequest, TaskAssessment } from '../src/orchestration-types.js';
 
 const config: DelegationConfig = {
@@ -56,6 +56,13 @@ test('parseTaskAssessment accepts strict JSON and rejects fences or malformed pl
   );
 });
 
+test('planner instructions reserve parallelism for independent non-overlapping write scopes', () => {
+  const prompt = buildPlannerPrompt(request, config);
+  assert.match(prompt, /expected write scopes do not overlap/);
+  assert.match(prompt, /no execution-order dependency/);
+  assert.match(prompt, /bounded file or component scope/);
+});
+
 test('composeDelegationPlan deterministically applies allowlists, keep-upstream rules, caps, and suggest mode', () => {
   const plan = composeDelegationPlan(request, assessment, config);
   assert.equal(plan.policyVersion, 1);
@@ -69,6 +76,10 @@ test('composeDelegationPlan deterministically applies allowlists, keep-upstream 
       ['subtask_1', 'test-gap-analysis', 'worker'],
       ['subtask_2', 'documentation', 'worker'],
     ]
+  );
+  assert.equal(
+    plan.subtasks.every((subtask) => subtask.executionPrompt.includes('out-of-scope or overlapping change')),
+    true
   );
 
   const suggested = composeDelegationPlan({ ...request, delegation: 'suggest' }, assessment, config);

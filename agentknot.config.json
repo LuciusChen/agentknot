@@ -62,7 +62,7 @@
     },
     "dispatch": {
       "defaultRoute": "luna",
-      "maxChildren": 4,
+      "maxChildren": 6,
       "maxDepth": 1,
       "maxConcurrency": 4
     },

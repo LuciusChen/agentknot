@@ -91,7 +91,8 @@ The first implementation risked comparing only against the worktree's current `H
 - [x] Include non-ignored untracked and binary changes.
 - [x] Reject a normal worker result received after cancellation/timeout.
 - [x] Use exact owned-path cleanup and test source cleanliness.
-- [ ] Add artifact list, verify, preview, and deliberate promotion workflow — Stage 1.
+- [x] Add artifact list, verification, and bounded preview — Stage 1; see [decision 0006](./0006-read-only-artifact-inspection.md).
+- [ ] Add a deliberate promotion workflow only if its refusal and approval contract can be made safe — Stage 1.
 - [ ] Add artifact size/retention and sensitive-content policy — Stage 1.
 - [ ] Add sustained leak and patch-application soak coverage — Stage 1.
 - [ ] Evaluate OS sandbox backends separately from Git isolation — Stage 3.
@@ -103,3 +104,9 @@ Automatic application remains a non-goal. An explicitly invoked promotion comman
 ## Privacy and security review
 
 Patch contents may contain sensitive repository data. This record contains no patch data, credentials, job prompts, or local artifact paths.
+
+## Addenda
+
+### 2026-08-08 — Read-only inspection delivered
+
+Decision 0006 completes listing, size/SHA-256/current-base verification, and integrity-gated bounded preview without changing the original upstream-only promotion boundary. Retention, redaction, clean-application verification, and deliberate promotion remain open.

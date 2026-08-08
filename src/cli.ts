@@ -33,6 +33,9 @@ Usage:
   agentknot routes [--json]
   agentknot jobs [--json]
   agentknot show JOB_ID
+  agentknot artifacts JOB_ID [--json]
+  agentknot artifact-verify JOB_ID [--json]
+  agentknot artifact-preview JOB_ID ATTEMPT [--json]
   agentknot delegation [--json]
   agentknot orchestrations [--json]
   agentknot orchestration-show ORCHESTRATION_ID
@@ -191,6 +194,71 @@ async function main(argv: string[]): Promise<void> {
     const jobs = await runtime.list();
     if (json) process.stdout.write(`${JSON.stringify(jobs, null, 2)}\n`);
     else for (const job of jobs) process.stdout.write(`${job.id}\t${job.status}\t${job.route.name}\t${job.createdAt}\n`);
+    return;
+  }
+
+  if (command === 'artifacts') {
+    const id = args.shift();
+    const json = takeFlag(args, '--json');
+    if (!id || args.length > 0) throw new Error('artifacts requires exactly one JOB_ID');
+    const artifacts = await runtime.listArtifacts(id);
+    if (!artifacts) {
+      process.stderr.write(`Job not found: ${id}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    if (json) process.stdout.write(`${JSON.stringify(artifacts, null, 2)}\n`);
+    else {
+      for (const artifact of artifacts.artifacts) {
+        process.stdout.write(
+          `${artifact.attempt}\t${artifact.kind}\t${artifact.size}\t${artifact.sha256}\t${artifact.baseCommit}\n`
+        );
+      }
+    }
+    return;
+  }
+
+  if (command === 'artifact-verify') {
+    const id = args.shift();
+    const json = takeFlag(args, '--json');
+    if (!id || args.length > 0) throw new Error('artifact-verify requires exactly one JOB_ID');
+    const verification = await runtime.verifyArtifacts(id);
+    if (!verification) {
+      process.stderr.write(`Job not found: ${id}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    if (json) process.stdout.write(`${JSON.stringify(verification, null, 2)}\n`);
+    else {
+      for (const result of verification.artifacts) {
+        process.stdout.write(
+          `${result.artifact.attempt}\t${result.valid ? 'valid' : 'invalid'}\tsha256=${result.file.sha256Matches}\tbaseCommit=${result.source.headMatchesBase}\tissues=${result.issues.join(',') || 'none'}\n`
+        );
+      }
+    }
+    if (!verification.valid) process.exitCode = 1;
+    return;
+  }
+
+  if (command === 'artifact-preview') {
+    const id = args.shift();
+    const attemptValue = args.shift();
+    const json = takeFlag(args, '--json');
+    if (!id || !attemptValue || args.length > 0) {
+      throw new Error('artifact-preview requires JOB_ID and ATTEMPT');
+    }
+    const attempt = Number(attemptValue);
+    if (!Number.isSafeInteger(attempt) || attempt < 1) throw new Error('ATTEMPT must be a positive integer');
+    const preview = await runtime.previewArtifact(id, attempt);
+    if (!preview) {
+      process.stderr.write(`Artifact not found: ${id} attempt ${attempt}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    if (json) process.stdout.write(`${JSON.stringify(preview, null, 2)}\n`);
+    else if (preview.content !== null) process.stdout.write(preview.content);
+    else process.stderr.write(`Artifact preview withheld: ${preview.verification.issues.join(', ')}\n`);
+    if (!preview.verification.valid) process.exitCode = 1;
     return;
   }
 

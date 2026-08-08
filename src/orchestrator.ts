@@ -13,6 +13,9 @@ import {
   type WorkspaceInspection,
 } from './workspace-isolation.js';
 import type {
+  JobArtifactList,
+  JobArtifactPreview,
+  JobArtifactVerificationReport,
   JobEvent,
   JobEventType,
   JobExecution,
@@ -117,6 +120,49 @@ export class Orchestrator {
 
   async list(): Promise<JobRecord[]> {
     return this.#store.list();
+  }
+
+  async listArtifacts(id: string): Promise<JobArtifactList | undefined> {
+    const job = await this.#store.get(id);
+    if (!job) return undefined;
+    return { jobId: job.id, artifacts: structuredClone(job.artifacts ?? []) };
+  }
+
+  async verifyArtifacts(id: string): Promise<JobArtifactVerificationReport | undefined> {
+    const job = await this.#store.get(id);
+    if (!job) return undefined;
+    const artifacts = await this.#workspaceIsolation.verifyArtifacts(
+      job.id,
+      job.request.workspace,
+      job.artifacts ?? []
+    );
+    return {
+      jobId: job.id,
+      artifacts,
+      valid: artifacts.every((artifact) => artifact.valid),
+    };
+  }
+
+  async previewArtifact(id: string, attempt: number): Promise<JobArtifactPreview | undefined> {
+    if (!Number.isSafeInteger(attempt) || attempt < 1) {
+      throw new Error('Artifact attempt must be a positive integer');
+    }
+    const job = await this.#store.get(id);
+    if (!job) return undefined;
+    const artifact = (job.artifacts ?? []).find((candidate) => candidate.attempt === attempt);
+    if (!artifact) return undefined;
+    const preview = await this.#workspaceIsolation.previewArtifact(
+      job.id,
+      job.request.workspace,
+      artifact
+    );
+    return {
+      jobId: job.id,
+      artifact: structuredClone(artifact),
+      format: 'git-patch',
+      encoding: 'utf-8',
+      ...preview,
+    };
   }
 
   async reconcileInterruptedJobs(): Promise<JobRecord[]> {

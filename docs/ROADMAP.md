@@ -84,7 +84,8 @@ Delivered in this slice:
 - one `OrchestrationRequest` contract shared by CLI, HTTP, and TypeScript;
 - `off`, `suggest`, and `auto` global modes with bounded per-request overrides;
 - a read-only planner job with strict JSON validation and explicit upstream/fail fallback;
-- deterministic allow/keep policy, depth exactly one, product defaults of two children and two concurrent executions when limits are omitted, the repository's explicit four-child/four-concurrency dogfood setting, and a six-child/six-concurrency configuration ceiling;
+- deterministic allow/keep policy, depth exactly one, product defaults of two children and two concurrent executions when limits are omitted, the repository's explicit six-task/four-slot dogfood setting, and a six-child/six-concurrency configuration ceiling;
+- planner guidance that reserves parallel plans for independently verifiable, dependency-free subtasks with non-overlapping expected write scopes, plus a sliding dispatcher that refills bounded worker slots from the persisted task pool;
 - immutable effective policy, plan hash, exact prompts/routes, parent-child IDs, and persist-before-dispatch events;
 - child execution only through the ordinary isolated Job API;
 - cancellation propagation and fail-without-resume restart reconciliation;
@@ -106,8 +107,15 @@ Still outside this slice:
 
 ### Artifact handoff work
 
-- Add commands/API for artifact listing, checksum verification, base-commit verification, and patch preview.
+Delivered in this slice:
+
+- TypeScript, CLI, and HTTP contracts for artifact listing, size/SHA-256 verification, current-source base-commit verification, and integrity-gated bounded patch preview.
+- Deterministic tests for valid, missing, tampered, and base-mismatched evidence that prove inspection does not mutate the source repository.
+
+Still outside this slice:
+
 - Define an explicitly invoked promotion operation only if it can refuse a dirty or mismatched target safely and always requires controller/human intent.
+- Compare actual changed paths across child patch artifacts and flag semantic integration conflicts; planner-declared non-overlap is guidance rather than enforcement until this exists.
 - Never turn successful worker completion into automatic patch application, commit, merge, or push.
 
 ### Exit gates
@@ -120,7 +128,7 @@ Still outside this slice:
 - Record and event sizes remain within documented limits under stress fixtures.
 - Every artifact is checksum-valid and applies against its recorded base in the supported Git matrix.
 - No source mutation, child-process leak, managed-worktree leak, duplicate/gapped event sequence, or cross-attempt state leak appears in the soak suite.
-- A controller can inspect and deliberately accept or reject an artifact using a documented workflow.
+- A controller can inspect and deliberately accept or reject an artifact using a documented workflow; inspection is read-only, while promotion remains an explicit upstream action.
 
 ### Explicitly not in Stage 1
 

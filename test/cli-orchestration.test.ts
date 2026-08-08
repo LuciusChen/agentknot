@@ -47,6 +47,78 @@ async function runCli(configPath: string, ...args: string[]): Promise<{ stdout: 
   });
 }
 
+async function git(directory: string, ...args: string[]): Promise<string> {
+  const result = await execFileAsync('git', args, { cwd: directory, encoding: 'utf8' });
+  return String(result.stdout);
+}
+
+async function createArtifactFixture(): Promise<CliFixture> {
+  const fixture = await createModeOffFixture();
+  await git(fixture.workspace, 'init', '-q');
+  await git(fixture.workspace, 'config', 'user.email', 'agentknot-test@example.invalid');
+  await git(fixture.workspace, 'config', 'user.name', 'AgentKnot test');
+  await writeFile(path.join(fixture.workspace, 'README.md'), 'base\n');
+  await git(fixture.workspace, 'add', '--', '.');
+  await git(fixture.workspace, 'commit', '-qm', 'base');
+  await writeFile(
+    fixture.configPath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        defaultRoute: 'mock',
+        storage: { directory: 'jobs', orchestrationDirectory: 'orchestrations' },
+        workspaceIsolation: { mode: 'git-worktree', directory: 'worktrees' },
+        workers: { mock: { adapter: 'mock' } },
+        routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
+        delegation: { mode: 'off' },
+      },
+      null,
+      2
+    )}\n`
+  );
+  return fixture;
+}
+
+test('CLI exposes one read-only artifact list, verification, and preview contract', async () => {
+  const fixture = await createArtifactFixture();
+  const beforeHead = (await git(fixture.workspace, 'rev-parse', 'HEAD')).trim();
+  const run = await runCli(
+    fixture.configPath,
+    'run',
+    '--prompt',
+    'Create an empty inspection artifact.',
+    '--workspace',
+    fixture.workspace,
+    '--json'
+  );
+  const job = JSON.parse(run.stdout) as { id: string; artifacts: Array<{ attempt: number }> };
+  assert.equal(job.artifacts.length, 1);
+
+  const listed = JSON.parse((await runCli(fixture.configPath, 'artifacts', job.id, '--json')).stdout) as {
+    jobId: string;
+    artifacts: unknown[];
+  };
+  assert.equal(listed.jobId, job.id);
+  assert.equal(listed.artifacts.length, 1);
+
+  const verified = JSON.parse(
+    (await runCli(fixture.configPath, 'artifact-verify', job.id, '--json')).stdout
+  ) as { valid: boolean; artifacts: Array<{ valid: boolean; issues: string[] }> };
+  assert.equal(verified.valid, true);
+  assert.equal(verified.artifacts[0]?.valid, true);
+  assert.deepEqual(verified.artifacts[0]?.issues, []);
+
+  const preview = JSON.parse(
+    (await runCli(fixture.configPath, 'artifact-preview', job.id, '1', '--json')).stdout
+  ) as { jobId: string; content: string | null; truncated: boolean; verification: { valid: boolean } };
+  assert.equal(preview.jobId, job.id);
+  assert.equal(preview.content, '');
+  assert.equal(preview.truncated, false);
+  assert.equal(preview.verification.valid, true);
+  assert.equal((await git(fixture.workspace, 'rev-parse', 'HEAD')).trim(), beforeHead);
+  assert.equal(await git(fixture.workspace, 'status', '--porcelain=v1', '--untracked-files=all'), '');
+});
+
 test('CLI orchestration commands use deterministic mode-off configuration', async () => {
   const fixture = await createModeOffFixture();
   const orchestrate = await runCli(

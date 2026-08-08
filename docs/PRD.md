@@ -99,12 +99,13 @@ Version 0.0.1 currently implements:
 - one-shot completion callbacks to trusted URLs;
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
+- read-only artifact listing, integrity/base verification, and bounded patch preview through TypeScript, CLI, and HTTP;
 - route diagnostics and configuration validation.
 - controller-neutral orchestration through CLI, HTTP, and TypeScript;
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
 - strict planner assessments followed by deterministic task-kind policy;
 - immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
-- bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood setting of four for each, and a configuration ceiling of six for each with concurrency never exceeding the child count;
+- bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with four active slots, and a configuration ceiling of six for each with concurrency never exceeding the child count;
 - fail-without-resume startup reconciliation for stale jobs and orchestration records.
 
 The current file stores provide persistent audit snapshots and deterministically mark stale nonterminal jobs or orchestrations failed on startup when their recorded process is absent. They do not provide resumable execution, a restartable queue, journaling, multi-process coordination, PID-reuse protection, or automatic cleanup of worktrees left by a hard process crash.
@@ -155,6 +156,7 @@ The product remains on course when all of the following are true:
 - every emitted job event is already present in the persisted record;
 - every terminal job is inspectable after the invoking call returns;
 - Git worktree mode leaves the source workspace clean and returns artifacts without applying them;
+- controllers can verify and preview recorded artifacts without source mutation, while acceptance and promotion remain explicit upstream decisions;
 - retries start from the same recorded base rather than prior-attempt edits;
 - credentials are not intentionally copied into configuration, records, events, logs, callbacks, or artifact metadata;
 - current, proposed, experimental, and deferred capabilities are distinguishable in documentation;
