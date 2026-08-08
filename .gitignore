@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.agentknot/
+*.log
+.DS_Store

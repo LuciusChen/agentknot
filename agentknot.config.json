@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "defaultRoute": "mock",
+  "storage": {
+    "directory": ".agentknot/jobs"
+  },
+  "workers": {
+    "mock": {
+      "adapter": "mock",
+      "responsePrefix": "Mock worker completed"
+    },
+    "pi": {
+      "adapter": "pi-rpc",
+      "command": "pi",
+      "noSession": true
+    }
+  },
+  "routes": {
+    "mock": {
+      "worker": "mock",
+      "provider": "mock",
+      "model": "deterministic",
+      "maxAttempts": 1,
+      "timeoutMs": 30000
+    },
+    "luna": {
+      "worker": "pi",
+      "provider": "opencode-go",
+      "model": "gpt-5.6-luna",
+      "thinkingLevel": "high",
+      "requiredEnv": [
+        "OPENCODE_API_KEY"
+      ],
+      "maxAttempts": 2,
+      "timeoutMs": 3600000
+    },
+    "grok": {
+      "worker": "pi",
+      "provider": "xai",
+      "model": "grok-code-fast-1",
+      "thinkingLevel": "high",
+      "requiredEnv": [
+        "XAI_API_KEY"
+      ],
+      "maxAttempts": 2,
+      "timeoutMs": 3600000
+    }
+  }
+}
