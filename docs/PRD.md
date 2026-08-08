@@ -1,0 +1,179 @@
+# AgentKnot product requirements
+
+- Status: Living product contract
+- Version: 0.1
+- Last updated: 2026-08-08
+
+## Product thesis
+
+AgentKnot is a small, local-first, vendor-neutral execution control plane for delegating bounded coding jobs from interchangeable controllers to interchangeable agent workers and model routes.
+
+Its job is to admit work, resolve a route, persist lifecycle evidence, invoke a worker, and hand back results and artifacts. It does not own the worker's intelligence, the provider's model runtime, or a collaboration network.
+
+```text
+controller -> AgentKnot Job API -> worker adapter -> provider/model
+                                   |
+                                   +-> isolated attempt -> evidence/artifacts
+```
+
+## Problem
+
+Coding-agent workflows are often coupled at several layers at once: the controller, coding harness, model provider, model, workspace mutation policy, and result transport. Replacing Codex with Claude, Pi with another worker, or OpenCode Go with xAI can then require redesigning the entire workflow.
+
+Directly invoking a worker also leaves recurring control-plane concerns to every caller: route configuration, job state, cancellation, retries, event normalization, workspace protection, artifact capture, and audit history.
+
+AgentKnot provides one narrow contract for those concerns while keeping every execution choice explicit and replaceable.
+
+## Primary users
+
+The initial user is a developer or small engineering team that:
+
+- discusses or approves work in one controller, such as Codex or Claude;
+- wants a different coding worker or model to execute some bounded tasks;
+- needs to change controllers, workers, providers, or models without rewriting the workflow;
+- wants durable evidence of what ran and a reviewable patch instead of an implicit source-tree mutation;
+- prefers a local service and local credentials over a mandatory hosted control plane.
+
+Multi-tenant platform operators and large remote agent fleets are not initial users.
+
+## Jobs to be done
+
+1. Submit the same coding task from a CLI, HTTP client, TypeScript program, CI job, Codex, or Claude.
+2. Choose the worker, provider, and model through a route rather than controller-specific code.
+3. Observe a normalized job lifecycle without understanding the worker's private protocol.
+4. Cancel or retry a bounded attempt according to an explicit policy.
+5. Keep the supplied Git workspace unchanged while receiving a verifiable patch artifact.
+6. Inspect enough evidence to decide whether a result should be accepted, revised, or discarded.
+7. Diagnose why a job failed without exposing provider credentials.
+
+## Product principles
+
+### Controller neutrality
+
+`source` records who submitted a job. It must not select a code path. Codex, Claude, CI, and custom callers use the same Job API.
+
+### Explicit routing
+
+A route resolves worker, provider, model, timeout, and retry settings before execution. Existing jobs retain that resolved snapshot even if configuration changes later.
+
+### Records first, live signals second
+
+The durable job record and its ordered events are the authority. Streaming, callbacks, dashboards, or notifications are delivery conveniences and must not become the only copy of state.
+
+### Honest capabilities
+
+AgentKnot only advertises behavior that is implemented and verified. Proposed adapters, recovery, streaming, security, or sandbox features remain marked as proposed until their acceptance gates pass.
+
+### Evidence-bearing completion
+
+A terminal job must carry a result or an explicit error, its resolved route and attempts, and any produced artifacts. "The agent said it finished" is not sufficient evidence for artifact promotion.
+
+### Safe handoff by default
+
+In Git worktree mode, attempts run away from the caller's working tree and return patch artifacts. AgentKnot never applies, commits, merges, or pushes those patches automatically.
+
+### Minimal core, replaceable edges
+
+Worker-specific process and protocol behavior belongs in worker adapters. Orchestration policy belongs in the core. Features that do not strengthen the execution handoff should remain outside the core.
+
+## Current product scope
+
+Version 0.0.1 currently implements:
+
+- controller-neutral CLI, HTTP, and TypeScript entry points;
+- immutable resolved route snapshots with worker, provider, and model dimensions;
+- deterministic mock and Pi RPC worker adapters;
+- OpenCode Go/Luna and xAI/Grok routes through Pi configuration;
+- file-backed or in-memory job snapshots and ordered events;
+- immediate execution with cooperative timeouts, retries, and cancellation;
+- one-shot completion callbacks to trusted URLs;
+- direct-workspace compatibility mode and Git worktree attempt isolation;
+- per-attempt Git patch artifacts with base commit, size, and SHA-256;
+- route diagnostics and configuration validation.
+
+The current file store provides persistent audit snapshots. It does not yet provide resumable execution, a restartable queue, journaling, multi-process coordination, or automatic reconciliation of a job left `running` after process failure.
+
+Provider and model independence are currently routing properties implemented by the selected worker. AgentKnot does not yet expose an independent provider-runtime interface.
+
+## Non-goals
+
+AgentKnot is not intended to become:
+
+- an agent chat network with channels, threads, direct messages, reactions, feeds, or presence;
+- a general autonomous swarm or role-playing multi-agent framework;
+- a model SDK, prompt framework, memory store, or knowledge base;
+- a hosted multi-tenant control plane or cloud compute fleet;
+- an IDE, terminal multiplexer, or graphical agent cockpit;
+- an operating-system security sandbox;
+- an implicit provider optimizer that silently changes models or falls back across providers;
+- a system that automatically applies patches, creates branches or pull requests, merges, commits, or pushes;
+- a reimplementation of Pi, MCP, OpenCode, Codex, Claude Code, or Relay.
+
+Remote workers, dependency graphs, scheduling, and dashboards may be evaluated later, but only after the local single-job contract is dependable and a concrete use case justifies them.
+
+## Reference workflow
+
+1. The controller and user agree on a bounded task and acceptance criteria.
+2. The controller submits a `JobRequest` with a workspace, route, source identity, and optional callback.
+3. AgentKnot validates the request, snapshots the route, creates the job record, and records `job.queued`.
+4. AgentKnot begins execution, prepares an isolated attempt when configured, and invokes the route's worker adapter.
+5. The adapter translates worker activity into normalized events while AgentKnot owns state, timeout, retry, cancellation, persistence, and cleanup.
+6. AgentKnot records a terminal result or error and captures any attempt patch artifacts.
+7. The controller inspects the evidence and explicitly decides whether to promote an artifact outside AgentKnot.
+
+The current `queued` state is an admission event immediately followed by execution; it does not imply a capacity-aware scheduler.
+
+## Product acceptance criteria
+
+The product remains on course when all of the following are true:
+
+- changing `source` from Codex to Claude changes audit metadata, not execution behavior;
+- changing provider or model is a route change unless a genuinely new worker runtime is required;
+- the same Job API works through CLI, HTTP, and TypeScript entry points;
+- every emitted job event is already present in the persisted record;
+- every terminal job is inspectable after the invoking call returns;
+- Git worktree mode leaves the source workspace clean and returns artifacts without applying them;
+- retries start from the same recorded base rather than prior-attempt edits;
+- credentials are not intentionally copied into configuration, records, events, logs, callbacks, or artifact metadata;
+- current, proposed, experimental, and deferred capabilities are distinguishable in documentation;
+- a feature that crosses a stable boundary has a spec change, tests, and an explicit roadmap gate.
+
+## Success signals
+
+Before broadening the product, AgentKnot should demonstrate:
+
+- repeated real use by at least two controller types through the same API contract;
+- reliable use of more than one provider/model route without controller changes;
+- deterministic conformance tests for every supported worker adapter;
+- no source-workspace mutations or managed-worktree leaks in the supported isolation path;
+- actionable job records for success, failure, retry, timeout, and cancellation;
+- an explicit human-controlled artifact inspection and promotion workflow.
+
+These are evidence requirements, not claims that the current MVP has already met every condition.
+
+## Risks
+
+- Product language such as "durable", "queue", "timeout", "provider-neutral", or "isolation" can imply stronger guarantees than the implementation provides.
+- Raw worker events, prompts, output, and tool results can grow without bound and can contain sensitive content even when API keys are excluded intentionally.
+- A custom adapter may ignore cooperative cancellation unless the adapter contract and process supervision enforce termination.
+- Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete job record.
+- Adding integrations before an adapter conformance contract exists can move provider-specific policy into the core.
+- Copying collaboration or fleet features from adjacent projects would dilute the local execution-handoff problem AgentKnot exists to solve.
+
+## Drift control
+
+Every material feature proposal must answer:
+
+1. Which primary user problem or job-to-be-done does it solve?
+2. Which component owns it: controller, Job API/orchestrator, worker adapter, provider/model route, workspace manager, or external integration?
+3. Does it preserve the invariants in [SPEC.md](./SPEC.md)?
+4. Which stage and exit gate in [ROADMAP.md](./ROADMAP.md) admit it?
+5. Is it current, proposed, experimental, or deferred?
+6. What test or operational evidence will prove it works?
+7. Does a rejected alternative or important tradeoff require a postmortem/decision record?
+
+If those questions do not have concrete answers, the work should not enter implementation.
+
+## External reference boundary
+
+[Agent Workforce Relay](https://github.com/AgentWorkforce/relay) is a useful reference for runtime boundaries, capability honesty, durable delivery, and contract gates. Relay's communication, social collaboration, hosted, and fleet concerns are deliberately outside AgentKnot's product boundary. Integration with Relay may someday be an adapter; copying Relay into AgentKnot is not a goal.

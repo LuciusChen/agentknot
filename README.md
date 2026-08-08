@@ -21,7 +21,18 @@ This is an MVP. It already provides:
 - timeouts, retries, cancellation, and completion callbacks;
 - optional vendor-neutral Git worktree isolation with per-attempt patch artifacts;
 - normalized text, tool, retry, lifecycle, artifact, and stderr events;
-- configuration validation and health checks.
+- configuration validation, route diagnostics, and HTTP service liveness.
+
+## Product and architecture contracts
+
+AgentKnot keeps current behavior, future intent, execution order, and historical rationale separate so roadmap ideas do not silently become product claims:
+
+- [Product requirements](docs/PRD.md) define the user problem, product thesis, scope, and non-goals.
+- [Technical specification](docs/SPEC.md) defines current contracts, invariants, limitations, and verification requirements.
+- [Roadmap](docs/ROADMAP.md) sequences work through objective exit gates rather than dates or feature wishlists.
+- [Postmortems and decision records](postmortems/README.md) preserve incidents, experiments, tradeoffs, and rejected alternatives without rewriting history.
+
+Material changes should map to all four layers before implementation starts.
 
 AgentKnot borrows the useful boundary ideas of harness/session/event systems such as Agent Relay, but has no Agent Relay runtime dependency and does not copy its cloud, chat, fleet, or workspace layers.
 
@@ -192,11 +203,8 @@ In `git-worktree` mode, worker agents read, edit, and execute commands in a mana
 
 Callback URLs are supplied by trusted local controllers and can make HTTP requests from the AgentKnot host. Do not expose the MVP HTTP server to untrusted networks.
 
-## Next milestones
+## Roadmap
 
-- controller authentication and callback signing;
-- per-route sandbox and approval policies;
-- OpenCode and Grok native worker adapters;
-- dynamic routing and provider fallback policies;
-- live event streaming over Server-Sent Events;
-- OhMyPi compatibility adapter.
+The active focus is the dependable local single-job loop: precise persistence and restart semantics, bounded records, failure-contract tests, and an explicit artifact inspection/promotion workflow. Controller/worker portability, local automation policy, and any remote operation are later evidence-gated stages.
+
+See [the roadmap](docs/ROADMAP.md) for scope, non-goals, and exit gates. Native adapters, provider fallback, streaming, sandbox backends, OhMyPi compatibility, and remote/fleet features are proposals rather than current capabilities.
