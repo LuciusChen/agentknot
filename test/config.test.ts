@@ -34,6 +34,27 @@ test('parseConfig keeps worker and provider as independent routing dimensions', 
   });
 });
 
+test('parseConfig validates workspace isolation and preserves direct compatibility by default', () => {
+  const base = {
+    version: 1,
+    defaultRoute: 'mock',
+    storage: { directory: '.agentknot/jobs' },
+    workers: { mock: { adapter: 'mock' } },
+    routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
+  };
+  assert.equal(parseConfig(base).workspaceIsolation?.mode, 'none');
+  assert.equal(
+    parseConfig({ ...base, workspaceIsolation: { mode: 'git-worktree', directory: '/tmp/worktrees' } })
+      .workspaceIsolation?.mode,
+    'git-worktree'
+  );
+  assert.throws(() => parseConfig({ ...base, workspaceIsolation: { mode: 'unsafe' } }), /mode must be/);
+  assert.throws(
+    () => parseConfig({ ...base, workspaceIsolation: { mode: 'git-worktree', directory: 42 } }),
+    /directory must be/
+  );
+});
+
 test('parseConfig rejects routes pointing to a missing worker', () => {
   assert.throws(
     () =>

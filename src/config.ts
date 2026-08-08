@@ -1,7 +1,13 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { THINKING_LEVELS, type ResolvedRoute, type ThinkingLevel } from './types.js';
+import {
+  THINKING_LEVELS,
+  WORKSPACE_ISOLATION_MODES,
+  type ResolvedRoute,
+  type ThinkingLevel,
+  type WorkspaceIsolationMode,
+} from './types.js';
 
 export interface MockWorkerConfig {
   adapter: 'mock';
@@ -19,6 +25,11 @@ export interface PiRpcWorkerConfig {
 
 export type WorkerConfig = MockWorkerConfig | PiRpcWorkerConfig;
 
+export interface WorkspaceIsolationConfig {
+  mode: WorkspaceIsolationMode;
+  directory?: string;
+}
+
 export interface RouteConfig {
   worker: string;
   provider: string;
@@ -35,6 +46,8 @@ export interface AgentKnotConfig {
   storage: {
     directory: string;
   };
+  /** Omitted means the legacy direct-workspace compatibility mode. */
+  workspaceIsolation?: WorkspaceIsolationConfig;
   workers: Record<string, WorkerConfig>;
   routes: Record<string, RouteConfig>;
 }
@@ -102,6 +115,21 @@ function parseWorker(name: string, value: unknown): WorkerConfig {
   throw new Error(`workers.${name}.adapter must be "mock" or "pi-rpc"`);
 }
 
+function parseWorkspaceIsolation(value: unknown): WorkspaceIsolationConfig {
+  if (value === undefined) return { mode: 'none' };
+  assertRecord(value, 'config.workspaceIsolation');
+  if (!WORKSPACE_ISOLATION_MODES.includes(value.mode as WorkspaceIsolationMode)) {
+    throw new Error('config.workspaceIsolation.mode must be "none" or "git-worktree"');
+  }
+  if (value.directory !== undefined) {
+    assertNonEmptyString(value.directory, 'config.workspaceIsolation.directory');
+  }
+  return {
+    mode: value.mode as WorkspaceIsolationMode,
+    ...(value.directory === undefined ? {} : { directory: value.directory }),
+  };
+}
+
 function parseRoute(name: string, value: unknown, workers: Record<string, WorkerConfig>): RouteConfig {
   assertRecord(value, `routes.${name}`);
   assertNonEmptyString(value.worker, `routes.${name}.worker`);
@@ -139,6 +167,7 @@ export function parseConfig(value: unknown): AgentKnotConfig {
   assertNonEmptyString(value.defaultRoute, 'config.defaultRoute');
   assertRecord(value.storage, 'config.storage');
   assertNonEmptyString(value.storage.directory, 'config.storage.directory');
+  const workspaceIsolation = parseWorkspaceIsolation(value.workspaceIsolation);
   assertRecord(value.workers, 'config.workers');
   assertRecord(value.routes, 'config.routes');
 
@@ -156,6 +185,7 @@ export function parseConfig(value: unknown): AgentKnotConfig {
     version: 1,
     defaultRoute: value.defaultRoute,
     storage: { directory: value.storage.directory },
+    workspaceIsolation,
     workers,
     routes,
   };

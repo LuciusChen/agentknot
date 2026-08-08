@@ -4,6 +4,10 @@
   "storage": {
     "directory": ".agentknot/jobs"
   },
+  "workspaceIsolation": {
+    "mode": "git-worktree",
+    "directory": ".agentknot/worktrees"
+  },
   "workers": {
     "mock": {
       "adapter": "mock",

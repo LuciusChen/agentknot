@@ -12,6 +12,7 @@ export async function createRuntime(options: CreateRuntimeOptions = {}): Promise
   const loaded = await loadConfig(options.configPath ?? process.env.AGENTKNOT_CONFIG ?? 'agentknot.config.json');
   return new Orchestrator({
     config: loaded.config,
+    baseDirectory: loaded.baseDirectory,
     store: new FileJobStore(loaded.storageDirectory),
     adapters: createAdapters(loaded.config),
     ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),

@@ -2,6 +2,10 @@ export const JOB_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'cancel
 
 export type JobStatus = (typeof JOB_STATUSES)[number];
 
+export const WORKSPACE_ISOLATION_MODES = ['none', 'git-worktree'] as const;
+
+export type WorkspaceIsolationMode = (typeof WORKSPACE_ISOLATION_MODES)[number];
+
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -50,6 +54,7 @@ export type JobEventType =
   | 'job.succeeded'
   | 'job.failed'
   | 'job.cancelled'
+  | 'job.artifact'
   | 'worker.started'
   | 'worker.text.delta'
   | 'worker.tool.started'
@@ -68,6 +73,15 @@ export interface JobEvent {
   data?: Record<string, unknown>;
 }
 
+export interface JobArtifact {
+  kind: 'git-patch';
+  attempt: number;
+  path: string;
+  size: number;
+  sha256: string;
+  baseCommit: string;
+}
+
 export interface JobRecord {
   id: string;
   status: JobStatus;
@@ -79,6 +93,7 @@ export interface JobRecord {
   completedAt?: string;
   attempt: number;
   events: JobEvent[];
+  artifacts?: JobArtifact[];
   result?: JobResult;
   error?: JobError;
   callback?: {

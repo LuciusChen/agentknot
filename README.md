@@ -19,7 +19,8 @@ This is an MVP. It already provides:
 - Pi RPC and deterministic mock adapters;
 - durable job snapshots and ordered events;
 - timeouts, retries, cancellation, and completion callbacks;
-- normalized text, tool, retry, lifecycle, and stderr events;
+- optional vendor-neutral Git worktree isolation with per-attempt patch artifacts;
+- normalized text, tool, retry, lifecycle, artifact, and stderr events;
 - configuration validation and health checks.
 
 AgentKnot borrows the useful boundary ideas of harness/session/event systems such as Agent Relay, but has no Agent Relay runtime dependency and does not copy its cloud, chat, fleet, or workspace layers.
@@ -138,10 +139,14 @@ Set `callbackUrl` in the request to receive the terminal job snapshot by HTTP PO
 
 ## Configuration
 
-The separation between worker and provider is deliberate:
+The separation between worker and provider is deliberate. Workspace isolation is an orchestrator lifecycle, not a worker or provider feature:
 
 ```json
 {
+  "workspaceIsolation": {
+    "mode": "git-worktree",
+    "directory": ".agentknot/worktrees"
+  },
   "workers": {
     "pi": {
       "adapter": "pi-rpc",
@@ -165,6 +170,8 @@ The separation between worker and provider is deliberate:
 
 Use `--config PATH` or `AGENTKNOT_CONFIG` for another configuration file.
 
+When `workspaceIsolation.mode` is `git-worktree`, AgentKnot requires the supplied workspace's Git repository to have a `HEAD` and a clean index/worktree, including non-ignored untracked files. Each attempt is a detached worktree at the same base commit, and the worker receives the matching repository subdirectory. After every attempt, a binary Git patch is written under the configured storage directory (including non-ignored untracked files and commits made by the worker after the base commit), metadata is recorded on the job, and the exact managed worktree is removed. Patches are artifacts only; AgentKnot never applies them to the source repository. Detached worktrees contain committed files only, so ignored dependencies and build outputs must be provisioned by the worker when needed. The compatibility mode is `none` (or an omitted section), which passes the caller's directory directly and does not provide isolation.
+
 ## API surface
 
 ```text
@@ -179,7 +186,7 @@ GET  /health
 
 ## Safety model
 
-Worker agents can read, edit, and execute commands in the supplied workspace. AgentKnot does not claim to be an operating-system sandbox. Run workers only against repositories and credentials appropriate for that worker, and use Git or another checkpoint before autonomous edits.
+In `git-worktree` mode, worker agents read, edit, and execute commands in a managed detached worktree; the supplied source workspace is not modified and the resulting patch is handed off as an artifact. In compatibility mode `none`, workers operate directly in the supplied workspace. AgentKnot does not claim to be an operating-system sandbox. Run workers only against repositories and credentials appropriate for that worker.
 
 Callback URLs are supplied by trusted local controllers and can make HTTP requests from the AgentKnot host. Do not expose the MVP HTTP server to untrusted networks.
 
@@ -188,7 +195,6 @@ Callback URLs are supplied by trusted local controllers and can make HTTP reques
 - controller authentication and callback signing;
 - per-route sandbox and approval policies;
 - OpenCode and Grok native worker adapters;
-- worktree isolation and patch/artifact handoff;
 - dynamic routing and provider fallback policies;
 - live event streaming over Server-Sent Events;
 - OhMyPi compatibility adapter.

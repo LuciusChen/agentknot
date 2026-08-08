@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import type { AgentKnotConfig } from './config.js';
 import { resolveRoute } from './config.js';
+import { WorkspaceIsolationManager, type IsolatedWorkspace, type WorkspaceInspection } from './workspace-isolation.js';
 import type {
   JobEvent,
   JobEventType,
@@ -20,6 +21,8 @@ export type JobEventListener = (event: JobEvent, job: JobRecord) => Promise<void
 
 export interface OrchestratorOptions {
   config: AgentKnotConfig;
+  /** Base for relative config paths when constructed by the runtime. */
+  baseDirectory?: string;
   store: JobStore;
   adapters: Map<string, WorkerAdapter>;
   onEvent?: JobEventListener;
@@ -62,6 +65,7 @@ export class Orchestrator {
   readonly #onEvent: JobEventListener | undefined;
   readonly #now: () => Date;
   readonly #fetch: typeof globalThis.fetch;
+  readonly #workspaceIsolation: WorkspaceIsolationManager;
 
   constructor(options: OrchestratorOptions) {
     this.#config = options.config;
@@ -70,6 +74,7 @@ export class Orchestrator {
     this.#onEvent = options.onEvent;
     this.#now = options.now ?? (() => new Date());
     this.#fetch = options.fetch ?? globalThis.fetch;
+    this.#workspaceIsolation = new WorkspaceIsolationManager(options.config, options.baseDirectory);
   }
 
   routes(): Array<{ name: string; worker: string; provider: string; model: string }> {
@@ -103,6 +108,10 @@ export class Orchestrator {
     const normalized = normalizeRequest(request);
     const workspace = await stat(normalized.workspace).catch(() => undefined);
     if (!workspace?.isDirectory()) throw new Error(`Workspace is not a directory: ${normalized.workspace}`);
+    const inspection =
+      this.#workspaceIsolation.mode === 'git-worktree'
+        ? await this.#workspaceIsolation.inspect(normalized.workspace)
+        : undefined;
 
     const route = resolveRoute(this.#config, normalized.route);
     const adapter = this.#adapters.get(route.worker);
@@ -123,7 +132,7 @@ export class Orchestrator {
     await this.#store.create(job);
     await this.#emit(job, 'job.queued', { source: normalized.source ?? 'unknown' });
 
-    const completion = this.#execute(job, adapter, controller.signal)
+    const completion = this.#execute(job, adapter, controller.signal, inspection)
       .then(async () => {
         await this.#deliverCallback(job);
         return structuredClone(job);
@@ -151,7 +160,12 @@ export class Orchestrator {
     };
   }
 
-  async #execute(job: JobRecord, adapter: WorkerAdapter, jobSignal: AbortSignal): Promise<void> {
+  async #execute(
+    job: JobRecord,
+    adapter: WorkerAdapter,
+    jobSignal: AbortSignal,
+    inspection?: WorkspaceInspection
+  ): Promise<void> {
     job.status = 'running';
     job.startedAt = this.#now().toISOString();
     await this.#emit(job, 'job.started', {
@@ -165,25 +179,63 @@ export class Orchestrator {
       job.attempt = attempt;
       const attemptController = new AbortController();
       const onJobAbort = () => attemptController.abort(jobSignal.reason);
-      jobSignal.addEventListener('abort', onJobAbort, { once: true });
+      if (jobSignal.aborted) attemptController.abort(jobSignal.reason);
+      else jobSignal.addEventListener('abort', onJobAbort, { once: true });
       const timeout = setTimeout(
         () => attemptController.abort(new Error(`Worker timed out after ${job.route.timeoutMs}ms`)),
         job.route.timeoutMs
       );
       const workerEmit: WorkerEventSink = (type, data) => this.#emit(job, type, data);
+      let isolated: IsolatedWorkspace | undefined;
+      let result: Awaited<ReturnType<WorkerAdapter['run']>> | undefined;
+      let failure: unknown;
 
       try {
-        const result = await adapter.run(
+        if (inspection) isolated = await this.#workspaceIsolation.create(inspection, job.id, attempt);
+        if (attemptController.signal.aborted) {
+          throw attemptController.signal.reason instanceof Error
+            ? attemptController.signal.reason
+            : new Error('Job cancelled');
+        }
+        result = await adapter.run(
           {
             jobId: job.id,
             prompt: job.request.prompt,
-            workspace: job.request.workspace,
+            workspace: isolated?.path ?? job.request.workspace,
             route: job.route,
             attempt,
             signal: attemptController.signal,
           },
           workerEmit
         );
+        if (attemptController.signal.aborted) {
+          throw attemptController.signal.reason instanceof Error
+            ? attemptController.signal.reason
+            : new Error('Worker attempt aborted');
+        }
+      } catch (error) {
+        failure = error;
+      } finally {
+        clearTimeout(timeout);
+        jobSignal.removeEventListener('abort', onJobAbort);
+        if (isolated) {
+          try {
+            const artifact = await this.#workspaceIsolation.capturePatch(isolated, job.id, attempt);
+            job.artifacts = [...(job.artifacts ?? []), artifact];
+            await this.#emit(job, 'job.artifact', { ...artifact });
+          } catch (error) {
+            if (failure === undefined) failure = error;
+          } finally {
+            try {
+              await this.#workspaceIsolation.cleanup(isolated);
+            } catch (error) {
+              if (failure === undefined) failure = error;
+            }
+          }
+        }
+      }
+
+      if (failure === undefined && result !== undefined) {
         job.status = 'succeeded';
         job.completedAt = this.#now().toISOString();
         job.result = {
@@ -197,24 +249,21 @@ export class Orchestrator {
         delete job.error;
         await this.#emit(job, 'job.succeeded', { attempt });
         return;
-      } catch (error) {
-        const details = errorDetails(error);
-        const retryable = !jobSignal.aborted && attempt < job.route.maxAttempts;
-        job.error = { ...details, attempt, retryable };
-        if (!retryable) {
-          job.status = jobSignal.aborted ? 'cancelled' : 'failed';
-          job.completedAt = this.#now().toISOString();
-          await this.#emit(job, jobSignal.aborted ? 'job.cancelled' : 'job.failed', {
-            ...details,
-            attempt,
-          });
-          return;
-        }
-        await this.#emit(job, 'job.retrying', { ...details, attempt, nextAttempt: attempt + 1 });
-      } finally {
-        clearTimeout(timeout);
-        jobSignal.removeEventListener('abort', onJobAbort);
       }
+
+      const details = errorDetails(failure ?? new Error('Worker returned no result'));
+      const retryable = !jobSignal.aborted && attempt < job.route.maxAttempts;
+      job.error = { ...details, attempt, retryable };
+      if (!retryable) {
+        job.status = jobSignal.aborted ? 'cancelled' : 'failed';
+        job.completedAt = this.#now().toISOString();
+        await this.#emit(job, jobSignal.aborted ? 'job.cancelled' : 'job.failed', {
+          ...details,
+          attempt,
+        });
+        return;
+      }
+      await this.#emit(job, 'job.retrying', { ...details, attempt, nextAttempt: attempt + 1 });
     }
   }
 
