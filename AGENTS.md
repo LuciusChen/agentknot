@@ -27,6 +27,7 @@
 ## AgentKnot dogfooding and delegation
 
 - When acting as the primary controller or maintainer, treat AgentKnot as part of the default development toolchain. For non-trivial work, proactively look for a bounded, independently verifiable subtask to delegate through the real Pi/Luna route; do not wait for the user to request delegation each time.
+- Prefer the product-level `agentknot orchestrate`/`runtime.orchestrate()` path so the configured planner, deterministic policy, persistence order, limits, and provenance are exercised. Use a direct leaf job only when testing that lower-level contract or when the task is already explicitly bounded.
 - Good delegation candidates include architecture or contract review, test-gap analysis, documentation aligned to an already implemented change, and isolated implementation work with explicit acceptance criteria.
 - Keep trivial edits, tightly coupled root-cause diagnosis, integration decisions, and final acceptance with the primary controller when delegation overhead would exceed its value.
 - Run delegated work in `git-worktree` isolation, provide scope, non-goals, relevant files, and verification commands, and inspect the resulting patch artifact before applying anything.
@@ -79,6 +80,9 @@
 ## Documentation and repository discipline
 
 - Update README in the same change when defaults, configuration, commands, runtime requirements, integrations, or user-visible workflows change.
+- For substantial README changes, make the opening explain what AgentKnot is, who it serves, which problem it solves, and the next primary action. Keep installation and Quick Start easy to find, and describe concrete user outcomes before internal details.
+- Keep each semantic Markdown paragraph on one source line and let the renderer wrap it. Improve difficult prose with headings, tables, shorter bullets, or a focused rewrite instead of source-only rewrapping.
+- Maintain `CHANGELOG.md` in the same change for release-relevant features, fixes, supported integrations, configuration/default changes, and public API or documented workflow changes. Keep the next version under `Unreleased`; omit empty sections and do not treat a commit as a release.
 - Keep document roles separate: PRD defines why and scope, SPEC defines stable behavior, ROADMAP defines sequence and gates, and postmortems preserve historical evidence and rationale.
 - Update PRD, SPEC, ROADMAP, and README together when a change alters their respective truth. Do not use a future roadmap item as evidence that a capability exists now.
 - Add a postmortem/decision record for significant boundary decisions, incidents, abandoned approaches, external integrations, misleading capability claims, or deliberately deferred limitations. Supersede historical records with addenda or new records instead of rewriting their original conclusion.

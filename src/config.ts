@@ -45,11 +45,39 @@ export interface AgentKnotConfig {
   defaultRoute: string;
   storage: {
     directory: string;
+    orchestrationDirectory?: string;
   };
   /** Omitted means the legacy direct-workspace compatibility mode. */
   workspaceIsolation?: WorkspaceIsolationConfig;
   workers: Record<string, WorkerConfig>;
   routes: Record<string, RouteConfig>;
+  delegation?: DelegationConfig;
+}
+
+export const DELEGATION_MODES = ['off', 'suggest', 'auto'] as const;
+export type DelegationMode = (typeof DELEGATION_MODES)[number];
+
+export const DELEGATION_FALLBACKS = ['upstream', 'fail'] as const;
+export type DelegationFallback = (typeof DELEGATION_FALLBACKS)[number];
+
+export interface DelegationConfig {
+  mode: DelegationMode;
+  planner: {
+    strategy: 'hybrid';
+    route: string;
+  };
+  dispatch: {
+    defaultRoute: string;
+    maxChildren: number;
+    /** Automatic recursive delegation is intentionally unsupported in v1. */
+    maxDepth: 1;
+    maxConcurrency: number;
+  };
+  policy: {
+    delegate: string[];
+    keepUpstream: string[];
+  };
+  fallback: DelegationFallback;
 }
 
 export interface LoadedConfig {
@@ -57,7 +85,23 @@ export interface LoadedConfig {
   path: string;
   baseDirectory: string;
   storageDirectory: string;
+  orchestrationStorageDirectory: string;
 }
+
+const DEFAULT_DELEGATE_TASK_KINDS = [
+  'architecture-review',
+  'test-gap-analysis',
+  'documentation',
+  'independent-implementation',
+];
+
+const DEFAULT_KEEP_UPSTREAM_TASK_KINDS = [
+  'requirements-decision',
+  'product-decision',
+  'artifact-integration',
+  'commit',
+  'push',
+];
 
 function assertRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -69,6 +113,28 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
   if (typeof value !== 'string' || value.trim() === '') {
     throw new Error(`${label} must be a non-empty string`);
   }
+}
+
+function parseStringArray(value: unknown, label: string, fallback: readonly string[]): string[] {
+  if (value === undefined) return [...fallback];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string' && item.trim() !== '')) {
+    throw new Error(`${label} must be an array of non-empty strings`);
+  }
+  return [...new Set(value)];
+}
+
+function parseBoundedInteger(
+  value: unknown,
+  label: string,
+  fallback: number,
+  minimum: number,
+  maximum: number
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || Number(value) < minimum || Number(value) > maximum) {
+    throw new Error(`${label} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return Number(value);
 }
 
 function parseWorker(name: string, value: unknown): WorkerConfig {
@@ -161,12 +227,121 @@ function parseRoute(name: string, value: unknown, workers: Record<string, Worker
   };
 }
 
+function parseDelegation(
+  value: unknown,
+  routes: Record<string, RouteConfig>,
+  defaultRoute: string
+): DelegationConfig | undefined {
+  if (value === undefined) return undefined;
+  assertRecord(value, 'config.delegation');
+  if (!DELEGATION_MODES.includes(value.mode as DelegationMode)) {
+    throw new Error('config.delegation.mode must be "off", "suggest", or "auto"');
+  }
+
+  if (value.planner !== undefined) assertRecord(value.planner, 'config.delegation.planner');
+  const planner = (value.planner ?? {}) as Record<string, unknown>;
+  if (planner.strategy !== undefined && planner.strategy !== 'hybrid') {
+    throw new Error('config.delegation.planner.strategy must be "hybrid"');
+  }
+  if (planner.route !== undefined) assertNonEmptyString(planner.route, 'config.delegation.planner.route');
+  const plannerRoute = (planner.route as string | undefined) ?? defaultRoute;
+  if (!(plannerRoute in routes)) {
+    throw new Error(`config.delegation.planner.route references unknown route "${plannerRoute}"`);
+  }
+
+  if (value.dispatch !== undefined) assertRecord(value.dispatch, 'config.delegation.dispatch');
+  const dispatch = (value.dispatch ?? {}) as Record<string, unknown>;
+  if (dispatch.defaultRoute !== undefined) {
+    assertNonEmptyString(dispatch.defaultRoute, 'config.delegation.dispatch.defaultRoute');
+  }
+  const defaultDispatchRoute = (dispatch.defaultRoute as string | undefined) ?? defaultRoute;
+  if (!(defaultDispatchRoute in routes)) {
+    throw new Error(
+      `config.delegation.dispatch.defaultRoute references unknown route "${defaultDispatchRoute}"`
+    );
+  }
+  const maxChildren = parseBoundedInteger(
+    dispatch.maxChildren,
+    'config.delegation.dispatch.maxChildren',
+    2,
+    1,
+    6
+  );
+  if (dispatch.maxDepth !== undefined && dispatch.maxDepth !== 1) {
+    throw new Error('config.delegation.dispatch.maxDepth must be 1 in delegation v1');
+  }
+  const maxConcurrency = parseBoundedInteger(
+    dispatch.maxConcurrency,
+    'config.delegation.dispatch.maxConcurrency',
+    Math.min(2, maxChildren),
+    1,
+    6
+  );
+  if (maxConcurrency > maxChildren) {
+    throw new Error('config.delegation.dispatch.maxConcurrency must not exceed maxChildren');
+  }
+
+  if (value.policy !== undefined) assertRecord(value.policy, 'config.delegation.policy');
+  const policy = (value.policy ?? {}) as Record<string, unknown>;
+
+  if (value.fallback !== undefined && !DELEGATION_FALLBACKS.includes(value.fallback as DelegationFallback)) {
+    throw new Error('config.delegation.fallback must be "upstream" or "fail"');
+  }
+
+  return {
+    mode: value.mode as DelegationMode,
+    planner: { strategy: 'hybrid', route: plannerRoute },
+    dispatch: {
+      defaultRoute: defaultDispatchRoute,
+      maxChildren,
+      maxDepth: 1,
+      maxConcurrency,
+    },
+    policy: {
+      delegate: parseStringArray(
+        policy.delegate,
+        'config.delegation.policy.delegate',
+        DEFAULT_DELEGATE_TASK_KINDS
+      ),
+      keepUpstream: parseStringArray(
+        policy.keepUpstream,
+        'config.delegation.policy.keepUpstream',
+        DEFAULT_KEEP_UPSTREAM_TASK_KINDS
+      ),
+    },
+    fallback: (value.fallback as DelegationFallback | undefined) ?? 'upstream',
+  };
+}
+
+export function resolveDelegationConfig(config: AgentKnotConfig): DelegationConfig {
+  return (
+    config.delegation ?? {
+      mode: 'off',
+      planner: { strategy: 'hybrid', route: config.defaultRoute },
+      dispatch: {
+        defaultRoute: config.defaultRoute,
+        maxChildren: 2,
+        maxDepth: 1,
+        maxConcurrency: 2,
+      },
+      policy: {
+        delegate: [...DEFAULT_DELEGATE_TASK_KINDS],
+        keepUpstream: [...DEFAULT_KEEP_UPSTREAM_TASK_KINDS],
+      },
+      fallback: 'upstream',
+    }
+  );
+}
+
 export function parseConfig(value: unknown): AgentKnotConfig {
   assertRecord(value, 'config');
   if (value.version !== 1) throw new Error('config.version must be 1');
   assertNonEmptyString(value.defaultRoute, 'config.defaultRoute');
   assertRecord(value.storage, 'config.storage');
   assertNonEmptyString(value.storage.directory, 'config.storage.directory');
+  if (value.storage.orchestrationDirectory !== undefined) {
+    assertNonEmptyString(value.storage.orchestrationDirectory, 'config.storage.orchestrationDirectory');
+  }
   const workspaceIsolation = parseWorkspaceIsolation(value.workspaceIsolation);
   assertRecord(value.workers, 'config.workers');
   assertRecord(value.routes, 'config.routes');
@@ -181,13 +356,23 @@ export function parseConfig(value: unknown): AgentKnotConfig {
   if (!(value.defaultRoute in routes)) {
     throw new Error(`config.defaultRoute references unknown route "${value.defaultRoute}"`);
   }
+  const delegation = parseDelegation(value.delegation, routes, value.defaultRoute);
+  if (delegation && delegation.mode !== 'off' && workspaceIsolation.mode !== 'git-worktree') {
+    throw new Error('config.delegation mode "suggest" or "auto" requires workspaceIsolation.mode "git-worktree"');
+  }
   return {
     version: 1,
     defaultRoute: value.defaultRoute,
-    storage: { directory: value.storage.directory },
+    storage: {
+      directory: value.storage.directory,
+      ...(value.storage.orchestrationDirectory === undefined
+        ? {}
+        : { orchestrationDirectory: value.storage.orchestrationDirectory as string }),
+    },
     workspaceIsolation,
     workers,
     routes,
+    ...(delegation === undefined ? {} : { delegation }),
   };
 }
 
@@ -196,11 +381,16 @@ export async function loadConfig(configPath = 'agentknot.config.json'): Promise<
   const raw = await readFile(absolutePath, 'utf8');
   const config = parseConfig(JSON.parse(raw) as unknown);
   const baseDirectory = path.dirname(absolutePath);
+  const defaultOrchestrationDirectory = path.join(path.dirname(config.storage.directory), 'orchestrations');
   return {
     config,
     path: absolutePath,
     baseDirectory,
     storageDirectory: path.resolve(baseDirectory, config.storage.directory),
+    orchestrationStorageDirectory: path.resolve(
+      baseDirectory,
+      config.storage.orchestrationDirectory ?? defaultOrchestrationDirectory
+    ),
   };
 }
 

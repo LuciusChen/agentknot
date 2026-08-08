@@ -6,14 +6,17 @@
 
 ## Product thesis
 
-AgentKnot is a small, local-first, vendor-neutral execution control plane for delegating bounded coding jobs from interchangeable controllers to interchangeable agent workers and model routes.
+AgentKnot is a small, local-first, vendor-neutral execution control plane for deciding when a goal should be split and for delegating bounded coding jobs from interchangeable controllers to interchangeable agent workers and model routes.
 
-Its job is to admit work, resolve a route, persist lifecycle evidence, invoke a worker, and hand back results and artifacts. It does not own the worker's intelligence, the provider's model runtime, or a collaboration network.
+Its job is to admit work, apply a bounded delegation policy, persist the plan and lifecycle evidence, invoke workers, and hand back results and artifacts. It does not own the worker's intelligence, the provider's model runtime, or a collaboration network.
 
 ```text
-controller -> AgentKnot Job API -> worker adapter -> provider/model
-                                   |
-                                   +-> isolated attempt -> evidence/artifacts
+controller -> Orchestration API -> planner assessment -> deterministic policy
+                         |                         |
+                         +-> upstream/suggestion  +-> bounded child Job APIs
+controller ---------------------------> Job API -> worker -> provider/model
+                                                    |
+                                                    +-> evidence/artifacts
 ```
 
 ## Problem
@@ -21,6 +24,8 @@ controller -> AgentKnot Job API -> worker adapter -> provider/model
 Coding-agent workflows are often coupled at several layers at once: the controller, coding harness, model provider, model, workspace mutation policy, and result transport. Replacing Codex with Claude, Pi with another worker, or OpenCode Go with xAI can then require redesigning the entire workflow.
 
 Directly invoking a worker also leaves recurring control-plane concerns to every caller: route configuration, job state, cancellation, retries, event normalization, workspace protection, artifact capture, and audit history.
+
+Relying on a controller prompt to remember when to delegate creates another coupling: every controller and every target repository must reproduce the same judgment, limits, and evidence rules. AgentKnot therefore needs a shared orchestration entry point whose planner is advisory and whose dispatch decision is deterministic configuration.
 
 AgentKnot provides one narrow contract for those concerns while keeping every execution choice explicit and replaceable.
 
@@ -45,6 +50,7 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 5. Keep the supplied Git workspace unchanged while receiving a verifiable patch artifact.
 6. Inspect enough evidence to decide whether a result should be accepted, revised, or discarded.
 7. Diagnose why a job failed without exposing provider credentials.
+8. Submit one goal and have the same policy decide whether to keep it upstream, suggest a split, or dispatch bounded child jobs regardless of controller vendor.
 
 ## Product principles
 
@@ -76,6 +82,10 @@ In Git worktree mode, attempts run away from the caller's working tree and retur
 
 Worker-specific process and protocol behavior belongs in worker adapters. Orchestration policy belongs in the core. Features that do not strengthen the execution handoff should remain outside the core.
 
+### Bounded automation
+
+Automatic delegation must be explicit at the API boundary, depth-limited, concurrency-limited, isolated, and recorded before execution. It must never imply automatic artifact integration, product decisions, commits, or pushes.
+
 ## Current product scope
 
 Version 0.0.1 currently implements:
@@ -90,8 +100,14 @@ Version 0.0.1 currently implements:
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
 - route diagnostics and configuration validation.
+- controller-neutral orchestration through CLI, HTTP, and TypeScript;
+- `off`, `suggest`, and `auto` modes with per-request narrowing;
+- strict planner assessments followed by deterministic task-kind policy;
+- immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
+- a maximum of six configured depth-one child jobs and a shared in-process concurrency cap;
+- fail-without-resume startup reconciliation for stale jobs and orchestration records.
 
-The current file store provides persistent audit snapshots. It does not yet provide resumable execution, a restartable queue, journaling, multi-process coordination, or automatic reconciliation of a job left `running` after process failure.
+The current file stores provide persistent audit snapshots and deterministically mark stale nonterminal jobs or orchestrations failed on startup when their recorded process is absent. They do not provide resumable execution, a restartable queue, journaling, multi-process coordination, PID-reuse protection, or automatic cleanup of worktrees left by a hard process crash.
 
 Provider and model independence are currently routing properties implemented by the selected worker. AgentKnot does not yet expose an independent provider-runtime interface.
 
@@ -114,12 +130,15 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 ## Reference workflow
 
 1. The controller and user agree on a bounded task and acceptance criteria.
-2. The controller submits a `JobRequest` with a workspace, route, source identity, and optional callback.
-3. AgentKnot validates the request, snapshots the route, creates the job record, and records `job.queued`.
-4. AgentKnot begins execution, prepares an isolated attempt when configured, and invokes the route's worker adapter.
-5. The adapter translates worker activity into normalized events while AgentKnot owns state, timeout, retry, cancellation, persistence, and cleanup.
-6. AgentKnot records a terminal result or error and captures any attempt patch artifacts.
-7. The controller inspects the evidence and explicitly decides whether to promote an artifact outside AgentKnot.
+2. The controller chooses the leaf Job API for an already bounded task or the orchestration API for policy-driven delegation. AgentKnot does not intercept arbitrary controller conversations.
+3. For orchestration, AgentKnot snapshots the effective policy, asks the configured planner route for a strict read-only assessment, validates it, deterministically filters and caps it, and persists the plan before any child dispatch.
+4. An upstream or suggested decision returns without starting child jobs. An automatic decision submits each selected subtask through the ordinary Job API with depth-one provenance and bounded concurrency.
+5. For a leaf job, the controller submits a `JobRequest` with a workspace, route, source identity, and optional callback.
+6. AgentKnot validates the request, snapshots the route, creates the job record, and records `job.queued`.
+7. AgentKnot begins execution, prepares an isolated attempt when configured, and invokes the route's worker adapter.
+8. The adapter translates worker activity into normalized events while AgentKnot owns state, timeout, retry, cancellation, persistence, and cleanup.
+9. AgentKnot records a terminal result or error and captures any attempt patch artifacts.
+10. The controller inspects the parent/child evidence and explicitly decides whether to promote an artifact outside AgentKnot.
 
 The current `queued` state is an admission event immediately followed by execution; it does not imply a capacity-aware scheduler.
 
@@ -130,6 +149,9 @@ The product remains on course when all of the following are true:
 - changing `source` from Codex to Claude changes audit metadata, not execution behavior;
 - changing provider or model is a route change unless a genuinely new worker runtime is required;
 - the same Job API works through CLI, HTTP, and TypeScript entry points;
+- the same orchestration policy and record shape work through CLI, HTTP, and TypeScript without controller-name branches;
+- every automatically dispatched child is admitted through the ordinary Job API only after its plan is persisted;
+- automatic delegation is isolated, depth-one, capped, non-recursive, and cannot select configured keep-upstream task kinds;
 - every emitted job event is already present in the persisted record;
 - every terminal job is inspectable after the invoking call returns;
 - Git worktree mode leaves the source workspace clean and returns artifacts without applying them;
@@ -157,6 +179,9 @@ These are evidence requirements, not claims that the current MVP has already met
 - Raw worker events, prompts, output, and tool results can grow without bound and can contain sensitive content even when API keys are excluded intentionally.
 - A custom adapter may ignore cooperative cancellation unless the adapter contract and process supervision enforce termination.
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete job record.
+- A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk.
+- Process-local concurrency and PID liveness checks are not a distributed scheduler, lease, or reliable defense against PID reuse and multiple AgentKnot writers.
+- Depth one constrains AgentKnot's own parent/child engine; the unauthenticated local API cannot prevent a host-capable worker from independently submitting another top-level orchestration.
 - Adding integrations before an adapter conformance contract exists can move provider-specific policy into the core.
 - Copying collaboration or fleet features from adjacent projects would dilute the local execution-handoff problem AgentKnot exists to solve.
 

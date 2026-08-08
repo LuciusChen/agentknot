@@ -21,7 +21,7 @@ The source of product truth is [PRD.md](./PRD.md). Stable technical behavior is 
 | Stage | Outcome | Status |
 | --- | --- | --- |
 | 0 | Prove the vendor-neutral execution slice | Complete |
-| 1 | Make the local single-job loop dependable and honestly specified | In progress |
+| 1 | Make local execution and its bounded delegation slice dependable and honestly specified | In progress |
 | 2 | Prove controller and worker portability through contracts | Not started |
 | 3 | Add bounded local automation and security policy | Not started |
 | 4 | Evaluate remote/team operation only from demonstrated demand | Conditional |
@@ -56,7 +56,7 @@ Stage 0 proves the shape of the system. It does not establish production-grade d
 
 ### Outcome
 
-Make current single-job semantics reliable enough that a controller can submit, observe, diagnose, verify, and explicitly promote a result without relying on optimistic wording or manual archaeology.
+Make leaf-job semantics and the bounded delegation slice reliable enough that a controller can submit, observe, diagnose, verify, and explicitly promote a result without relying on optimistic wording or manual archaeology.
 
 ### Product-contract work
 
@@ -75,6 +75,28 @@ Make current single-job semantics reliable enough that a controller can submit, 
 - Bound event, raw worker data, stderr, result, callback payload, and record growth.
 - Add an explicit retention and redaction policy, including the limits of redacting prompts, patches, and model output.
 
+### Bounded delegation slice admitted into Stage 1
+
+The product requirement changed after Stage 0: controller-independent automatic delegation is part of the core handoff, not merely a later unattended scheduler. Stage 1 therefore admits one deliberately narrow parent/child slice while keeping general dependency graphs and queues deferred.
+
+Delivered in this slice:
+
+- one `OrchestrationRequest` contract shared by CLI, HTTP, and TypeScript;
+- `off`, `suggest`, and `auto` global modes with bounded per-request overrides;
+- a read-only planner job with strict JSON validation and explicit upstream/fail fallback;
+- deterministic allow/keep policy, maximum six children, depth exactly one, and a process-wide concurrency cap;
+- immutable effective policy, plan hash, exact prompts/routes, parent-child IDs, and persist-before-dispatch events;
+- child execution only through the ordinary isolated Job API;
+- cancellation propagation and fail-without-resume restart reconciliation;
+- AgentKnot self-use through the real Pi/Luna route as a required promotion check for this slice.
+
+Still outside this slice:
+
+- recursive delegation, dynamic replanning, dependencies between children, or model-chosen route changes;
+- restart resume, a durable capacity queue, leases, multi-process writers, or distributed concurrency;
+- automatic patch selection, application, commit, push, merge, deployment, or pull-request creation;
+- implicit interception of native controller conversations. Controllers must call the orchestration API.
+
 ### Worker reliability work
 
 - Add malformed JSONL, split UTF-8/frame, premature-exit, missing-settlement, timeout, and cancellation fixtures for Pi RPC.
@@ -92,6 +114,7 @@ Make current single-job semantics reliable enough that a controller can submit, 
 
 - Every README capability is implemented and tested or visibly marked proposed/deferred.
 - Crash/restart behavior for every nonterminal state is deterministic and tested.
+- Every orchestration persists a valid plan before dispatch, never exceeds its child/depth/concurrency bounds, and leaves artifact integration upstream.
 - Observer and callback failures cannot change a correct execution result.
 - A supported adapter cannot leave a timed-out or cancelled job indefinitely active.
 - Record and event sizes remain within documented limits under stress fixtures.
@@ -164,7 +187,7 @@ Allow unattended local workflows without turning AgentKnot into an unbounded rem
 - An approval cannot be bypassed by controller identity or worker output.
 - Any sandbox claim is backed by tests for filesystem, process, credential, and network boundaries it actually enforces.
 
-Dependency graphs and multi-job orchestration are considered only after the queue and single-job contracts pass these gates.
+General dependency graphs, nested/dynamic teams, and restartable multi-job scheduling are considered only after the queue and single-job contracts pass these gates. The Stage 1 bounded depth-one delegation slice does not imply those capabilities.
 
 ## Stage 4: Conditional remote and team operation
 

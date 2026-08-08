@@ -14,16 +14,16 @@ The product intent and non-goals live in [PRD.md](./PRD.md). Sequencing and prom
 ## System context
 
 ```text
-                   JobRequest
+             JobRequest / OrchestrationRequest
 Codex ---------+
 Claude --------+--> CLI / HTTP / TypeScript API
 CI ------------+             |
 custom caller -+             v
-                         Orchestrator
-                     /       |        \
-                JobStore   route   WorkspaceManager
-                               \       /
-                              WorkerAdapter
+                 OrchestrationService / Orchestrator
+                       |          /       |        \
+              policy + plan  JobStore   route   WorkspaceManager
+                       |                     \       /
+             OrchestrationStore             WorkerAdapter
                                    |
                          worker process/protocol
                                    |
@@ -33,6 +33,7 @@ custom caller -+             v
 The controller, worker, provider, and model are separate concepts:
 
 - A **controller** decides what work to request and submits it through the Job API.
+- The **orchestration service** classifies a goal, applies deterministic delegation policy, persists the plan, and submits selected children through the Job API.
 - The **orchestrator** owns the job lifecycle and policies shared by every worker.
 - A **worker adapter** translates one worker runtime and protocol into AgentKnot contracts.
 - A **provider/model route** is configuration passed to the worker. It is not currently a standalone runtime abstraction.
@@ -43,6 +44,9 @@ The controller, worker, provider, and model are separate concepts:
 | Concern | Owner | Must not leak into |
 | --- | --- | --- |
 | Prompt, workspace, caller identity | `JobRequest` | worker-specific request types |
+| Delegation mode, task-kind policy, child/depth/concurrency caps | orchestration service/configuration | controller-vendor branches or worker adapters |
+| Planner assessment parsing and deterministic plan composition | orchestration service | planner-model discretion at dispatch time |
+| Parent policy/plan/events/child provenance | `OrchestrationStore` | leaf `JobStore` semantics |
 | Route resolution | configuration/orchestrator | controller identity branches |
 | State, attempts, retry, timeout, cancellation | orchestrator | provider-specific code |
 | Process startup and wire protocol | worker adapter | Job API and store |
@@ -56,7 +60,19 @@ Moving a responsibility across this table requires a SPEC update and a decision 
 
 ## Current public contracts
 
-The canonical TypeScript definitions are in `src/types.ts`. Other transports and documentation must derive from or remain mechanically checked against that contract; one runtime payload must not acquire multiple hand-maintained definitions.
+The canonical TypeScript definitions are in `src/types.ts` and `src/orchestration-types.ts`. Other transports and documentation must derive from or remain mechanically checked against those contracts; one runtime payload must not acquire multiple hand-maintained definitions.
+
+### `OrchestrationRequest`
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `prompt` | yes | Non-empty controller goal |
+| `workspace` | yes | Existing target repository directory |
+| `source` | no | Opaque controller identity; never a policy branch |
+| `metadata` | no | Controller-owned metadata copied to planner and child provenance |
+| `delegation` | no | `inherit`, `never`, `suggest`, or `force` |
+
+`never` and `suggest` narrow global behavior. `force` may broaden the delegatable allowlist but never bypasses global `off`, `keepUpstream`, the child limit, depth one, isolation requirements, or configured routes.
 
 ### `JobRequest`
 
@@ -141,10 +157,16 @@ Current persistence does not provide:
 - a journal or event log independent of snapshots;
 - multi-process locking or compare-and-swap updates;
 - schema migration;
-- restartable execution or automatic reconciliation;
+- restartable or resumable execution;
 - retention, compaction, or record-size limits.
 
-A record left `queued` or `running` after process failure remains historical evidence. The current runtime does not resume it.
+At runtime startup, a `queued` or `running` job whose recorded executor PID is absent is marked failed exactly once with `ExecutionInterruptedError` and `reason: runtime_restart`; it is never replayed and observers/callbacks are not invoked. A nonterminal orchestration is handled the same way without redispatching its persisted plan. A live PID is left untouched. This is deterministic fail-without-resume reconciliation, not a lease: PID reuse, multiple concurrent writers, crash-left processes, and crash-left managed worktrees remain limitations.
+
+### Orchestration store
+
+`MemoryOrchestrationStore` and `FileOrchestrationStore` are separate from leaf job storage. The file store uses the same mode-`0600` temporary-write-and-rename snapshot model. Every parent record captures the normalized request, immutable effective delegation policy, executor identity, strict assessment and plan, plan hash, exact child prompts and routes, planner/child job IDs, ordered orchestration events, child outcomes, and terminal result or error.
+
+The stores assume one AgentKnot process. They provide no compare-and-swap, journal, schema migration, resume, distributed concurrency, or parent/child transaction spanning multiple snapshot files.
 
 ## Job lifecycle
 
@@ -178,7 +200,7 @@ For one job:
 6. Artifact capture and cleanup happen before the attempt outcome is finalized.
 7. Callback bookkeeping happens after terminal execution and does not change execution status.
 
-The current `onEvent` listener is awaited. If it rejects, that error can affect execution. This coupling is a known limitation; live observation is intended to become advisory, but that change is proposed rather than current behavior.
+The `onEvent` listener is awaited for ordering but is advisory. A rejection appends `job.observer.failed` with the observed sequence/type and error details; it does not retry or fail worker execution. Failure while persisting that observer-failure evidence remains a store failure.
 
 ### Terminal semantics
 
@@ -203,6 +225,28 @@ When `callbackUrl` is supplied, AgentKnot currently:
 
 Callbacks are for trusted local controllers until a later security contract passes its roadmap gate.
 
+## Orchestration lifecycle
+
+### Admission and planning
+
+```text
+queued -> planning -> upstream/suggested -> succeeded
+                   -> dispatching -> succeeded | failed | cancelled
+                   -> failed | cancelled
+```
+
+Global modes are `off`, `suggest`, and `auto`. Omitted delegation configuration resolves to `off`. Configured `suggest` or `auto` requires `workspaceIsolation.mode: "git-worktree"`. The planner and every child are ordinary leaf jobs, so route snapshots, isolation, retries, events, artifacts, and cleanup use the existing job contract.
+
+The planner is a read-only model route and returns JSON only. AgentKnot rejects markdown fences, commentary, missing or unknown fields, invalid enums, oversize content, inconsistent recommendations, and plans above the configured child cap. The deterministic composer applies `delegate` and `keepUpstream` task-kind sets, assigns stable depth-one subtask IDs, captures exact execution prompts and routes, and hashes the plan. An over-cap plan is rejected rather than silently truncated.
+
+The parent plan and `orchestration.planned` event are persisted before the first child starts. `suggest` persists the same evidence without dispatch. With fallback `upstream`, planner failure returns a persisted upstream decision and error evidence; fallback `fail` makes the parent terminally failed.
+
+### Dispatch and cancellation
+
+Children are launched in plan order through `Orchestrator.start()`. A shared semaphore caps active workers across all parent orchestrations in one `OrchestrationService`; this is process-local and not a queue or multi-process admission control. A parent whose validated assessment has `parallelizable: false` receives an effective concurrency of one even when the configured cap is higher. `maxDepth` is exactly one in v1, and the orchestration engine does not recursively submit its own children. Worker prompts prohibit recursive delegation, commit, push, merge, or artifact application. Because the local HTTP API is unauthenticated, v1 cannot prevent a worker with host access from independently invoking a new orchestration; depth one is an engine invariant, not a hostile-worker security boundary.
+
+Cancellation first persists `cancelRequestedAt` and `orchestration.cancel.requested`, then aborts the planner or active children and prevents later children from launching. Cancellation is process-local and cooperative through the underlying adapter. The parent completes only after launched child jobs settle. One or more non-succeeded children make a delegated parent failed; AgentKnot does not integrate their patch artifacts.
+
 ## Events
 
 Current lifecycle event types are:
@@ -214,6 +258,7 @@ Current lifecycle event types are:
 - `job.failed`
 - `job.cancelled`
 - `job.artifact`
+- `job.observer.failed`
 
 Current normalized worker event types are:
 
@@ -233,6 +278,8 @@ Core consumers may depend on the normalized event name, job ID, sequence, timest
 
 Pi RPC is strict LF-delimited JSONL. Its adapter must decode streaming UTF-8 explicitly and must not assume that process chunks align with JSON messages or use Node `readline` behavior as its protocol definition.
 
+Orchestration events cover queued, planning, planner start/completion, planned, dispatching, child start/completion, cancellation requested, and terminal succeeded/failed/cancelled transitions. Their sequence is gap-free within one parent snapshot. Leaf job events remain authoritative for worker-level activity.
+
 ## HTTP surface
 
 Current endpoints are:
@@ -243,13 +290,19 @@ GET  /v1/jobs
 GET  /v1/jobs/:id
 GET  /v1/jobs/:id/events
 POST /v1/jobs/:id/cancel
+GET  /v1/delegation
+POST /v1/orchestrations
+GET  /v1/orchestrations
+GET  /v1/orchestrations/:id
+GET  /v1/orchestrations/:id/events
+POST /v1/orchestrations/:id/cancel
 GET  /v1/routes
 GET  /health
 ```
 
 `POST /v1/jobs` starts execution in the serving process and returns `202` with the admitted snapshot.
 
-Cancellation uses a process-local active-job map. After a server restart, a persisted nonterminal record is not an active cancellable execution.
+Cancellation uses process-local active-job and active-orchestration maps. After a server restart, a persisted nonterminal record is reconciled as failed and is not an active cancellable execution.
 
 `GET /health` is currently a liveness response for the HTTP process. It does not validate storage, routes, credentials, workers, or provider availability. Route-specific readiness is exposed by the CLI `doctor` command; it is not currently an HTTP endpoint.
 
@@ -264,6 +317,7 @@ There is no authentication, authorization, TLS termination, CORS policy, rate li
 - AgentKnot does not intentionally copy API keys or auth-file contents into job records.
 - Managed worktree cleanup targets an exact path created and owned by AgentKnot.
 - Git patch artifacts are never applied automatically.
+- Automatic delegation cannot be configured without Git worktree isolation, is depth-one, and never promotes child artifacts.
 
 ### Explicit limitations
 
@@ -319,6 +373,7 @@ At minimum, the conformance suite must eventually prove:
 - artifact checksum and base-application validity;
 - exact cleanup on success, failure, retry, timeout, and cancellation;
 - documented crash/restart behavior;
+- strict planner validation, deterministic policy filtering, persisted-before-dispatch plan evidence, parent/child provenance, global process-local concurrency, and orchestration cancellation;
 - supported concurrency and record-size limits once those claims exist.
 
 Passing a unit test for an internal helper is not sufficient when a public transport, worker process, Git lifecycle, or persistence boundary changed.

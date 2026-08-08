@@ -1,7 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
-import type { Orchestrator } from './orchestrator.js';
+import type { DelegationConfig } from './config.js';
+import type {
+  OrchestrationRecord,
+  OrchestrationRequest,
+  StartOrchestrationResult,
+} from './orchestration-types.js';
 import type { JobRequest, StartJobResult } from './types.js';
+import type { JobRecord } from './types.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -57,14 +63,62 @@ function asJobRequest(value: unknown): JobRequest {
   };
 }
 
+function asOrchestrationRequest(value: unknown): OrchestrationRequest {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Request body must be an object');
+  }
+  const body = value as Record<string, unknown>;
+  if (typeof body.prompt !== 'string') throw new Error('prompt must be a string');
+  if (typeof body.workspace !== 'string') throw new Error('workspace must be a string');
+  if (body.source !== undefined && typeof body.source !== 'string') throw new Error('source must be a string');
+  if (
+    body.delegation !== undefined &&
+    !['inherit', 'never', 'suggest', 'force'].includes(String(body.delegation))
+  ) {
+    throw new Error('delegation must be "inherit", "never", "suggest", or "force"');
+  }
+  if (
+    body.metadata !== undefined &&
+    (typeof body.metadata !== 'object' || body.metadata === null || Array.isArray(body.metadata))
+  ) {
+    throw new Error('metadata must be an object');
+  }
+  return {
+    prompt: body.prompt,
+    workspace: body.workspace,
+    ...(body.source === undefined ? {} : { source: body.source as string }),
+    ...(body.delegation === undefined
+      ? {}
+      : {
+          delegation: body.delegation as Exclude<
+            OrchestrationRequest['delegation'],
+            undefined
+          >,
+        }),
+    ...(body.metadata === undefined ? {} : { metadata: body.metadata as Record<string, unknown> }),
+  };
+}
+
+export interface AgentKnotHttpRuntime {
+  routes(): Array<{ name: string; worker: string; provider: string; model: string }>;
+  get(id: string): Promise<JobRecord | undefined>;
+  list(): Promise<JobRecord[]>;
+  start(request: JobRequest): Promise<StartJobResult>;
+  delegationPolicy?(): DelegationConfig;
+  getOrchestration?(id: string): Promise<OrchestrationRecord | undefined>;
+  listOrchestrations?(): Promise<OrchestrationRecord[]>;
+  startOrchestration?(request: OrchestrationRequest): Promise<StartOrchestrationResult>;
+}
+
 export interface AgentKnotHttpServer {
   server: Server;
   listen(port: number, host?: string): Promise<{ host: string; port: number }>;
   close(): Promise<void>;
 }
 
-export function createAgentKnotHttpServer(orchestrator: Orchestrator): AgentKnotHttpServer {
+export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentKnotHttpServer {
   const activeJobs = new Map<string, StartJobResult>();
+  const activeOrchestrations = new Map<string, StartOrchestrationResult>();
   const server = createServer(async (request, response) => {
     try {
       const method = request.method ?? 'GET';
@@ -75,18 +129,46 @@ export function createAgentKnotHttpServer(orchestrator: Orchestrator): AgentKnot
         return;
       }
       if (method === 'GET' && pathname === '/v1/routes') {
-        sendJson(response, 200, { routes: orchestrator.routes() });
+        sendJson(response, 200, { routes: runtime.routes() });
         return;
       }
       if (method === 'GET' && pathname === '/v1/jobs') {
-        sendJson(response, 200, { jobs: await orchestrator.list() });
+        sendJson(response, 200, { jobs: await runtime.list() });
         return;
       }
       if (method === 'POST' && pathname === '/v1/jobs') {
-        const started = await orchestrator.start(asJobRequest(await readJson(request)));
+        const started = await runtime.start(asJobRequest(await readJson(request)));
         activeJobs.set(started.job.id, started);
         void started.completion.finally(() => activeJobs.delete(started.job.id));
         sendJson(response, 202, { job: started.job });
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/v1/delegation') {
+        if (!runtime.delegationPolicy) {
+          sendJson(response, 501, { error: 'Orchestration is not available on this runtime' });
+          return;
+        }
+        sendJson(response, 200, { delegation: runtime.delegationPolicy() });
+        return;
+      }
+      if (method === 'GET' && pathname === '/v1/orchestrations') {
+        if (!runtime.listOrchestrations) {
+          sendJson(response, 501, { error: 'Orchestration is not available on this runtime' });
+          return;
+        }
+        sendJson(response, 200, { orchestrations: await runtime.listOrchestrations() });
+        return;
+      }
+      if (method === 'POST' && pathname === '/v1/orchestrations') {
+        if (!runtime.startOrchestration) {
+          sendJson(response, 501, { error: 'Orchestration is not available on this runtime' });
+          return;
+        }
+        const started = await runtime.startOrchestration(asOrchestrationRequest(await readJson(request)));
+        activeOrchestrations.set(started.orchestration.id, started);
+        void started.completion.finally(() => activeOrchestrations.delete(started.orchestration.id));
+        sendJson(response, 202, { orchestration: started.orchestration });
         return;
       }
 
@@ -96,7 +178,7 @@ export function createAgentKnotHttpServer(orchestrator: Orchestrator): AgentKnot
         const action = match[2];
         if (!id) throw new Error('Missing job id');
         if (method === 'GET' && action === undefined) {
-          const job = await orchestrator.get(id);
+          const job = await runtime.get(id);
           if (!job) {
             sendJson(response, 404, { error: 'Job not found' });
             return;
@@ -105,7 +187,7 @@ export function createAgentKnotHttpServer(orchestrator: Orchestrator): AgentKnot
           return;
         }
         if (method === 'GET' && action === 'events') {
-          const job = await orchestrator.get(id);
+          const job = await runtime.get(id);
           if (!job) {
             sendJson(response, 404, { error: 'Job not found' });
             return;
@@ -121,6 +203,46 @@ export function createAgentKnotHttpServer(orchestrator: Orchestrator): AgentKnot
           }
           active.cancel();
           sendJson(response, 202, { accepted: true, jobId: id });
+          return;
+        }
+      }
+
+      const orchestrationMatch =
+        /^\/v1\/orchestrations\/([a-zA-Z0-9_-]+)(?:\/(events|cancel))?$/.exec(pathname);
+      if (orchestrationMatch) {
+        const id = orchestrationMatch[1];
+        const action = orchestrationMatch[2];
+        if (!id) throw new Error('Missing orchestration id');
+        if (!runtime.getOrchestration) {
+          sendJson(response, 501, { error: 'Orchestration is not available on this runtime' });
+          return;
+        }
+        if (method === 'GET' && action === undefined) {
+          const orchestration = await runtime.getOrchestration(id);
+          if (!orchestration) {
+            sendJson(response, 404, { error: 'Orchestration not found' });
+            return;
+          }
+          sendJson(response, 200, { orchestration });
+          return;
+        }
+        if (method === 'GET' && action === 'events') {
+          const orchestration = await runtime.getOrchestration(id);
+          if (!orchestration) {
+            sendJson(response, 404, { error: 'Orchestration not found' });
+            return;
+          }
+          sendJson(response, 200, { events: orchestration.events });
+          return;
+        }
+        if (method === 'POST' && action === 'cancel') {
+          const active = activeOrchestrations.get(id);
+          if (!active) {
+            sendJson(response, 409, { error: 'Orchestration is not active on this server' });
+            return;
+          }
+          await active.cancel();
+          sendJson(response, 202, { accepted: true, orchestrationId: id });
           return;
         }
       }

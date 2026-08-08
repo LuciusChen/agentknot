@@ -1,27 +1,34 @@
 # AgentKnot
 
-AgentKnot is a small, vendor-neutral control plane for delegating coding tasks to interchangeable agent workers and model providers.
+AgentKnot is a small, vendor-neutral control plane for developers and teams that discuss work in one coding agent but want policy-driven execution through interchangeable workers and model providers. It removes controller-specific delegation logic while preserving an auditable plan, isolated job evidence, and explicit artifact handoff.
 
-The controller is intentionally not an SDK-specific concept. Codex, Claude, a CI job, or a custom application submits the same `JobRequest` through the CLI, HTTP API, or TypeScript API. Routes independently select:
+The controller is intentionally not an SDK-specific concept. Codex, Claude, a CI job, or a custom application submits the same `JobRequest` or `OrchestrationRequest` through the CLI, HTTP API, or TypeScript API. Routes independently select:
 
 ```text
-controller → AgentKnot Job API → worker adapter → model provider/model
+controller → AgentKnot orchestration policy → persisted plan → bounded child jobs
+                         └──────→ Job API → worker adapter → provider/model
 ```
 
 The first real worker adapter uses [Pi RPC](https://pi.dev/docs/latest/rpc), a strict JSONL protocol. It can run Pi with OpenCode Go and GPT-5.6 Luna without installing the OpenCode CLI.
+
+To try it, install dependencies and run the deterministic Quick Start below. Use `agentknot run` for an already bounded leaf task or `agentknot orchestrate` when AgentKnot should decide whether and how to delegate.
 
 ## Current status
 
 This is an MVP. It already provides:
 
 - controller-neutral CLI, HTTP, and TypeScript entry points;
+- policy-driven `off`, `suggest`, and `auto` delegation modes;
+- strict planner output validation, immutable plan/policy evidence, and bounded child dispatch;
 - independent worker/provider/model routing;
 - Pi RPC and deterministic mock adapters;
-- durable job snapshots and ordered events;
+- durable job and orchestration snapshots with ordered events;
 - timeouts, retries, cancellation, and completion callbacks;
 - optional vendor-neutral Git worktree isolation with per-attempt patch artifacts;
 - normalized text, tool, retry, lifecycle, artifact, and stderr events;
 - configuration validation, route diagnostics, and HTTP service liveness.
+
+Controllers still choose whether a request enters the leaf Job API or the orchestration API. AgentKnot cannot intercept arbitrary native Codex or Claude chats; a thin controller integration must call `agentknot orchestrate`, `POST /v1/orchestrations`, or `runtime.orchestrate()`.
 
 ## Product and architecture contracts
 
@@ -58,6 +65,21 @@ node dist/src/cli.js run \
 ```
 
 Jobs are written under `.agentknot/jobs/` by default.
+
+## Automatic delegation
+
+Use the orchestration entry point when AgentKnot should decide whether to retain the goal upstream, suggest a split, or dispatch bounded child jobs:
+
+```bash
+node dist/src/cli.js orchestrate \
+  --source codex \
+  --workspace /path/to/target-repository \
+  "Implement the approved feature and verify its public contract"
+```
+
+The repository configuration dogfoods `mode: "auto"` with Luna as both planner and worker. The planner only returns a strict assessment. Deterministic policy then filters task kinds, caps the plan at four non-recursive children and four concurrent worker processes, persists the effective policy, exact worker prompts, plan hash, and route choices, and only then starts child jobs. A non-parallel assessment automatically reduces its parent to one active child. Product decisions, artifact integration, commits, and pushes remain with the upstream controller.
+
+Per request, `--delegation never`, `--delegation suggest`, and `--delegation force` can narrow or request behavior. `force` does not bypass global `off`, the child limit, depth limit, or `keepUpstream` policy. Set global mode to `off` when a caller only wants the leaf Job API. `suggest` and `auto` require Git worktree isolation.
 
 ## Pi + OpenCode Go + Luna
 
@@ -149,6 +171,21 @@ curl -sS -X POST http://127.0.0.1:7391/v1/jobs/JOB_ID/cancel
 
 Set `callbackUrl` in the request to receive the terminal job snapshot by HTTP POST.
 
+Submit a goal to the policy-driven path:
+
+```bash
+curl -sS http://127.0.0.1:7391/v1/orchestrations \
+  -H 'content-type: application/json' \
+  -d '{
+    "prompt": "Implement the approved feature and review the test gaps",
+    "workspace": "/path/to/repository",
+    "source": "claude",
+    "delegation": "inherit"
+  }'
+```
+
+Poll `/v1/orchestrations/ORCHESTRATION_ID`, inspect its `/events`, or cancel an orchestration active in the serving process. `GET /v1/delegation` exposes the effective global policy without exposing credentials.
+
 ## Configuration
 
 The separation between worker and provider is deliberate. Workspace isolation is an orchestrator lifecycle, not a worker or provider feature:
@@ -177,6 +214,21 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "maxAttempts": 2,
       "timeoutMs": 3600000
     }
+  },
+  "delegation": {
+    "mode": "auto",
+    "planner": { "strategy": "hybrid", "route": "luna" },
+    "dispatch": {
+      "defaultRoute": "luna",
+      "maxChildren": 4,
+      "maxDepth": 1,
+      "maxConcurrency": 4
+    },
+    "policy": {
+      "delegate": ["architecture-review", "test-gap-analysis", "documentation", "independent-implementation"],
+      "keepUpstream": ["requirements-decision", "product-decision", "artifact-integration", "commit", "push"]
+    },
+    "fallback": "upstream"
   }
 }
 ```
@@ -193,18 +245,24 @@ GET  /v1/jobs
 GET  /v1/jobs/:id
 GET  /v1/jobs/:id/events
 POST /v1/jobs/:id/cancel
+GET  /v1/delegation
+POST /v1/orchestrations
+GET  /v1/orchestrations
+GET  /v1/orchestrations/:id
+GET  /v1/orchestrations/:id/events
+POST /v1/orchestrations/:id/cancel
 GET  /v1/routes
 GET  /health
 ```
 
 ## Safety model
 
-In `git-worktree` mode, worker agents read, edit, and execute commands in a managed detached worktree; the supplied source workspace is not modified and the resulting patch is handed off as an artifact. In compatibility mode `none`, workers operate directly in the supplied workspace. AgentKnot does not claim to be an operating-system sandbox. Run workers only against repositories and credentials appropriate for that worker.
+Automatic delegation requires `git-worktree` mode. Planner and worker agents read and execute commands in separate managed detached worktrees; the supplied source workspace is not modified and resulting patches are handed off as artifacts. A persisted plan never grants automatic artifact application. In compatibility mode `none`, leaf jobs may operate directly in the supplied workspace, but `suggest` and `auto` configuration is rejected. AgentKnot does not claim to be an operating-system sandbox. Run workers only against repositories and credentials appropriate for that worker.
 
 Callback URLs are supplied by trusted local controllers and can make HTTP requests from the AgentKnot host. Do not expose the MVP HTTP server to untrusted networks.
 
 ## Roadmap
 
-The active focus is the dependable local single-job loop: precise persistence and restart semantics, bounded records, failure-contract tests, and an explicit artifact inspection/promotion workflow. Controller/worker portability, local automation policy, and any remote operation are later evidence-gated stages.
+The active focus remains dependable local execution, now including the smallest bounded orchestration slice required for controller-independent automatic delegation. Current limits include single-process writers, fail-without-resume restart reconciliation, depth one, no automatic artifact integration, and no authentication for the local HTTP service. Broader queues, dependency graphs, remote operation, and fleets remain evidence-gated.
 
 See [the roadmap](docs/ROADMAP.md) for scope, non-goals, and exit gates. Native adapters, provider fallback, streaming, sandbox backends, OhMyPi compatibility, and remote/fleet features are proposals rather than current capabilities.

@@ -74,3 +74,100 @@ test('parseConfig rejects routes pointing to a missing worker', () => {
     /unknown worker/
   );
 });
+
+test('parseConfig normalizes bounded automatic delegation without coupling it to a controller', () => {
+  const config = parseConfig({
+    version: 1,
+    defaultRoute: 'luna',
+    storage: {
+      directory: '.agentknot/jobs',
+      orchestrationDirectory: '.agentknot/orchestrations',
+    },
+    workspaceIsolation: { mode: 'git-worktree' },
+    workers: { pi: { adapter: 'pi-rpc' } },
+    routes: {
+      luna: { worker: 'pi', provider: 'opencode-go', model: 'gpt-5.6-luna' },
+      grok: { worker: 'pi', provider: 'xai', model: 'grok-code-fast-1' },
+    },
+    delegation: {
+      mode: 'auto',
+      planner: { strategy: 'hybrid', route: 'luna' },
+      dispatch: { defaultRoute: 'grok', maxChildren: 3, maxDepth: 1, maxConcurrency: 2 },
+      policy: {
+        delegate: ['documentation', 'test-gap-analysis'],
+        keepUpstream: ['product-decision', 'artifact-integration'],
+      },
+      fallback: 'upstream',
+    },
+  });
+
+  assert.deepEqual(config.storage, {
+    directory: '.agentknot/jobs',
+    orchestrationDirectory: '.agentknot/orchestrations',
+  });
+  assert.deepEqual(config.delegation, {
+    mode: 'auto',
+    planner: { strategy: 'hybrid', route: 'luna' },
+    dispatch: { defaultRoute: 'grok', maxChildren: 3, maxDepth: 1, maxConcurrency: 2 },
+    policy: {
+      delegate: ['documentation', 'test-gap-analysis'],
+      keepUpstream: ['product-decision', 'artifact-integration'],
+    },
+    fallback: 'upstream',
+  });
+
+  const defaults = parseConfig({
+    version: 1,
+    defaultRoute: 'mock',
+    storage: { directory: '.agentknot/jobs' },
+    workspaceIsolation: { mode: 'git-worktree' },
+    workers: { mock: { adapter: 'mock' } },
+    routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
+    delegation: { mode: 'auto' },
+  });
+  assert.deepEqual(defaults.delegation?.dispatch, {
+    defaultRoute: 'mock',
+    maxChildren: 2,
+    maxDepth: 1,
+    maxConcurrency: 2,
+  });
+});
+
+test('parseConfig rejects unsafe or unresolved delegation settings', () => {
+  const base = {
+    version: 1,
+    defaultRoute: 'mock',
+    storage: { directory: '.agentknot/jobs' },
+    workers: { mock: { adapter: 'mock' } },
+    routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
+  };
+
+  assert.throws(
+    () => parseConfig({ ...base, delegation: { mode: 'auto', planner: { route: 'missing' } } }),
+    /planner\.route references unknown route/
+  );
+  assert.throws(
+    () =>
+      parseConfig({
+        ...base,
+        delegation: { mode: 'auto', dispatch: { defaultRoute: 'mock', maxDepth: 2 } },
+      }),
+    /maxDepth must be 1/
+  );
+  assert.throws(
+    () =>
+      parseConfig({
+        ...base,
+        delegation: { mode: 'auto', dispatch: { defaultRoute: 'mock', maxChildren: 2, maxConcurrency: 3 } },
+      }),
+    /maxConcurrency must not exceed maxChildren/
+  );
+  assert.throws(
+    () =>
+      parseConfig({
+        ...base,
+        delegation: { mode: 'suggest', planner: { route: 'mock' } },
+      }),
+    /requires workspaceIsolation\.mode "git-worktree"/
+  );
+});

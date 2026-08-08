@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import type { AgentKnotConfig } from './config.js';
 import { resolveRoute } from './config.js';
+import { isExecutorProcessAlive } from './execution.js';
 import { WorkspaceIsolationManager, type IsolatedWorkspace, type WorkspaceInspection } from './workspace-isolation.js';
 import type {
   JobEvent,
@@ -57,18 +58,6 @@ function normalizeRequest(request: JobRequest): JobRequest {
     ...(request.callbackUrl === undefined ? {} : { callbackUrl: request.callbackUrl }),
     ...(request.metadata === undefined ? {} : { metadata: structuredClone(request.metadata) }),
   };
-}
-
-function isExecutorProcessAlive(execution: JobExecution | undefined): boolean {
-  if (!execution || !Number.isSafeInteger(execution.pid) || execution.pid <= 0) return false;
-  try {
-    process.kill(execution.pid, 0);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EPERM') return true;
-    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
-    throw error;
-  }
 }
 
 export class Orchestrator {

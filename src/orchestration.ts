@@ -1,0 +1,516 @@
+import { randomUUID } from 'node:crypto';
+import { stat } from 'node:fs/promises';
+import path from 'node:path';
+
+import type { DelegationConfig } from './config.js';
+import { isExecutorProcessAlive } from './execution.js';
+import {
+  buildPlannerPrompt,
+  composeDelegationPlan,
+  parseTaskAssessment,
+  rehashDelegationPlan,
+  skippedTaskAssessment,
+} from './delegation-policy.js';
+import type {
+  DelegationPlan,
+  OrchestrationChild,
+  OrchestrationEvent,
+  OrchestrationEventType,
+  OrchestrationRecord,
+  OrchestrationRequest,
+  OrchestrationStore,
+  PlannedSubtask,
+  StartOrchestrationResult,
+} from './orchestration-types.js';
+import type { Orchestrator } from './orchestrator.js';
+import type { JobRecord } from './types.js';
+
+export interface OrchestrationServiceOptions {
+  config: DelegationConfig;
+  jobs: Orchestrator;
+  store: OrchestrationStore;
+  now?: () => Date;
+}
+
+interface ActiveChild {
+  child: OrchestrationChild;
+  cancel: () => void;
+  completion: Promise<{ job?: JobRecord; error?: unknown }>;
+}
+
+interface SemaphoreWaiter {
+  resolve: (release: () => void) => void;
+  reject: (error: unknown) => void;
+  signal: AbortSignal;
+  onAbort: () => void;
+}
+
+class Semaphore {
+  #available: number;
+  readonly #waiters: SemaphoreWaiter[] = [];
+
+  constructor(capacity: number) {
+    this.#available = capacity;
+  }
+
+  acquire(signal: AbortSignal): Promise<() => void> {
+    if (signal.aborted) {
+      return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Orchestration cancelled'));
+    }
+    if (this.#available > 0) {
+      this.#available -= 1;
+      return Promise.resolve(this.#releaseHandle());
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: SemaphoreWaiter = {
+        resolve,
+        reject,
+        signal,
+        onAbort: () => {
+          const index = this.#waiters.indexOf(waiter);
+          if (index !== -1) this.#waiters.splice(index, 1);
+          reject(signal.reason instanceof Error ? signal.reason : new Error('Orchestration cancelled'));
+        },
+      };
+      signal.addEventListener('abort', waiter.onAbort, { once: true });
+      this.#waiters.push(waiter);
+    });
+  }
+
+  #releaseHandle(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const waiter = this.#waiters.shift();
+      if (waiter) {
+        waiter.signal.removeEventListener('abort', waiter.onAbort);
+        waiter.resolve(this.#releaseHandle());
+      } else {
+        this.#available += 1;
+      }
+    };
+  }
+}
+
+function errorDetails(error: unknown): { name: string; message: string } {
+  if (error instanceof Error) return { name: error.name, message: error.message };
+  return { name: 'Error', message: String(error) };
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new Error('Orchestration cancelled');
+}
+
+function normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
+  if (typeof request.prompt !== 'string' || request.prompt.trim() === '') {
+    throw new Error('Orchestration prompt must be a non-empty string');
+  }
+  if (typeof request.workspace !== 'string' || request.workspace.trim() === '') {
+    throw new Error('Orchestration workspace must be a non-empty string');
+  }
+  if (
+    request.delegation !== undefined &&
+    !['inherit', 'never', 'suggest', 'force'].includes(request.delegation)
+  ) {
+    throw new Error('Orchestration delegation must be "inherit", "never", "suggest", or "force"');
+  }
+  return {
+    prompt: request.prompt,
+    workspace: path.resolve(request.workspace),
+    ...(request.source === undefined ? {} : { source: request.source }),
+    ...(request.metadata === undefined ? {} : { metadata: structuredClone(request.metadata) }),
+    ...(request.delegation === undefined ? {} : { delegation: request.delegation }),
+  };
+}
+
+export class OrchestrationService {
+  readonly #config: DelegationConfig;
+  readonly #jobs: Orchestrator;
+  readonly #store: OrchestrationStore;
+  readonly #now: () => Date;
+  readonly #runtimeId = randomUUID();
+  readonly #dispatchSlots: Semaphore;
+  readonly #recordMutations = new Map<string, Promise<void>>();
+
+  constructor(options: OrchestrationServiceOptions) {
+    this.#config = structuredClone(options.config);
+    this.#jobs = options.jobs;
+    this.#store = options.store;
+    this.#now = options.now ?? (() => new Date());
+    this.#dispatchSlots = new Semaphore(this.#config.dispatch.maxConcurrency);
+  }
+
+  policy(): DelegationConfig {
+    return structuredClone(this.#config);
+  }
+
+  async get(id: string): Promise<OrchestrationRecord | undefined> {
+    return this.#store.get(id);
+  }
+
+  async list(): Promise<OrchestrationRecord[]> {
+    return this.#store.list();
+  }
+
+  async reconcileInterruptedOrchestrations(): Promise<OrchestrationRecord[]> {
+    const reconciled: OrchestrationRecord[] = [];
+    for (const record of await this.#store.list()) {
+      if (!['queued', 'planning', 'dispatching'].includes(record.status)) continue;
+      if (isExecutorProcessAlive(record.execution)) continue;
+
+      const previousStatus = record.status;
+      const message =
+        'A new AgentKnot runtime found this orchestration without a terminal state; v1 does not resume or redispatch interrupted plans';
+      record.status = 'failed';
+      record.completedAt = this.#now().toISOString();
+      record.error = { name: 'ExecutionInterruptedError', message };
+      delete record.result;
+      await this.#appendEvent(
+        record,
+        'orchestration.failed',
+        { name: 'ExecutionInterruptedError', message, reason: 'runtime_restart', previousStatus },
+        record.completedAt
+      );
+      reconciled.push(structuredClone(record));
+    }
+    return reconciled;
+  }
+
+  async run(request: OrchestrationRequest): Promise<OrchestrationRecord> {
+    return (await this.start(request)).completion;
+  }
+
+  async start(request: OrchestrationRequest): Promise<StartOrchestrationResult> {
+    const normalized = normalizeRequest(request);
+    const workspace = await stat(normalized.workspace).catch(() => undefined);
+    if (!workspace?.isDirectory()) {
+      throw new Error(`Orchestration workspace is not a directory: ${normalized.workspace}`);
+    }
+
+    const now = this.#now().toISOString();
+    const record: OrchestrationRecord = {
+      id: `orchestration_${randomUUID()}`,
+      status: 'queued',
+      request: normalized,
+      policy: structuredClone(this.#config),
+      createdAt: now,
+      updatedAt: now,
+      execution: { runtimeId: this.#runtimeId, pid: process.pid, startedAt: now },
+      events: [],
+      children: [],
+    };
+    const controller = new AbortController();
+    await this.#store.create(record);
+    await this.#appendEvent(record, 'orchestration.queued', {
+      source: normalized.source ?? 'unknown',
+      mode: record.policy.mode,
+    });
+
+    const completion = this.#execute(record, controller.signal).catch(async (error: unknown) => {
+      if (record.status !== 'failed' && record.status !== 'cancelled') {
+        const details = errorDetails(error);
+        record.status = controller.signal.aborted ? 'cancelled' : 'failed';
+        record.completedAt = this.#now().toISOString();
+        record.error = details;
+        await this.#appendEvent(
+          record,
+          controller.signal.aborted ? 'orchestration.cancelled' : 'orchestration.failed',
+          details,
+          record.completedAt
+        );
+      }
+      return structuredClone(record);
+    });
+
+    return {
+      orchestration: structuredClone(record),
+      completion,
+      cancel: async () => {
+        if (controller.signal.aborted || ['succeeded', 'failed', 'cancelled'].includes(record.status)) return;
+        const requestedAt = this.#now().toISOString();
+        record.cancelRequestedAt = requestedAt;
+        await this.#appendEvent(
+          record,
+          'orchestration.cancel.requested',
+          { source: 'controller' },
+          requestedAt
+        );
+        controller.abort(new Error('Orchestration cancelled by controller'));
+      },
+    };
+  }
+
+  async #execute(record: OrchestrationRecord, signal: AbortSignal): Promise<OrchestrationRecord> {
+    record.status = 'planning';
+    record.startedAt = this.#now().toISOString();
+    await this.#appendEvent(record, 'orchestration.planning', undefined, record.startedAt);
+    throwIfAborted(signal);
+
+    const plan = await this.#plan(record, signal);
+    record.plan = plan;
+    await this.#appendEvent(record, 'orchestration.planned', {
+      mode: plan.mode,
+      decision: plan.decision,
+      willDispatch: plan.willDispatch,
+      subtaskCount: plan.subtasks.length,
+    });
+    throwIfAborted(signal);
+
+    if (!plan.willDispatch || plan.subtasks.length === 0) {
+      record.status = 'succeeded';
+      record.completedAt = this.#now().toISOString();
+      record.result = {
+        action: plan.mode === 'suggest' && plan.decision !== 'upstream' ? 'suggested' : 'upstream',
+        children: [],
+      };
+      delete record.error;
+      await this.#appendEvent(
+        record,
+        'orchestration.succeeded',
+        { action: record.result.action },
+        record.completedAt
+      );
+      return structuredClone(record);
+    }
+
+    record.status = 'dispatching';
+    const dispatchConcurrency = plan.assessment.parallelizable
+      ? record.policy.dispatch.maxConcurrency
+      : 1;
+    await this.#appendEvent(record, 'orchestration.dispatching', {
+      subtaskCount: plan.subtasks.length,
+      configuredConcurrency: record.policy.dispatch.maxConcurrency,
+      effectiveConcurrency: dispatchConcurrency,
+    });
+    await this.#dispatch(record, plan.subtasks, dispatchConcurrency, signal);
+    throwIfAborted(signal);
+
+    record.result = { action: 'delegated', children: structuredClone(record.children) };
+    const failedChildren = record.children.filter((child) => child.status !== 'succeeded');
+    record.completedAt = this.#now().toISOString();
+    if (failedChildren.length > 0) {
+      record.status = 'failed';
+      record.error = {
+        name: 'ChildJobError',
+        message: `${failedChildren.length} of ${record.children.length} delegated child jobs did not succeed`,
+      };
+      await this.#appendEvent(
+        record,
+        'orchestration.failed',
+        { name: record.error.name, message: record.error.message },
+        record.completedAt
+      );
+    } else {
+      record.status = 'succeeded';
+      delete record.error;
+      await this.#appendEvent(
+        record,
+        'orchestration.succeeded',
+        { action: 'delegated', childCount: record.children.length },
+        record.completedAt
+      );
+    }
+    return structuredClone(record);
+  }
+
+  async #plan(record: OrchestrationRecord, signal: AbortSignal): Promise<DelegationPlan> {
+    if (record.policy.mode === 'off' || record.request.delegation === 'never') {
+      return composeDelegationPlan(
+        record.request,
+        skippedTaskAssessment(
+          record.policy.mode === 'off'
+            ? 'Automatic delegation is disabled by configuration.'
+            : 'The request disabled delegation.'
+        ),
+        record.policy
+      );
+    }
+
+    const started = await this.#jobs.start({
+      prompt: buildPlannerPrompt(record.request, record.policy),
+      workspace: record.request.workspace,
+      route: record.policy.planner.route,
+      ...(record.request.source === undefined ? {} : { source: record.request.source }),
+      metadata: {
+        ...(record.request.metadata ?? {}),
+        agentknotDelegation: { orchestrationId: record.id, role: 'planner', depth: 0 },
+      },
+    });
+    record.plannerJobId = started.job.id;
+    await this.#appendEvent(record, 'orchestration.planner.started', { jobId: started.job.id });
+    const plannerJob = await this.#awaitJob(started, signal);
+    await this.#appendEvent(record, 'orchestration.planner.completed', {
+      jobId: plannerJob.id,
+      status: plannerJob.status,
+    });
+    throwIfAborted(signal);
+
+    try {
+      if (plannerJob.status !== 'succeeded' || !plannerJob.result) {
+        throw new Error(plannerJob.error?.message ?? `Planner job ended with status ${plannerJob.status}`);
+      }
+      return composeDelegationPlan(
+        record.request,
+        parseTaskAssessment(plannerJob.result.output),
+        record.policy
+      );
+    } catch (error) {
+      if (record.policy.fallback === 'fail') {
+        throw new Error(`Delegation planner failed: ${errorDetails(error).message}`, { cause: error });
+      }
+      const details = errorDetails(error);
+      return rehashDelegationPlan({
+        ...composeDelegationPlan(
+          { ...record.request, delegation: 'never' },
+          skippedTaskAssessment(`Delegation planner failed: ${details.message}`),
+          record.policy
+        ),
+        plannerError: { ...details, jobId: plannerJob.id },
+      });
+    }
+  }
+
+  async #awaitJob(
+    started: Awaited<ReturnType<Orchestrator['start']>>,
+    signal: AbortSignal
+  ): Promise<JobRecord> {
+    const onAbort = () => started.cancel();
+    if (signal.aborted) started.cancel();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      return await started.completion;
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  async #dispatch(
+    record: OrchestrationRecord,
+    subtasks: PlannedSubtask[],
+    maxConcurrency: number,
+    signal: AbortSignal
+  ): Promise<void> {
+    const active: ActiveChild[] = [];
+    let nextIndex = 0;
+
+    const launch = async (subtask: PlannedSubtask): Promise<ActiveChild> => {
+      const releaseSlot = await this.#dispatchSlots.acquire(signal);
+      try {
+        const started = await this.#jobs.start({
+          prompt: subtask.executionPrompt,
+          workspace: record.request.workspace,
+          route: subtask.route,
+          ...(record.request.source === undefined ? {} : { source: record.request.source }),
+          metadata: {
+            ...(record.request.metadata ?? {}),
+            agentknotDelegation: {
+              orchestrationId: record.id,
+              role: 'worker',
+              subtaskId: subtask.id,
+              depth: 1,
+            },
+          },
+        });
+        const child: OrchestrationChild = {
+          subtaskId: subtask.id,
+          jobId: started.job.id,
+          status: started.job.status,
+        };
+        record.children.push(child);
+        await this.#appendEvent(record, 'orchestration.child.started', {
+          subtaskId: subtask.id,
+          jobId: started.job.id,
+          route: subtask.route,
+        });
+        const onAbort = () => started.cancel();
+        if (signal.aborted) started.cancel();
+        else signal.addEventListener('abort', onAbort, { once: true });
+        return {
+          child,
+          cancel: started.cancel,
+          completion: started.completion
+            .then((job) => ({ job }))
+            .catch((error: unknown) => ({ error }))
+            .finally(() => {
+              signal.removeEventListener('abort', onAbort);
+              releaseSlot();
+            }),
+        };
+      } catch (error) {
+        releaseSlot();
+        throw error;
+      }
+    };
+
+    const settleNext = async (): Promise<void> => {
+      const settled = await Promise.race(
+        active.map((item) => item.completion.then((outcome) => ({ item, outcome })))
+      );
+      active.splice(active.indexOf(settled.item), 1);
+      if (settled.outcome.job) {
+        settled.item.child.status = settled.outcome.job.status;
+        if (settled.outcome.job.result) settled.item.child.output = settled.outcome.job.result.output;
+        if (settled.outcome.job.error) settled.item.child.error = structuredClone(settled.outcome.job.error);
+      } else {
+        const details = errorDetails(settled.outcome.error);
+        settled.item.child.status = signal.aborted ? 'cancelled' : 'failed';
+        settled.item.child.error = { ...details, attempt: 0, retryable: false };
+      }
+      await this.#appendEvent(record, 'orchestration.child.completed', {
+        subtaskId: settled.item.child.subtaskId,
+        jobId: settled.item.child.jobId,
+        status: settled.item.child.status,
+      });
+    };
+
+    try {
+      while (nextIndex < subtasks.length || active.length > 0) {
+        while (
+          !signal.aborted &&
+          nextIndex < subtasks.length &&
+          active.length < maxConcurrency
+        ) {
+          active.push(await launch(subtasks[nextIndex] as PlannedSubtask));
+          nextIndex += 1;
+        }
+        if (active.length === 0) break;
+        await settleNext();
+      }
+    } catch (error) {
+      for (const item of active) item.cancel();
+      while (active.length > 0) await settleNext();
+      throw error;
+    }
+  }
+
+  async #appendEvent(
+    record: OrchestrationRecord,
+    type: OrchestrationEventType,
+    data?: Record<string, unknown>,
+    at = this.#now().toISOString()
+  ): Promise<OrchestrationEvent> {
+    let appended: OrchestrationEvent | undefined;
+    const previous = this.#recordMutations.get(record.id) ?? Promise.resolve();
+    const current = previous.then(async () => {
+      appended = {
+        sequence: record.events.length + 1,
+        orchestrationId: record.id,
+        at,
+        type,
+        ...(data === undefined ? {} : { data }),
+      };
+      record.events.push(appended);
+      record.updatedAt = at;
+      await this.#store.save(record);
+    });
+    this.#recordMutations.set(record.id, current);
+    try {
+      await current;
+    } finally {
+      if (this.#recordMutations.get(record.id) === current) this.#recordMutations.delete(record.id);
+    }
+    return appended as OrchestrationEvent;
+  }
+}

@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
 
 import { createRuntime } from '../src/runtime.js';
+import { FileOrchestrationStore } from '../src/orchestration-store.js';
+import type { OrchestrationRecord, OrchestrationStatus } from '../src/orchestration-types.js';
 import { FileJobStore } from '../src/store.js';
 import type { JobRecord, JobStatus } from '../src/types.js';
 
@@ -53,11 +55,50 @@ function staleJob(id: string, status: Extract<JobStatus, 'queued' | 'running'>, 
   };
 }
 
+function staleOrchestration(
+  id: string,
+  status: Extract<OrchestrationStatus, 'queued' | 'planning' | 'dispatching'>,
+  workspace: string,
+  pid: number
+): OrchestrationRecord {
+  const createdAt = '2026-08-08T01:00:00.000Z';
+  return {
+    id,
+    status,
+    request: { prompt: 'stale orchestration', workspace, source: 'test' },
+    policy: {
+      mode: 'off',
+      planner: { strategy: 'hybrid', route: 'mock' },
+      dispatch: { defaultRoute: 'mock', maxChildren: 2, maxDepth: 1, maxConcurrency: 1 },
+      policy: {
+        delegate: ['documentation'],
+        keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
+      },
+      fallback: 'upstream',
+    },
+    createdAt,
+    updatedAt: createdAt,
+    execution: { runtimeId: 'runtime_stale', pid, startedAt: createdAt },
+    events: [
+      {
+        sequence: 1,
+        orchestrationId: id,
+        at: createdAt,
+        type: 'orchestration.queued',
+        data: { source: 'test', mode: 'off' },
+      },
+    ],
+    children: [],
+  };
+}
+
 test('createRuntime deterministically fails stale nonterminal jobs once without replaying them live', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-runtime-'));
   const storageDirectory = path.join(directory, 'jobs');
+  const orchestrationStorageDirectory = path.join(directory, 'orchestrations');
   const configPath = path.join(directory, 'agentknot.config.json');
   const workspace = path.join(directory, 'workspace');
+  await mkdir(workspace);
   await writeFile(
     configPath,
     `${JSON.stringify(
@@ -94,6 +135,10 @@ test('createRuntime deterministically fails stale nonterminal jobs once without 
     startedAt: activeRunning.createdAt,
   };
   await store.create(activeRunning);
+  const orchestrationStore = new FileOrchestrationStore(orchestrationStorageDirectory);
+  await orchestrationStore.create(
+    staleOrchestration('orchestration_stale', 'dispatching', workspace, exitedPid)
+  );
   const observed: string[] = [];
 
   const runtime = await createRuntime({
@@ -124,10 +169,19 @@ test('createRuntime deterministically fails stale nonterminal jobs once without 
   }
   assert.deepEqual(observed, []);
   assert.equal((await runtime.get('job_active_running'))?.status, 'running');
+  const staleParent = await runtime.getOrchestration('orchestration_stale');
+  assert.equal(staleParent?.status, 'failed');
+  assert.equal(staleParent?.error?.name, 'ExecutionInterruptedError');
+  assert.equal(staleParent?.events.at(-1)?.type, 'orchestration.failed');
+  assert.equal(staleParent?.events.at(-1)?.data?.reason, 'runtime_restart');
 
   const queuedAfterFirstRecovery = await runtime.get('job_stale_queued');
   const secondRuntime = await createRuntime({ configPath });
   const queuedAfterSecondRecovery = await secondRuntime.get('job_stale_queued');
   assert.deepEqual(queuedAfterSecondRecovery, queuedAfterFirstRecovery);
   assert.equal((await secondRuntime.get('job_active_running'))?.status, 'running');
+  assert.deepEqual(
+    await secondRuntime.getOrchestration('orchestration_stale'),
+    staleParent
+  );
 });

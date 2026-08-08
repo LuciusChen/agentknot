@@ -27,11 +27,15 @@ function help(): string {
 
 Usage:
   agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME]
+  agentknot orchestrate [prompt...] [--workspace PATH] [--source NAME] [--delegation MODE]
   agentknot serve [--host HOST] [--port PORT]
   agentknot doctor [--route NAME]
   agentknot routes [--json]
   agentknot jobs [--json]
   agentknot show JOB_ID
+  agentknot delegation [--json]
+  agentknot orchestrations [--json]
+  agentknot orchestration-show ORCHESTRATION_ID
 
 Global options:
   --config PATH       Configuration file (default: agentknot.config.json)
@@ -44,6 +48,14 @@ Run options:
   --callback URL      POST the terminal Job record to this URL
   --json              Print only the final Job record as JSON
   --events            Stream every event as JSONL
+
+Orchestrate options:
+  --prompt TEXT       Goal instead of positional text
+  --workspace PATH    Target repository (default: current directory)
+  --source NAME       Controller identity, e.g. codex, claude, or ci
+  --delegation MODE   inherit, never, suggest, or force (default: inherit)
+  --suggest           Alias for --delegation suggest
+  --json              Print the terminal orchestration record as JSON
 `;
 }
 
@@ -99,6 +111,48 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (command === 'orchestrate') {
+    const workspace = takeOption(args, '--workspace') ?? process.cwd();
+    const source = takeOption(args, '--source') ?? 'cli';
+    const promptOption = takeOption(args, '--prompt');
+    const delegationOption = takeOption(args, '--delegation');
+    const suggest = takeFlag(args, '--suggest');
+    const json = takeFlag(args, '--json');
+    if (suggest && delegationOption !== undefined) {
+      throw new Error('--suggest and --delegation cannot be used together');
+    }
+    const delegation = suggest ? 'suggest' : delegationOption;
+    if (delegation !== undefined && !['inherit', 'never', 'suggest', 'force'].includes(delegation)) {
+      throw new Error('--delegation must be inherit, never, suggest, or force');
+    }
+    if (args.some((value) => value.startsWith('--'))) throw new Error(`Unknown option: ${args.join(' ')}`);
+    const prompt = promptOption ?? args.join(' ');
+    const runtime = await createRuntime({
+      ...(configPath === undefined ? {} : { configPath }),
+      onEvent: (event) => printEvent(event, json, false),
+    });
+    const orchestration = await runtime.orchestrate({
+      prompt,
+      workspace,
+      source,
+      ...(delegation === undefined
+        ? {}
+        : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),
+    });
+    if (json) {
+      process.stdout.write(`${JSON.stringify(orchestration, null, 2)}\n`);
+    } else {
+      process.stdout.write(
+        `\n${orchestration.id}\t${orchestration.status}\t${orchestration.result?.action ?? 'none'}\n`
+      );
+      for (const child of orchestration.children) {
+        process.stdout.write(`${child.jobId}\t${child.status}\t${child.subtaskId}\n`);
+      }
+    }
+    if (orchestration.status !== 'succeeded') process.exitCode = 1;
+    return;
+  }
+
   const runtime = await createRuntime(configPath === undefined ? {} : { configPath });
 
   if (command === 'serve') {
@@ -137,6 +191,49 @@ async function main(argv: string[]): Promise<void> {
     const jobs = await runtime.list();
     if (json) process.stdout.write(`${JSON.stringify(jobs, null, 2)}\n`);
     else for (const job of jobs) process.stdout.write(`${job.id}\t${job.status}\t${job.route.name}\t${job.createdAt}\n`);
+    return;
+  }
+
+  if (command === 'delegation') {
+    const json = takeFlag(args, '--json');
+    if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
+    const policy = runtime.delegationPolicy();
+    if (json) process.stdout.write(`${JSON.stringify(policy, null, 2)}\n`);
+    else {
+      process.stdout.write(
+        `${policy.mode}\tplanner=${policy.planner.route}\tworker=${policy.dispatch.defaultRoute}\tchildren<=${policy.dispatch.maxChildren}\tconcurrency<=${policy.dispatch.maxConcurrency}\n`
+      );
+    }
+    return;
+  }
+
+  if (command === 'orchestrations') {
+    const json = takeFlag(args, '--json');
+    if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
+    const orchestrations = await runtime.listOrchestrations();
+    if (json) process.stdout.write(`${JSON.stringify(orchestrations, null, 2)}\n`);
+    else {
+      for (const orchestration of orchestrations) {
+        process.stdout.write(
+          `${orchestration.id}\t${orchestration.status}\t${orchestration.result?.action ?? 'none'}\t${orchestration.createdAt}\n`
+        );
+      }
+    }
+    return;
+  }
+
+  if (command === 'orchestration-show') {
+    const id = args.shift();
+    if (!id || args.length > 0) {
+      throw new Error('orchestration-show requires exactly one ORCHESTRATION_ID');
+    }
+    const orchestration = await runtime.getOrchestration(id);
+    if (!orchestration) {
+      process.stderr.write(`Orchestration not found: ${id}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(`${JSON.stringify(orchestration, null, 2)}\n`);
     return;
   }
 
