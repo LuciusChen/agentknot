@@ -13,6 +13,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Git worktree patch artifacts that include tracked, non-ignored untracked, binary, and worker-committed changes.
 - Read-only artifact listing, SHA-256/size/base-commit verification, and bounded integrity-gated patch preview through TypeScript, CLI, and HTTP.
 - Opt-in `doctor --live --route NAME` diagnostics that perform one bounded real inference through the exact resolved route, without Job or artifact persistence; the repository promotion check covers Pi/OpenCode Go/Luna at `thinkingLevel: "max"`.
+- Deterministic Pi RPC conformance fixtures for split JSONL/UTF-8 input, malformed frames, premature exit, missing settlement, timeout, and cancellation.
 - Product requirements, technical specification, evidence-gated roadmap, and decision/postmortem records.
 
 ### Changed
@@ -34,4 +35,5 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Restart reconciliation refreshes embedded parent child outcomes from authoritative leaf Job records.
 - Child records and delegation metadata carry the admitting plan hash and policy version.
 - Pi RPC waits for `agent_settled`, preserving queued continuation and retry output before declaring completion.
+- Pi RPC timeout and cancellation now use bounded `SIGTERM` → `SIGKILL` supervision for the exact owned child and bounded stdio draining, preventing a child that ignores `SIGTERM` from leaving the Job active indefinitely; malformed JSONL and exit-without-settlement errors now retain protocol context ([postmortem 0009](postmortems/0009-pi-rpc-child-supervision.md)).
 - Worktree retries start from the same base commit and clean only AgentKnot-owned worktree registrations.

@@ -100,8 +100,13 @@ Still outside this slice:
 
 ### Worker reliability work
 
-- Add malformed JSONL, split UTF-8/frame, premature-exit, missing-settlement, timeout, and cancellation fixtures for Pi RPC.
-- Specify the requirement for adapters to settle after abort and supervise their child processes.
+Delivered in this slice:
+
+- Deterministic malformed JSONL, split UTF-8/frame, premature-exit, missing-settlement, timeout, and cancellation fixtures exercise the real Pi adapter and public Orchestrator boundary.
+- The Pi adapter settles after abort with bounded exact-child `SIGTERM` → `SIGKILL` supervision and bounded owned-stream draining; it does not perform broad process cleanup.
+
+Still open:
+
 - Ensure configuration-only `doctor` evaluates the same effective environment and route inputs that `run` uses.
 - Distinguish HTTP liveness from route readiness in naming and documentation.
 

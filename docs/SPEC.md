@@ -223,7 +223,7 @@ A failed or cancelled job has `error`, terminal timestamps, attempt count, order
 
 Artifact inspection is a read-only orchestrator/workspace operation. The TypeScript API exposes `listArtifacts(jobId)`, `verifyArtifacts(jobId)`, and `previewArtifact(jobId, attempt)` with the language-neutral `JobArtifactList`, `JobArtifactVerificationReport`, and `JobArtifactPreview` payloads. Verification resolves only artifacts recorded on the selected job, validates their managed storage paths, recomputes size and SHA-256, and compares each recorded base commit with the current source repository `HEAD`. Missing, unreadable, path-mismatched, tampered, unsupported, or base-mismatched evidence returns stable issue codes and `valid: false`. Preview returns at most 1 MiB of UTF-8 Git patch text; content is `null` when file size or SHA-256 does not match, while a base mismatch is reported without hiding otherwise intact diagnostic content. Inspection never applies patches or mutates, commits, merges, or pushes the source repository.
 
-Cancellation is cooperative at the `WorkerAdapter` boundary. The orchestrator aborts the attempt signal and rejects a normal worker result received after abort. A custom adapter that never settles and ignores the signal can currently prevent completion indefinitely. The Pi adapter owns termination of the Pi child process.
+Cancellation is cooperative at the `WorkerAdapter` boundary. The orchestrator aborts the attempt signal and rejects a normal worker result received after abort. A custom adapter that never settles and ignores the signal can currently prevent completion indefinitely. The Pi adapter owns its exact Pi child: after abort or any terminal path it uses a bounded `SIGTERM` grace period, escalates to `SIGKILL`, and drains or closes only that child's owned stdout/stderr streams before settling. This is exact-child supervision, not broad process-group or arbitrary-descendant cleanup.
 
 A timeout aborts the same attempt signal. It is not a universal hard kill independent of adapter behavior.
 
@@ -293,7 +293,7 @@ Core consumers may depend on the normalized event name, job ID, sequence, timest
 
 `worker.raw`, text deltas, prompts, tool data, and result output are currently stored without a global size or retention policy. They may contain sensitive user or repository content. No document may imply automatic redaction until that feature exists and is verified.
 
-Pi RPC is strict LF-delimited JSONL. Its adapter must decode streaming UTF-8 explicitly and must not assume that process chunks align with JSON messages or use Node `readline` behavior as its protocol definition.
+Pi RPC is strict LF-delimited JSONL. Its adapter decodes streaming UTF-8 explicitly and does not assume that process chunks align with JSON messages or use Node `readline` behavior as its protocol definition. Each non-empty line must parse as a JSON object; malformed input reports line context. Process exit before `agent_settled` is an error, with `agent_end`-without-settlement distinguished from exit before `agent_end`.
 
 Orchestration events cover queued, planning, planner start/completion, planned, dispatching, child start/completion, cancellation requested, and terminal succeeded/failed/cancelled transitions. Their sequence is gap-free within one parent snapshot. Leaf job events remain authoritative for worker-level activity.
 

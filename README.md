@@ -131,7 +131,7 @@ pi --no-skills \
   --no-session
 ```
 
-It disables automatic skill discovery for the background coding worker, sends the prompt over stdin as JSONL, and waits for Pi's `agent_settled` event, so retries and queued continuation events finish before the job is marked complete. Repository context files such as `AGENTS.md` remain available.
+It disables automatic skill discovery for the background coding worker, sends the prompt over stdin as JSONL, and waits for Pi's `agent_settled` event, so retries and queued continuation events finish before the job is marked complete. The adapter decodes streaming UTF-8 independently of process chunk boundaries, reports malformed frames and missing settlement explicitly, and uses bounded `SIGTERM` → `SIGKILL` supervision for the exact Pi child on timeout or cancellation. It does not perform process-wide cleanup or claim ownership of arbitrary descendants. Repository context files such as `AGENTS.md` remain available.
 
 ## Switching controller or provider
 

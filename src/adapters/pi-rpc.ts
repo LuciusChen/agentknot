@@ -98,8 +98,27 @@ async function hasPiAuth(provider: string): Promise<boolean> {
   }
 }
 
+const CHILD_SIGTERM_GRACE_MS = 100;
+const CHILD_SIGKILL_WAIT_MS = 1_000;
+const CHILD_OUTPUT_DRAIN_GRACE_MS = 1_000;
+
 function rpcLine(value: Record<string, unknown>): string {
   return `${JSON.stringify(value)}\n`;
+}
+
+function isPiRpcEvent(value: unknown): value is PiRpcEvent {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseRpcLine(line: string, lineNumber: number): PiRpcEvent {
+  try {
+    const value: unknown = JSON.parse(line);
+    if (!isPiRpcEvent(value)) throw new Error('expected a JSON object');
+    return value;
+  } catch (error) {
+    const cause = error instanceof Error ? error : new Error(String(error));
+    throw new Error(`Pi RPC emitted malformed JSONL at line ${lineNumber}: ${cause.message}`, { cause });
+  }
 }
 
 function extractAssistantError(messages: unknown[] | undefined): string | undefined {
@@ -146,13 +165,25 @@ function waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {
   });
 }
 
-function waitForExitOrTimeout(exit: Promise<void>, timeoutMs: number): Promise<boolean> {
+function waitForPromiseOrTimeout(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(false), timeoutMs);
-    void exit.then(() => {
-      clearTimeout(timer);
-      resolve(true);
-    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      resolve(false);
+    }, timeoutMs);
+    void promise.then(
+      () => {
+        if (timedOut) return;
+        clearTimeout(timer);
+        resolve(true);
+      },
+      () => {
+        if (timedOut) return;
+        clearTimeout(timer);
+        resolve(true);
+      }
+    );
   });
 }
 
@@ -164,17 +195,50 @@ async function terminateChild(
   try {
     child.kill('SIGTERM');
   } catch {
-    // The child may have exited between the state check and kill.
+    // The owned child may have exited between the state check and kill.
   }
-  if (await waitForExitOrTimeout(exit, 100)) return;
+  if (await waitForPromiseOrTimeout(exit, CHILD_SIGTERM_GRACE_MS)) return;
   if (!childExited(child)) {
     try {
       child.kill('SIGKILL');
     } catch {
-      // The child may have exited between the state check and kill.
+      // The owned child may have exited between the state check and kill.
     }
   }
-  await waitForExitOrTimeout(exit, 1_000);
+  await waitForPromiseOrTimeout(exit, CHILD_SIGKILL_WAIT_MS);
+}
+
+async function awaitChildOutput(
+  child: ChildProcessWithoutNullStreams,
+  stdoutTask: Promise<void>,
+  stderrTask: Promise<void>
+): Promise<void> {
+  const output = Promise.allSettled([stdoutTask, stderrTask]);
+  if (!(await waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_GRACE_MS))) {
+    // Only the exact streams owned by this child are closed. The child itself has already
+    // received the bounded SIGTERM/SIGKILL sequence above; this releases inherited pipe ends
+    // without attempting broad process cleanup.
+    child.stdout.destroy();
+    child.stderr.destroy();
+  }
+  await output;
+}
+
+function childExitError(
+  label: string,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  agentEnded: boolean,
+  stderr: string
+): Error {
+  const state = agentEnded
+    ? 'received agent_end without agent_settled before exit'
+    : 'exited before agent_settled';
+  return new Error(
+    `${label} ${state} (code=${String(code)}, signal=${String(signal)})${
+      stderr.trim() === '' ? '' : `: ${stderr.trim()}`
+    }`
+  );
 }
 
 const LIVE_PROBE_PROMPT =
@@ -260,6 +324,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     let output = '';
     let rawEventCount = 0;
     let assistantError: string | undefined;
+    let agentEnded = false;
     let stderr = '';
     let protocolSettled = false;
     let resolveSettled!: () => void;
@@ -283,9 +348,9 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     const exit = waitForExit(child);
     const abort = () => {
       rejectSettled(input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted'));
-      if (!childExited(child)) child.kill('SIGTERM');
     };
     input.signal.addEventListener('abort', abort, { once: true });
+    if (input.signal.aborted) abort();
     child.stdin.on('error', (error) => {
       if (!protocolSettled) rejectSettled(error);
     });
@@ -299,6 +364,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           break;
         }
         case 'agent_end':
+          agentEnded = true;
           assistantError = extractAssistantError(event.messages) ?? assistantError;
           break;
         case 'agent_settled':
@@ -317,10 +383,17 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
 
     const stdoutTask = (async () => {
       const decoder = new StrictJsonlDecoder();
+      let lineNumber = 0;
       for await (const chunk of child.stdout) {
-        for (const line of decoder.push(Buffer.from(chunk))) handleEvent(JSON.parse(line) as PiRpcEvent);
+        for (const line of decoder.push(Buffer.from(chunk))) {
+          lineNumber += 1;
+          handleEvent(parseRpcLine(line, lineNumber));
+        }
       }
-      for (const line of decoder.end()) handleEvent(JSON.parse(line) as PiRpcEvent);
+      for (const line of decoder.end()) {
+        lineNumber += 1;
+        handleEvent(parseRpcLine(line, lineNumber));
+      }
     })().catch((error: unknown) => {
       rejectSettled(error instanceof Error ? error : new Error(String(error)));
     });
@@ -337,15 +410,16 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       rejectSettled(error);
     });
     child.once('exit', (code, signal) => {
-      if (!protocolSettled) {
-        rejectSettled(
-          new Error(
-            `Pi RPC live probe exited before agent_settled (code=${String(code)}, signal=${String(signal)})${
-              stderr.trim() === '' ? '' : `: ${stderr.trim()}`
-            }`
-          )
-        );
-      }
+      const output = Promise.allSettled([stdoutTask, stderrTask]);
+      void waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_GRACE_MS)
+        .then(() => {
+          if (!protocolSettled) {
+            rejectSettled(childExitError('Pi RPC live probe', code, signal, agentEnded, stderr));
+          }
+        })
+        .catch((error: unknown) => {
+          rejectSettled(error instanceof Error ? error : new Error(String(error)));
+        });
     });
 
     try {
@@ -373,7 +447,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       } finally {
         try {
           await terminateChild(child, exit);
-          await Promise.allSettled([stdoutTask, stderrTask]);
+          await awaitChildOutput(child, stdoutTask, stderrTask);
         } finally {
           await rm(probeWorkspace, { recursive: true, force: true });
         }
@@ -403,11 +477,13 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       env: { ...process.env, ...this.config.environment },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    const exit = waitForExit(child);
 
     let completed = false;
     let output = '';
     let rawEventCount = 0;
     let assistantError: string | undefined;
+    let agentEnded = false;
     let stderr = '';
     let resolveSettled!: () => void;
     let rejectSettled!: (error: Error) => void;
@@ -415,12 +491,15 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       resolveSettled = resolve;
       rejectSettled = reject;
     });
+    // Abort or spawn failure can reject before the startup path reaches its await. Keep that
+    // rejection observed while preserving it for the normal await path.
+    void settled.catch(() => undefined);
 
     const abort = () => {
       if (!completed) rejectSettled(input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted'));
-      child.kill('SIGTERM');
     };
     input.signal.addEventListener('abort', abort, { once: true });
+    if (input.signal.aborted) abort();
 
     const handleEvent = async (event: PiRpcEvent): Promise<void> => {
       rawEventCount += 1;
@@ -471,6 +550,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           await emit('worker.retry.completed', { attempt: event.attempt, success: event.success });
           break;
         case 'agent_end':
+          agentEnded = true;
           assistantError = extractAssistantError(event.messages) ?? assistantError;
           break;
         case 'agent_settled':
@@ -490,12 +570,17 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
 
     const stdoutTask = (async () => {
       const decoder = new StrictJsonlDecoder();
+      let lineNumber = 0;
       for await (const chunk of child.stdout) {
         for (const line of decoder.push(Buffer.from(chunk))) {
-          await handleEvent(JSON.parse(line) as PiRpcEvent);
+          lineNumber += 1;
+          await handleEvent(parseRpcLine(line, lineNumber));
         }
       }
-      for (const line of decoder.end()) await handleEvent(JSON.parse(line) as PiRpcEvent);
+      for (const line of decoder.end()) {
+        lineNumber += 1;
+        await handleEvent(parseRpcLine(line, lineNumber));
+      }
     })().catch((error: unknown) => {
       if (!completed) rejectSettled(error instanceof Error ? error : new Error(String(error)));
     });
@@ -506,22 +591,30 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
         stderr = `${stderr}${text}`.slice(-16_384);
         await emit('worker.stderr', { text });
       }
-    })();
+    })().catch((error: unknown) => {
+      if (!completed) rejectSettled(error instanceof Error ? error : new Error(String(error)));
+    });
 
+    child.stdin.on('error', (error) => {
+      if (!completed) rejectSettled(error);
+    });
+    child.once('error', (error) => {
+      if (!completed) rejectSettled(error);
+    });
     child.once('exit', (code, signal) => {
-      if (!completed) {
-        rejectSettled(
-          new Error(
-            `Pi RPC exited before agent_settled (code=${String(code)}, signal=${String(signal)})${
-              stderr.trim() === '' ? '' : `: ${stderr.trim()}`
-            }`
-          )
-        );
-      }
+      const output = Promise.allSettled([stdoutTask, stderrTask]);
+      void waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_GRACE_MS)
+        .then(() => {
+          if (!completed) rejectSettled(childExitError('Pi RPC', code, signal, agentEnded, stderr));
+        })
+        .catch((error: unknown) => {
+          if (!completed) rejectSettled(error instanceof Error ? error : new Error(String(error)));
+        });
     });
 
     try {
       await waitForSpawn(child);
+      if (input.signal.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
       child.stdin.write(rpcLine({ id: 'retry', type: 'set_auto_retry', enabled: true }));
       if (input.route.thinkingLevel) {
         child.stdin.write(
@@ -538,9 +631,12 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     } finally {
       completed = true;
       input.signal.removeEventListener('abort', abort);
-      child.stdin.end();
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
-      await Promise.allSettled([stdoutTask, stderrTask]);
+      try {
+        child.stdin.end();
+      } finally {
+        await terminateChild(child, exit);
+        await awaitChildOutput(child, stdoutTask, stderrTask);
+      }
     }
   }
 }

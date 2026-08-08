@@ -95,7 +95,7 @@ Version 0.0.1 currently implements:
 - deterministic mock and Pi RPC worker adapters;
 - OpenCode Go/Luna and xAI/Grok routes through Pi configuration;
 - file-backed or in-memory job snapshots and ordered events;
-- immediate execution with cooperative timeouts, retries, and cancellation;
+- immediate execution with cooperative timeouts, retries, and cancellation, plus bounded exact-child supervision in the bundled Pi adapter;
 - one-shot completion callbacks to trusted URLs;
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
