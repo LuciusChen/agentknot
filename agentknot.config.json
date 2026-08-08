@@ -16,6 +16,9 @@
     "pi": {
       "adapter": "pi-rpc",
       "command": "pi",
+      "commandArgs": [
+        "--no-skills"
+      ],
       "noSession": true
     }
   },

@@ -79,13 +79,14 @@ node dist/src/cli.js run \
 AgentKnot starts:
 
 ```text
-pi --mode rpc \
+pi --no-skills \
+  --mode rpc \
   --provider opencode-go \
   --model gpt-5.6-luna \
   --no-session
 ```
 
-It sends the prompt over stdin as JSONL and waits for Pi's `agent_settled` event, so retries and queued continuation events finish before the job is marked complete.
+It disables automatic skill discovery for the background coding worker, sends the prompt over stdin as JSONL, and waits for Pi's `agent_settled` event, so retries and queued continuation events finish before the job is marked complete. Repository context files such as `AGENTS.md` remain available.
 
 ## Switching controller or provider
 
@@ -151,6 +152,7 @@ The separation between worker and provider is deliberate. Workspace isolation is
     "pi": {
       "adapter": "pi-rpc",
       "command": "pi",
+      "commandArgs": ["--no-skills"],
       "noSession": true
     }
   },

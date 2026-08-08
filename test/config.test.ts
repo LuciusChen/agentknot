@@ -9,7 +9,7 @@ test('parseConfig keeps worker and provider as independent routing dimensions', 
     defaultRoute: 'luna',
     storage: { directory: '.agentknot/jobs' },
     workers: {
-      pi: { adapter: 'pi-rpc', command: 'pi' },
+      pi: { adapter: 'pi-rpc', command: 'pi', commandArgs: ['--no-skills'] },
     },
     routes: {
       luna: {
@@ -20,6 +20,12 @@ test('parseConfig keeps worker and provider as independent routing dimensions', 
         requiredEnv: ['OPENCODE_API_KEY'],
       },
     },
+  });
+
+  assert.deepEqual(config.workers.pi, {
+    adapter: 'pi-rpc',
+    command: 'pi',
+    commandArgs: ['--no-skills'],
   });
 
   assert.deepEqual(resolveRoute(config), {
