@@ -55,6 +55,14 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+async function waitFor(condition: () => Promise<boolean>, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await condition()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`Timed out waiting for ${message}`);
+}
+
 class PlannerAndWorkerAdapter implements WorkerAdapter {
   readonly name = 'test';
   activeWorkers = 0;
@@ -95,6 +103,69 @@ class PlannerAndWorkerAdapter implements WorkerAdapter {
     } finally {
       this.activeRuns -= 1;
     }
+  }
+}
+
+class BlockingPlannerAdapter implements WorkerAdapter {
+  readonly name = 'test';
+  activeRuns = 0;
+  workerRuns = 0;
+  #plannerStartedResolve: (() => void) | undefined;
+  readonly plannerStarted = new Promise<void>((resolve) => {
+    this.#plannerStartedResolve = resolve;
+  });
+
+  async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
+    return { ok: true, message: 'blocking test adapter ready' };
+  }
+
+  async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
+    this.activeRuns += 1;
+    try {
+      await emit('worker.started', { route: input.route.name });
+      if (input.route.name === 'planner') {
+        this.#plannerStartedResolve?.();
+        await new Promise<void>((_resolve, reject) => {
+          const onAbort = () => {
+            cleanup();
+            reject(input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted'));
+          };
+          const cleanup = () => {
+            input.signal.removeEventListener('abort', onAbort);
+          };
+          if (input.signal.aborted) onAbort();
+          else input.signal.addEventListener('abort', onAbort, { once: true });
+        });
+        return { output: JSON.stringify(assessment) };
+      }
+      this.workerRuns += 1;
+      return { output: `completed ${input.route.name}: ${input.prompt}` };
+    } finally {
+      this.activeRuns -= 1;
+    }
+  }
+}
+
+class RetryingChildAdapter implements WorkerAdapter {
+  readonly name = 'test';
+  readonly attempts: Array<{ prompt: string; attempt: number }> = [];
+
+  async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
+    return { ok: true, message: 'retry test adapter ready' };
+  }
+
+  async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
+    await emit('worker.started', { route: input.route.name });
+    if (input.route.name === 'planner') return { output: JSON.stringify(assessment) };
+
+    this.attempts.push({ prompt: input.prompt, attempt: input.attempt });
+    if (input.prompt.includes('Review the tests') && input.attempt === 1) {
+      throw new Error('transient child failure');
+    }
+    if (input.prompt.includes('Update documentation')) {
+      throw new Error('permanent child failure');
+    }
+    return { output: `completed on attempt ${input.attempt}` };
   }
 }
 
@@ -146,7 +217,7 @@ const assessment: TaskAssessment = {
   ],
 };
 
-function testConfig(maxConcurrency = 1): AgentKnotConfig {
+function testConfig(maxConcurrency = 1, workerMaxAttempts = 1): AgentKnotConfig {
   return {
     version: 1,
     defaultRoute: 'worker',
@@ -158,7 +229,13 @@ function testConfig(maxConcurrency = 1): AgentKnotConfig {
     workers: { test: { adapter: 'mock' } },
     routes: {
       planner: { worker: 'test', provider: 'test', model: 'planner', maxAttempts: 1, timeoutMs: 30_000 },
-      worker: { worker: 'test', provider: 'test', model: 'worker', maxAttempts: 1, timeoutMs: 30_000 },
+      worker: {
+        worker: 'test',
+        provider: 'test',
+        model: 'worker',
+        maxAttempts: workerMaxAttempts,
+        timeoutMs: 30_000,
+      },
     },
     delegation: {
       mode: 'auto',
@@ -173,13 +250,13 @@ function testConfig(maxConcurrency = 1): AgentKnotConfig {
   };
 }
 
-function createServices(adapter: PlannerAndWorkerAdapter, maxConcurrency = 1): {
+function createServices(adapter: WorkerAdapter, maxConcurrency = 1, workerMaxAttempts = 1): {
   jobs: Orchestrator;
   jobStore: MemoryJobStore;
   orchestrations: OrchestrationService;
   orchestrationStore: MemoryOrchestrationStore;
 } {
-  const config = testConfig(maxConcurrency);
+  const config = testConfig(maxConcurrency, workerMaxAttempts);
   const jobStore = new MemoryJobStore();
   const jobs = new Orchestrator({
     config,
@@ -291,6 +368,91 @@ test('OrchestrationService cancellation stops active child jobs and does not lau
   assert.equal(record.children[0]?.status, 'cancelled');
   assert.equal(record.events.some((event) => event.type === 'orchestration.cancel.requested'), true);
   assert.equal(record.events.at(-1)?.type, 'orchestration.cancelled');
+});
+
+test('OrchestrationService cancellation removes a planner blocked on the shared dispatch semaphore', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-blocked-cancel-');
+  const adapter = new BlockingPlannerAdapter();
+  const { jobStore, orchestrations, orchestrationStore } = createServices(adapter, 1);
+
+  const first = await orchestrations.start({ prompt: 'Hold the planner slot.', workspace });
+  await adapter.plannerStarted;
+
+  const second = await orchestrations.start({ prompt: 'Wait for the planner slot.', workspace });
+  await waitFor(
+    async () => {
+      const record = await orchestrationStore.get(second.orchestration.id);
+      return record?.events.some((event) => event.type === 'orchestration.planning') === true;
+    },
+    'the second orchestration to reach planning'
+  );
+  assert.equal((await jobStore.list()).length, 1, 'the blocked planner must not be admitted');
+
+  await second.cancel();
+  const cancelled = await second.completion;
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.children.length, 0);
+  assert.equal(cancelled.events.at(-1)?.type, 'orchestration.cancelled');
+  assert.equal((await jobStore.list()).length, 1, 'cancelling a semaphore waiter must not start a job');
+  assert.equal(adapter.activeRuns, 1, 'the first planner remains the only active execution');
+
+  await first.cancel();
+  const firstCancelled = await first.completion;
+  assert.equal(firstCancelled.status, 'cancelled');
+  assert.equal(adapter.activeRuns, 0, 'all admitted work must settle after cancellation');
+});
+
+test('OrchestrationService aggregates failed children while preserving child retries', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-child-retry-');
+  const adapter = new RetryingChildAdapter();
+  const { jobStore, orchestrations } = createServices(adapter, 2, 2);
+
+  const record = await orchestrations.run({
+    prompt: 'Retry delegated work and report failures.',
+    workspace,
+  });
+
+  assert.equal(record.status, 'failed');
+  assert.equal(record.children.length, 2);
+  assert.match(record.error?.message ?? '', /1 of 2 delegated child jobs did not succeed/);
+  assert.equal(record.events.at(-1)?.type, 'orchestration.failed');
+
+  const jobs = await jobStore.list();
+  const retriedJob = jobs.find((job) => job.request.prompt.includes('Review the tests'));
+  const failedJob = jobs.find((job) => job.request.prompt.includes('Update documentation'));
+  assert.ok(retriedJob);
+  assert.ok(failedJob);
+  assert.equal(retriedJob.attempt, 2);
+  assert.equal(retriedJob.status, 'succeeded');
+  assert.equal(retriedJob.result?.attempt, 2);
+  assert.equal(retriedJob.events.filter((event) => event.type === 'job.retrying').length, 1);
+  assert.equal(failedJob.attempt, 2);
+  assert.equal(failedJob.status, 'failed');
+  assert.equal(failedJob.error?.attempt, 2);
+  assert.equal(failedJob.error?.retryable, false);
+  assert.equal(failedJob.events.filter((event) => event.type === 'job.retrying').length, 1);
+
+  const retriedChild = record.children.find((child) => child.jobId === retriedJob.id);
+  const failedChild = record.children.find((child) => child.jobId === failedJob.id);
+  const retriedResultChild = record.result?.children.find((child) => child.jobId === retriedJob.id);
+  const failedResultChild = record.result?.children.find((child) => child.jobId === failedJob.id);
+  assert.equal(retriedChild?.status, 'succeeded');
+  assert.equal(failedChild?.status, 'failed');
+  assert.equal(failedChild?.error?.attempt, 2);
+  assert.equal(retriedResultChild?.status, 'succeeded');
+  assert.equal(failedResultChild?.status, 'failed');
+  assert.deepEqual(
+    adapter.attempts
+      .filter(({ prompt }) => prompt === retriedJob.request.prompt)
+      .map(({ attempt }) => attempt),
+    [1, 2]
+  );
+  assert.deepEqual(
+    adapter.attempts
+      .filter(({ prompt }) => prompt === failedJob.request.prompt)
+      .map(({ attempt }) => attempt),
+    [1, 2]
+  );
 });
 
 test('OrchestrationService enforces its concurrency cap across parent orchestrations', async () => {

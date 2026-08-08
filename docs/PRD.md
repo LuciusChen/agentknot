@@ -104,7 +104,7 @@ Version 0.0.1 currently implements:
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
 - strict planner assessments followed by deterministic task-kind policy;
 - immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
-- a maximum of six configured depth-one child jobs and a shared in-process concurrency cap;
+- bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood setting of four for each, and a configuration ceiling of six for each with concurrency never exceeding the child count;
 - fail-without-resume startup reconciliation for stale jobs and orchestration records.
 
 The current file stores provide persistent audit snapshots and deterministically mark stale nonterminal jobs or orchestrations failed on startup when their recorded process is absent. They do not provide resumable execution, a restartable queue, journaling, multi-process coordination, PID-reuse protection, or automatic cleanup of worktrees left by a hard process crash.

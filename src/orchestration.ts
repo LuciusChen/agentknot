@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import type { DelegationConfig } from './config.js';
 import { isExecutorProcessAlive } from './execution.js';
+import { assertJsonMetadata } from './metadata.js';
 import {
   buildPlannerPrompt,
   composeDelegationPlan,
@@ -116,6 +117,7 @@ function normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
   ) {
     throw new Error('Orchestration delegation must be "inherit", "never", "suggest", or "force"');
   }
+  if (request.metadata !== undefined) assertJsonMetadata(request.metadata);
   return {
     prompt: request.prompt,
     workspace: path.resolve(request.workspace),

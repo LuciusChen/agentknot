@@ -5,7 +5,7 @@
 - Date: 2026-08-08
 - Owners: AgentKnot maintainers
 - Affected versions/commits: AgentKnot 0.0.1 development after `a97edac`
-- Related: [PRD](../docs/PRD.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md)
+- Related: [PRD](../docs/PRD.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md), [incident 0005](./0005-concurrent-job-event-persistence.md)
 
 ## Summary
 
@@ -34,7 +34,7 @@ Relay was reviewed as a boundary reference. Its draft auto-routing design places
 
 1. A Pi/Luna design review was submitted through AgentKnot as job `job_7776af86-6b59-4023-a48c-cab95611f851` before implementation. It recommended a layer above the leaf orchestrator, strict JSON, a separate parent store, persist-before-dispatch evidence, a process-wide cap, depth one, and fail-without-resume semantics.
 2. Deterministic tests were added for strict planner parsing, policy filtering, over-cap rejection, suggestion mode, malformed-planner fallback, persisted-before-child ordering, cancellation, shared concurrency, HTTP access, and startup reconciliation.
-3. The repository configuration was changed to use Luna for both planner and worker in `auto` mode with four children maximum, depth one, and concurrency four so the self-orchestration check exercises real parallel Pi processes. Non-parallel assessments reduce effective parent concurrency to one.
+3. The repository configuration was changed to use Luna for both planner and worker in `auto` mode with an explicit four-child and four-concurrency dogfood setting, depth one, so the self-orchestration check exercises real parallel Pi processes. The product defaults are two children and two concurrent executions when limits are omitted, and the parser ceiling is six for each; non-parallel assessments reduce effective parent concurrency to one.
 4. The first real self-orchestration completed as `orchestration_da237ca1-440d-4071-a5bc-e782faadf011`: one Luna planner produced four eligible review tasks, all four Luna child jobs started within 133 milliseconds, all succeeded, every patch artifact was empty as requested for a read-only review, and no managed worktree remained.
 
 ## Decision rationale
@@ -96,3 +96,11 @@ That would delay the core user outcome and broaden failure semantics significant
 ### 2026-08-08 — First self-orchestration promotion check
 
 The promotion check used commit `3474c5f` and the repository's `auto` policy with Luna as planner and worker, four children, depth one, and concurrency four. Planner job `job_b3ae05fd-194b-487e-8237-3a4e2a0ebdad` completed before `orchestration.planned` was persisted. Worker jobs `job_04d68cf7-e209-4ec7-8a6f-9c64668e0781`, `job_6565c67a-aecb-4566-adeb-74b71e0b3c82`, `job_5880f910-b484-45cc-b482-d38ea7661f1f`, and `job_5a98561b-050a-4636-a281-833b05b11618` then overlapped for more than 90 seconds. The run exposed a concurrent file-store event race and lifecycle/provenance gaps; those findings led directly to incident record 0005 and follow-up fixes rather than being treated as a ceremonial pass.
+
+This run is evidence for one normal successful planner-to-plan-to-child path only. The planner completing before `orchestration.planned` is an observed event ordering, not evidence that planner failure, timeout, cancellation, or shared-semaphore waiting fails fast. The malformed-planner upstream fallback test covers a separate failure path; the self-orchestration result must not be cited as proof of those failure semantics.
+
+### 2026-08-08 — Actual-edit self-orchestration
+
+The second promotion check used commit `2a8dc96` and parent `orchestration_f964d6ad-fb2a-44fc-9307-a4bf559bd49a`. Planner job `job_d89a74d3-9a24-4ea7-a3f5-f288a87849d6` produced plan `334f469ad36e7cc5d6e78163c6001531e0772ae720728d75bafde70ed11d892c`; four isolated Luna children started within 131 milliseconds and all produced non-empty patches. The tasks covered metadata validation (`job_8b42a41d-5c7c-46ce-919e-cf39d794d608`, SHA-256 `cb6b0811bdbc6c0900103dd829cb0973143587f764c1faa3979600ae278ee981`), CLI and public-entry tests (`job_7cf71a9d-8a93-409f-953f-4ec43eb3f62f`, `8c92a21b2b9966bbaf9f2398b9a2ae5ff4fcef68e04d974804ea71ec3ca4e5f4`), cancellation and retry tests (`job_a2c5b559-ecb6-4e4e-9bdd-371cfc3c9e55`, `37453bc6ebf33ed6b6c055375b6eb3c25c4452fff381aebdca589b2471ec64e9`), and documentation (`job_d62687ff-d56a-43b1-9302-bffa0bc13cf1`, `df445620d81cbd6867745335fc258894137f8bd75c32f5427a01d11d0021f208`).
+
+The upstream controller verified every artifact digest, reviewed the patches, and integrated them selectively with `apply_patch`; AgentKnot did not auto-apply worker output. The integrated tree then passed the TypeScript build, `git diff --check`, and all 40 tests. This demonstrates the intended repair workflow: upstream diagnosis and acceptance boundaries, concurrent downstream implementation in isolated worktrees, and upstream-controlled promotion.

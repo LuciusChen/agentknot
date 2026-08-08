@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { AgentKnotConfig } from './config.js';
 import { resolveRoute } from './config.js';
 import { isExecutorProcessAlive } from './execution.js';
+import { assertJsonMetadata } from './metadata.js';
 import {
   WorkspaceIsolationManager,
   workspaceIsolationMode,
@@ -55,6 +56,7 @@ function normalizeRequest(request: JobRequest): JobRequest {
       throw new Error('callbackUrl must use http or https');
     }
   }
+  if (request.metadata !== undefined) assertJsonMetadata(request.metadata);
   return {
     prompt: request.prompt,
     workspace: path.resolve(request.workspace),

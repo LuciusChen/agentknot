@@ -84,7 +84,7 @@ Delivered in this slice:
 - one `OrchestrationRequest` contract shared by CLI, HTTP, and TypeScript;
 - `off`, `suggest`, and `auto` global modes with bounded per-request overrides;
 - a read-only planner job with strict JSON validation and explicit upstream/fail fallback;
-- deterministic allow/keep policy, maximum six children, depth exactly one, and a process-wide concurrency cap;
+- deterministic allow/keep policy, depth exactly one, product defaults of two children and two concurrent executions when limits are omitted, the repository's explicit four-child/four-concurrency dogfood setting, and a six-child/six-concurrency configuration ceiling;
 - immutable effective policy, plan hash, exact prompts/routes, parent-child IDs, and persist-before-dispatch events;
 - child execution only through the ordinary isolated Job API;
 - cancellation propagation and fail-without-resume restart reconciliation;

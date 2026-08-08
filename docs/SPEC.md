@@ -128,6 +128,8 @@ The adapter owns:
 
 The adapter does not own job state transitions, retries, attempt numbering, workspace isolation, artifact capture, callback delivery, or persistence.
 
+The JSON configuration boundary exposes the built-in `mock` and `pi-rpc` adapter kinds only; `createRuntime()` loads that configuration and registers those built-ins. A custom `WorkerAdapter` is a TypeScript construction path: callers provide an `AgentKnotConfig`, `JobStore`, and adapter map to `Orchestrator`, and construct `OrchestrationService` separately when they need orchestration. A custom adapter cannot be selected by adding an arbitrary adapter name to JSON, and adapter-specific behavior must remain at the worker boundary.
+
 ### Workspace modes
 
 `none` passes the supplied directory directly to the worker. It offers no isolation and currently produces no Git patch artifact.
@@ -239,7 +241,9 @@ Global modes are `off`, `suggest`, and `auto`. Omitted delegation configuration 
 
 The planner is a read-only model route and returns JSON only. AgentKnot rejects markdown fences, commentary, missing or unknown fields, invalid enums, oversize content, inconsistent recommendations, and plans above the configured child cap. The deterministic composer applies `delegate` and `keepUpstream` task-kind sets, assigns stable depth-one subtask IDs, captures exact execution prompts and routes, and hashes the plan. An over-cap plan is rejected rather than silently truncated.
 
-The parent plan and `orchestration.planned` event are persisted before the first child starts. `suggest` persists the same evidence without dispatch. With fallback `upstream`, planner failure returns a persisted upstream decision and error evidence; fallback `fail` makes the parent terminally failed.
+When delegation dispatch limits are omitted, the product defaults to `maxChildren: 2` and `maxConcurrency: 2`; the configuration parser permits values from one through six, and `maxConcurrency` cannot exceed `maxChildren`. This repository's dogfood configuration explicitly sets both values to four, so that setting is not the product default.
+
+The parent plan and `orchestration.planned` event are persisted before the first child starts. `suggest` persists the same evidence without dispatch. With fallback `upstream`, planner failure returns a persisted upstream decision and error evidence; with fallback `fail`, planner failure makes the parent terminally failed before a dispatchable plan is persisted. A successful self-orchestration demonstrates only that run's normal planner-to-plan-to-child path; it is not, by itself, evidence for planner fail-fast behavior under failure, timeout, cancellation, or semaphore wait.
 
 ### Dispatch and cancellation
 

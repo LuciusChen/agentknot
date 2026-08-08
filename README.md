@@ -78,7 +78,9 @@ node dist/src/cli.js orchestrate \
   "Implement the approved feature and verify its public contract"
 ```
 
-The repository configuration dogfoods `mode: "auto"` with Luna as both planner and worker. The planner only returns a strict assessment. Deterministic policy then filters task kinds, caps the plan at four non-recursive children and four concurrent worker processes, persists the effective policy, exact worker prompts, plan hash, and route choices, and only then starts child jobs. A non-parallel assessment automatically reduces its parent to one active child. Product decisions, artifact integration, commits, and pushes remain with the upstream controller.
+The repository configuration dogfoods `mode: "auto"` with Luna as both planner and worker. The product defaults are `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; this repository explicitly sets both to 4 for dogfooding, while configuration permits at most 6 for each and never allows concurrency above the child count. The planner only returns a strict assessment. Deterministic policy then filters task kinds, persists the effective policy, exact worker prompts, plan hash, and route choices, and only then starts child jobs. A non-parallel assessment automatically reduces its parent to one active child. Product decisions, artifact integration, commits, and pushes remain with the upstream controller.
+
+The successful self-orchestration was evidence for one normal planner-to-plan-to-child run, not standalone evidence of planner fail-fast behavior. Planner failure, timeout, cancellation, and waiting for a shared dispatch slot have separate outcomes and must be established by their deterministic tests; with the default `upstream` fallback, malformed or failed planner output is recorded in a persisted upstream plan, while `fail` terminates the parent before dispatch.
 
 Per request, `--delegation never`, `--delegation suggest`, and `--delegation force` can narrow or request behavior. `force` does not bypass global `off`, the child limit, depth limit, or `keepUpstream` policy. Set global mode to `off` when a caller only wants the leaf Job API. `suggest` and `auto` require Git worktree isolation.
 
@@ -234,7 +236,7 @@ The separation between worker and provider is deliberate. Workspace isolation is
 }
 ```
 
-Use `--config PATH` or `AGENTKNOT_CONFIG` for another configuration file.
+Use `--config PATH` or `AGENTKNOT_CONFIG` for another configuration file. JSON configuration selects the built-in `mock` and `pi-rpc` worker adapter kinds; it cannot register an arbitrary TypeScript adapter by name. For a custom worker, construct `Orchestrator` in TypeScript with an `AgentKnotConfig`, `JobStore`, and `Map<string, WorkerAdapter>`, and construct `OrchestrationService` separately when orchestration is required; `createRuntime()` is the file-configured path and does not accept a custom adapter factory.
 
 When `workspaceIsolation.mode` is `git-worktree`, AgentKnot requires the supplied workspace's Git repository to have a `HEAD` and a clean index/worktree, including non-ignored untracked files. Each attempt is a detached worktree at the same base commit, and the worker receives the matching repository subdirectory. After every attempt, a binary Git patch is written under the configured storage directory (including non-ignored untracked files and commits made by the worker after the base commit), metadata is recorded on the job, and the exact managed worktree is removed. Patches are artifacts only; AgentKnot never applies them to the source repository. Detached worktrees contain committed files only, so ignored dependencies and build outputs must be provisioned by the worker when needed. The compatibility mode is `none` (or an omitted section), which passes the caller's directory directly and does not provide isolation.
 

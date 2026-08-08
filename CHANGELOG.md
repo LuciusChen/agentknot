@@ -17,12 +17,13 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 
 - Live event observers are advisory; observer failures are persisted without retrying or failing successful worker execution.
 - Stale nonterminal leaf jobs are marked failed once on startup instead of remaining indefinitely active.
-- Automatic delegation defaults to two concurrent children when enabled without an explicit cap; the repository dogfood configuration uses Pi with OpenCode Go/Luna for planning and up to four concurrent delegated workers.
+- Automatic delegation defaults to `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; each value is capped at 6 and concurrency cannot exceed the child count. The repository dogfood configuration explicitly sets both to 4 and uses Pi with OpenCode Go/Luna for planning and delegated workers.
+- Controller metadata now follows one recursive JSON-compatible object contract across TypeScript and HTTP leaf/orchestration APIs.
 - Background Pi workers disable ambient skill discovery by default while retaining repository instructions.
 
 ### Fixed
 
-- Concurrent worker events are serialized per job and file snapshots use unique temporary names, preventing event gaps and temporary-file rename races.
+- Concurrent worker events are serialized per job and file snapshots use unique temporary names, preventing event gaps and temporary-file rename races ([postmortem 0005](postmortems/0005-concurrent-job-event-persistence.md)).
 - Planner jobs now share the same process-wide concurrency budget as delegated child jobs.
 - Planner or child jobs admitted immediately before a parent persistence failure are cancelled and awaited instead of continuing as orphan executions.
 - Restart reconciliation refreshes embedded parent child outcomes from authoritative leaf Job records.

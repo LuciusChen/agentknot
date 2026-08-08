@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import type { DelegationConfig } from './config.js';
+import { assertJsonMetadata } from './metadata.js';
 import type {
   OrchestrationRecord,
   OrchestrationRequest,
@@ -50,16 +51,15 @@ function asJobRequest(value: unknown): JobRequest {
   if (body.callbackUrl !== undefined && typeof body.callbackUrl !== 'string') {
     throw new Error('callbackUrl must be a string');
   }
-  if (body.metadata !== undefined && (typeof body.metadata !== 'object' || body.metadata === null)) {
-    throw new Error('metadata must be an object');
-  }
+  const metadata = body.metadata;
+  if (metadata !== undefined) assertJsonMetadata(metadata);
   return {
     prompt: body.prompt,
     workspace: body.workspace,
     ...(body.route === undefined ? {} : { route: body.route as string }),
     ...(body.source === undefined ? {} : { source: body.source as string }),
     ...(body.callbackUrl === undefined ? {} : { callbackUrl: body.callbackUrl as string }),
-    ...(body.metadata === undefined ? {} : { metadata: body.metadata as Record<string, unknown> }),
+    ...(metadata === undefined ? {} : { metadata }),
   };
 }
 
@@ -77,12 +77,8 @@ function asOrchestrationRequest(value: unknown): OrchestrationRequest {
   ) {
     throw new Error('delegation must be "inherit", "never", "suggest", or "force"');
   }
-  if (
-    body.metadata !== undefined &&
-    (typeof body.metadata !== 'object' || body.metadata === null || Array.isArray(body.metadata))
-  ) {
-    throw new Error('metadata must be an object');
-  }
+  const metadata = body.metadata;
+  if (metadata !== undefined) assertJsonMetadata(metadata);
   return {
     prompt: body.prompt,
     workspace: body.workspace,
@@ -95,7 +91,7 @@ function asOrchestrationRequest(value: unknown): OrchestrationRequest {
             undefined
           >,
         }),
-    ...(body.metadata === undefined ? {} : { metadata: body.metadata as Record<string, unknown> }),
+    ...(metadata === undefined ? {} : { metadata }),
   };
 }
 
