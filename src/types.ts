@@ -55,6 +55,7 @@ export type JobEventType =
   | 'job.failed'
   | 'job.cancelled'
   | 'job.artifact'
+  | 'job.observer.failed'
   | 'worker.started'
   | 'worker.text.delta'
   | 'worker.tool.started'
@@ -82,6 +83,12 @@ export interface JobArtifact {
   baseCommit: string;
 }
 
+export interface JobExecution {
+  runtimeId: string;
+  pid: number;
+  startedAt: string;
+}
+
 export interface JobRecord {
   id: string;
   status: JobStatus;
@@ -93,6 +100,7 @@ export interface JobRecord {
   completedAt?: string;
   attempt: number;
   events: JobEvent[];
+  execution?: JobExecution;
   artifacts?: JobArtifact[];
   result?: JobResult;
   error?: JobError;

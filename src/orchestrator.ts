@@ -8,6 +8,7 @@ import { WorkspaceIsolationManager, type IsolatedWorkspace, type WorkspaceInspec
 import type {
   JobEvent,
   JobEventType,
+  JobExecution,
   JobRecord,
   JobRequest,
   JobStore,
@@ -58,6 +59,18 @@ function normalizeRequest(request: JobRequest): JobRequest {
   };
 }
 
+function isExecutorProcessAlive(execution: JobExecution | undefined): boolean {
+  if (!execution || !Number.isSafeInteger(execution.pid) || execution.pid <= 0) return false;
+  try {
+    process.kill(execution.pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return true;
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
 export class Orchestrator {
   readonly #config: AgentKnotConfig;
   readonly #store: JobStore;
@@ -66,6 +79,7 @@ export class Orchestrator {
   readonly #now: () => Date;
   readonly #fetch: typeof globalThis.fetch;
   readonly #workspaceIsolation: WorkspaceIsolationManager;
+  readonly #execution: JobExecution;
 
   constructor(options: OrchestratorOptions) {
     this.#config = options.config;
@@ -75,6 +89,11 @@ export class Orchestrator {
     this.#now = options.now ?? (() => new Date());
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#workspaceIsolation = new WorkspaceIsolationManager(options.config, options.baseDirectory);
+    this.#execution = {
+      runtimeId: randomUUID(),
+      pid: process.pid,
+      startedAt: this.#now().toISOString(),
+    };
   }
 
   routes(): Array<{ name: string; worker: string; provider: string; model: string }> {
@@ -97,6 +116,43 @@ export class Orchestrator {
 
   async list(): Promise<JobRecord[]> {
     return this.#store.list();
+  }
+
+  async reconcileInterruptedJobs(): Promise<JobRecord[]> {
+    const reconciled: JobRecord[] = [];
+    for (const job of await this.#store.list()) {
+      if (job.status !== 'queued' && job.status !== 'running') continue;
+      if (isExecutorProcessAlive(job.execution)) continue;
+
+      const previousStatus = job.status;
+      const message =
+        'A new AgentKnot runtime found this job without a terminal state; the previous execution cannot be resumed';
+      const completedAt = this.#now().toISOString();
+      job.status = 'failed';
+      job.completedAt = completedAt;
+      job.error = {
+        name: 'ExecutionInterruptedError',
+        message,
+        attempt: job.attempt,
+        retryable: false,
+      };
+      delete job.result;
+      delete job.callback;
+      await this.#appendEvent(
+        job,
+        'job.failed',
+        {
+          name: 'ExecutionInterruptedError',
+          message,
+          attempt: job.attempt,
+          reason: 'runtime_restart',
+          previousStatus,
+        },
+        completedAt
+      );
+      reconciled.push(structuredClone(job));
+    }
+    return reconciled;
   }
 
   async run(request: JobRequest): Promise<JobRecord> {
@@ -127,6 +183,7 @@ export class Orchestrator {
       updatedAt: now,
       attempt: 0,
       events: [],
+      execution: structuredClone(this.#execution),
     };
     const controller = new AbortController();
     await this.#store.create(job);
@@ -268,7 +325,25 @@ export class Orchestrator {
   }
 
   async #emit(job: JobRecord, type: JobEventType, data?: Record<string, unknown>): Promise<void> {
-    const at = this.#now().toISOString();
+    const event = await this.#appendEvent(job, type, data);
+    if (!this.#onEvent) return;
+    try {
+      await this.#onEvent(structuredClone(event), structuredClone(job));
+    } catch (error) {
+      await this.#appendEvent(job, 'job.observer.failed', {
+        observedEventSequence: event.sequence,
+        observedEventType: event.type,
+        ...errorDetails(error),
+      });
+    }
+  }
+
+  async #appendEvent(
+    job: JobRecord,
+    type: JobEventType,
+    data?: Record<string, unknown>,
+    at = this.#now().toISOString()
+  ): Promise<JobEvent> {
     const event: JobEvent = {
       sequence: job.events.length + 1,
       jobId: job.id,
@@ -279,7 +354,7 @@ export class Orchestrator {
     job.events.push(event);
     job.updatedAt = at;
     await this.#store.save(job);
-    await this.#onEvent?.(structuredClone(event), structuredClone(job));
+    return event;
   }
 
   async #deliverCallback(job: JobRecord): Promise<void> {
