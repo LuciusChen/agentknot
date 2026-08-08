@@ -186,6 +186,7 @@ These are evidence requirements, not claims that the current MVP has already met
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete job record.
 - A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk.
 - Process-local concurrency and PID liveness checks are not a distributed scheduler, lease, or reliable defense against PID reuse and multiple AgentKnot writers.
+- Read-oriented CLI commands currently construct a full runtime and may run startup reconciliation; a second CLI process in another PID namespace can misclassify an active execution and mutate its persisted state ([incident 0010](../postmortems/0010-read-only-cli-runtime-reconciliation.md)).
 - Depth one constrains AgentKnot's own parent/child engine; the unauthenticated local API cannot prevent a host-capable worker from independently submitting another top-level orchestration.
 - Adding integrations before an adapter conformance contract exists can move provider-specific policy into the core.
 - Copying collaboration or fleet features from adjacent projects would dilute the local execution-handoff problem AgentKnot exists to solve.

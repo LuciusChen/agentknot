@@ -70,14 +70,24 @@ class StrictJsonlDecoder {
   }
 }
 
-function commandCandidates(command: string): string[] {
+type EffectiveEnvironment = NodeJS.ProcessEnv;
+
+function effectiveEnvironment(configuredEnvironment?: Record<string, string>): EffectiveEnvironment {
+  return { ...process.env, ...configuredEnvironment };
+}
+
+function commandCandidates(command: string, environment: EffectiveEnvironment): string[] {
+  // A relative command containing a path separator is still resolved from AgentKnot's process
+  // directory. Relative PATH entries have the same limitation. Configuration-only doctor has
+  // no worker workspace, so it cannot evaluate either form against the eventual run workspace
+  // without changing the existing boundary.
   if (command.includes(path.sep)) return [path.resolve(command)];
-  const searchPath = process.env.PATH ?? '';
+  const searchPath = environment.PATH ?? '';
   return searchPath.split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, command));
 }
 
-async function findCommand(command: string): Promise<string | undefined> {
-  for (const candidate of commandCandidates(command)) {
+async function findCommand(command: string, environment: EffectiveEnvironment): Promise<string | undefined> {
+  for (const candidate of commandCandidates(command, environment)) {
     try {
       await access(candidate, constants.X_OK);
       return candidate;
@@ -88,11 +98,50 @@ async function findCommand(command: string): Promise<string | undefined> {
   return undefined;
 }
 
-async function hasPiAuth(provider: string): Promise<boolean> {
-  const agentDirectory = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), '.pi', 'agent');
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasCredentialValue(value: unknown): boolean {
+  if (typeof value === 'string') return value.trim() !== '';
+  if (Array.isArray(value)) return value.some((item) => hasCredentialValue(item));
+  if (isRecord(value)) {
+    return Object.entries(value)
+      .filter(([key]) => key !== 'type' && key !== 'env')
+      .some(([, item]) => hasCredentialValue(item));
+  }
+  return false;
+}
+
+function effectiveHomeDirectory(environment: EffectiveEnvironment): string {
+  // Pi resolves its default agent directory with os.homedir() inside the child. Mirror the
+  // environment-sensitive part of that lookup without mutating this process's environment.
+  if (process.platform === 'win32') return environment.USERPROFILE || os.homedir();
+  return environment.HOME || os.homedir();
+}
+
+function piAgentDirectory(environment: EffectiveEnvironment): string {
+  const homeDirectory = effectiveHomeDirectory(environment);
+  const configuredDirectory = environment.PI_CODING_AGENT_DIR;
+  if (!configuredDirectory) return path.join(homeDirectory, '.pi', 'agent');
+  if (configuredDirectory === '~') return homeDirectory;
+  if (
+    configuredDirectory.startsWith('~/') ||
+    (process.platform === 'win32' && configuredDirectory.startsWith('~\\'))
+  ) {
+    return path.join(homeDirectory, configuredDirectory.slice(2));
+  }
+  // A relative configured directory remains relative to AgentKnot's process directory during
+  // doctor because the configuration-only boundary has no eventual worker workspace.
+  return configuredDirectory;
+}
+
+async function hasPiAuth(provider: string, environment: EffectiveEnvironment): Promise<boolean> {
+  const agentDirectory = piAgentDirectory(environment);
   try {
-    const value = JSON.parse(await readFile(path.join(agentDirectory, 'auth.json'), 'utf8')) as unknown;
-    return typeof value === 'object' && value !== null && !Array.isArray(value) && provider in value;
+    const value: unknown = JSON.parse(await readFile(path.join(agentDirectory, 'auth.json'), 'utf8'));
+    if (!isRecord(value) || !(provider in value)) return false;
+    return hasCredentialValue(value[provider]);
   } catch {
     return false;
   }
@@ -255,12 +304,16 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
   }
 
   async doctor(route: ResolvedRoute): Promise<WorkerHealth> {
+    return this.#doctor(route, effectiveEnvironment(this.config.environment));
+  }
+
+  async #doctor(route: ResolvedRoute, environment: EffectiveEnvironment): Promise<WorkerHealth> {
     const command = this.config.command ?? 'pi';
-    const resolvedCommand = await findCommand(command);
-    const authFileCredential = await hasPiAuth(route.provider);
+    const resolvedCommand = await findCommand(command, environment);
+    const authFileCredential = await hasPiAuth(route.provider, environment);
     const missingEnvironment = authFileCredential
       ? []
-      : route.requiredEnv.filter((name) => !process.env[name]);
+      : route.requiredEnv.filter((name) => !environment[name]?.trim());
     if (!resolvedCommand || missingEnvironment.length > 0) {
       return {
         ok: false,
@@ -289,7 +342,8 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     if (input.signal.aborted) {
       throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
     }
-    const health = await this.doctor(input.route);
+    const environment = effectiveEnvironment(this.config.environment);
+    const health = await this.#doctor(input.route, environment);
     if (!health.ok) throw new Error(health.message);
 
     const command = this.config.command ?? 'pi';
@@ -312,7 +366,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
         ],
         {
           cwd: probeWorkspace,
-          env: { ...process.env, ...this.config.environment },
+          env: environment,
           stdio: ['pipe', 'pipe', 'pipe'],
         }
       );
@@ -456,7 +510,8 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
   }
 
   async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
-    const health = await this.doctor(input.route);
+    const environment = effectiveEnvironment(this.config.environment);
+    const health = await this.#doctor(input.route, environment);
     if (!health.ok) throw new Error(health.message);
 
     const command = this.config.command ?? 'pi';
@@ -474,7 +529,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     ];
     const child = spawn(command, args, {
       cwd: input.workspace,
-      env: { ...process.env, ...this.config.environment },
+      env: environment,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const exit = waitForExit(child);

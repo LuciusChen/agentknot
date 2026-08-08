@@ -104,11 +104,17 @@ Delivered in this slice:
 
 - Deterministic malformed JSONL, split UTF-8/frame, premature-exit, missing-settlement, timeout, and cancellation fixtures exercise the real Pi adapter and public Orchestrator boundary.
 - The Pi adapter settles after abort with bounded exact-child `SIGTERM` → `SIGKILL` supervision and bounded owned-stream draining; it does not perform broad process cleanup.
+- Pi configuration-only doctor and spawned execution now share one effective worker environment for command discovery, required names, and auth-directory/home lookup, with deterministic precedence and secret-non-disclosure coverage.
 
 Still open:
 
-- Ensure configuration-only `doctor` evaluates the same effective environment and route inputs that `run` uses.
 - Distinguish HTTP liveness from route readiness in naming and documentation.
+
+### Runtime reconciliation correctness blocker
+
+- Split read-only runtime construction from startup reconciliation so `show`, list, artifact inspection, route/delegation inspection, and doctor cannot mutate persisted execution state.
+- Define and test the PID-namespace and concurrent-writer boundary before relying on PID liveness to fail nonterminal records.
+- Preserve single-writer evidence: a stale-recovery write must not race an active runtime and then disappear under a later whole-snapshot save.
 
 ### Route-diagnostics slice admitted into Stage 1
 
@@ -139,6 +145,7 @@ Still outside this slice:
 - Every orchestration persists a valid plan before dispatch, never exceeds its child/depth/concurrency bounds, and leaves artifact integration upstream.
 - Observer and callback failures cannot change a correct execution result.
 - A supported adapter cannot leave a timed-out or cancelled job indefinitely active.
+- A read-only CLI or API inspection cannot reconcile or mutate an active Job or Orchestration record.
 - Configuration-only doctor output distinguishes runtime readiness from live inference; the opt-in probe is exact-route, bounded, honest about provider errors and unsupported adapters, and leaves no Job or artifact evidence.
 - Record and event sizes remain within documented limits under stress fixtures.
 - Every artifact is checksum-valid and applies against its recorded base in the supported Git matrix.

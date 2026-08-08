@@ -295,6 +295,8 @@ Core consumers may depend on the normalized event name, job ID, sequence, timest
 
 Pi RPC is strict LF-delimited JSONL. Its adapter decodes streaming UTF-8 explicitly and does not assume that process chunks align with JSON messages or use Node `readline` behavior as its protocol definition. Each non-empty line must parse as a JSON object; malformed input reports line context. Process exit before `agent_settled` is an error, with `agent_end`-without-settlement distinguished from exit before `agent_end`.
 
+The Pi adapter derives one effective environment by overlaying configured worker environment values on `process.env`. Configuration-only doctor, live probe, and normal run use that snapshot consistently for bare-command `PATH` lookup, required environment presence, Pi's explicit agent directory, worker-home default auth directory, and spawned child environment. Empty or whitespace credential values are absent. A relative command containing a path separator, a relative `PATH` entry, or a relative `PI_CODING_AGENT_DIR` remains relative to AgentKnot's own process directory during doctor because that boundary has no worker workspace.
+
 Orchestration events cover queued, planning, planner start/completion, planned, dispatching, child start/completion, cancellation requested, and terminal succeeded/failed/cancelled transitions. Their sequence is gap-free within one parent snapshot. Leaf job events remain authoritative for worker-level activity.
 
 ## HTTP surface
@@ -323,6 +325,8 @@ GET  /health
 `POST /v1/jobs` starts execution in the serving process and returns `202` with the admitted snapshot.
 
 Cancellation uses process-local active-job and active-orchestration maps. After a server restart, a persisted nonterminal record is reconciled as failed and is not an active cancellable execution.
+
+`createRuntime()` currently performs this reconciliation unconditionally. Consequently, CLI commands that are otherwise read-oriented (`show`, list, artifact inspection, routes, delegation inspection, and configuration-only doctor) can mutate Job or Orchestration records during construction. PID liveness is evaluated from the new process's namespace; a live executor hidden by a different PID namespace can be misclassified as exited. Until [incident 0010](../postmortems/0010-read-only-cli-runtime-reconciliation.md) is resolved, active records must be inspected through their existing serving runtime rather than a second CLI runtime.
 
 `GET /health` is currently a liveness response for the HTTP process. It does not validate storage, routes, credentials, workers, or provider availability. Route diagnostics, including the opt-in live probe, are exposed by the CLI `doctor` command; they are not currently an HTTP endpoint.
 

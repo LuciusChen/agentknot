@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import { createAdapters } from '../src/adapters/index.js';
@@ -101,6 +103,195 @@ function createConformanceOrchestrator(
     adapters: createAdapters(config),
   });
 }
+
+test('PiRpcWorkerAdapter doctor uses worker environment for required variables without mutating process.env', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-doctor-env-'));
+  const requiredEnv = `AGENTKNOT_REQUIRED_${randomUUID().replaceAll('-', '')}`;
+  const provider = `provider-${randomUUID()}`;
+  const before = process.env[requiredEnv];
+  try {
+    const adapter = new PiRpcWorkerAdapter('pi', {
+      adapter: 'pi-rpc',
+      command: process.execPath,
+      environment: {
+        [requiredEnv]: 'present',
+        PI_CODING_AGENT_DIR: directory,
+      },
+    });
+
+    const health = await adapter.doctor({ ...route, provider, requiredEnv: [requiredEnv] });
+
+    assert.equal(health.ok, true);
+    assert.equal(health.details?.credentialSource, 'environment');
+    assert.deepEqual(process.env[requiredEnv], before);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter doctor uses worker PI_CODING_AGENT_DIR without exposing auth values', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-doctor-auth-'));
+  const provider = `provider-${randomUUID()}`;
+  const credential = `opaque-${randomUUID()}`;
+  const requiredEnv = `AGENTKNOT_REQUIRED_${randomUUID().replaceAll('-', '')}`;
+  const authDirectoryBefore = process.env.PI_CODING_AGENT_DIR;
+  try {
+    await writeFile(
+      path.join(directory, 'auth.json'),
+      JSON.stringify({ [provider]: { type: 'api_key', key: credential } })
+    );
+    const adapter = new PiRpcWorkerAdapter('pi', {
+      adapter: 'pi-rpc',
+      command: process.execPath,
+      environment: { PI_CODING_AGENT_DIR: directory },
+    });
+
+    const health = await adapter.doctor({ ...route, provider, requiredEnv: [requiredEnv] });
+
+    assert.equal(health.ok, true);
+    assert.equal(health.details?.credentialSource, 'pi-auth-file');
+    assert.equal(JSON.stringify(health).includes(credential), false);
+    assert.equal(process.env.PI_CODING_AGENT_DIR, authDirectoryBefore);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter doctor resolves Pi auth from the worker HOME default', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-doctor-home-'));
+  const agentDirectory = path.join(directory, '.pi', 'agent');
+  const provider = `provider-${randomUUID()}`;
+  const credential = `opaque-${randomUUID()}`;
+  const requiredEnv = `AGENTKNOT_REQUIRED_${randomUUID().replaceAll('-', '')}`;
+  const homeBefore = process.env.HOME;
+  try {
+    await mkdir(agentDirectory, { recursive: true });
+    await writeFile(
+      path.join(agentDirectory, 'auth.json'),
+      JSON.stringify({ [provider]: { type: 'api_key', key: credential } })
+    );
+    const adapter = new PiRpcWorkerAdapter('pi', {
+      adapter: 'pi-rpc',
+      command: process.execPath,
+      environment: { HOME: directory, PI_CODING_AGENT_DIR: '' },
+    });
+
+    const health = await adapter.doctor({ ...route, provider, requiredEnv: [requiredEnv] });
+
+    assert.equal(health.ok, true);
+    assert.equal(health.details?.credentialSource, 'pi-auth-file');
+    assert.equal(JSON.stringify(health).includes(credential), false);
+    assert.equal(process.env.HOME, homeBefore);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter expands worker PI_CODING_AGENT_DIR against worker HOME', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-doctor-tilde-'));
+  const agentDirectory = path.join(directory, 'custom-agent');
+  const provider = `provider-${randomUUID()}`;
+  const credential = `opaque-${randomUUID()}`;
+  const requiredEnv = `AGENTKNOT_REQUIRED_${randomUUID().replaceAll('-', '')}`;
+  try {
+    await mkdir(agentDirectory, { recursive: true });
+    await writeFile(
+      path.join(agentDirectory, 'auth.json'),
+      JSON.stringify({ [provider]: { type: 'api_key', key: credential } })
+    );
+    const adapter = new PiRpcWorkerAdapter('pi', {
+      adapter: 'pi-rpc',
+      command: process.execPath,
+      environment: {
+        HOME: directory,
+        PI_CODING_AGENT_DIR: '~/custom-agent',
+      },
+    });
+
+    const health = await adapter.doctor({ ...route, provider, requiredEnv: [requiredEnv] });
+
+    assert.equal(health.ok, true);
+    assert.equal(health.details?.credentialSource, 'pi-auth-file');
+    assert.equal(JSON.stringify(health).includes(credential), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter treats empty worker credentials as absent', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-doctor-empty-'));
+  const provider = `provider-${randomUUID()}`;
+  const requiredEnv = `AGENTKNOT_REQUIRED_${randomUUID().replaceAll('-', '')}`;
+  try {
+    await writeFile(
+      path.join(directory, 'auth.json'),
+      JSON.stringify({ [provider]: { type: 'api_key', key: '' } })
+    );
+    const adapter = new PiRpcWorkerAdapter('pi', {
+      adapter: 'pi-rpc',
+      command: process.execPath,
+      environment: {
+        [requiredEnv]: '',
+        PI_CODING_AGENT_DIR: directory,
+      },
+    });
+
+    const health = await adapter.doctor({ ...route, provider, requiredEnv: [requiredEnv] });
+
+    assert.equal(health.ok, false);
+    assert.deepEqual(health.details?.missingEnvironment, [requiredEnv]);
+    assert.equal(health.details?.authFileCredential, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter discovers and runs a bare command from worker PATH', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-doctor-path-'));
+  const commandDirectory = await mkdtemp(path.join(directory, 'bin-'));
+  const authDirectory = await mkdtemp(path.join(directory, 'auth-'));
+  const command = path.join(commandDirectory, 'fake-pi');
+  const pathFile = path.join(directory, 'child-path.txt');
+  const fixtureUrl = pathToFileURL(path.resolve('test/fixtures/fake-pi.mjs')).href;
+  const parentPath = process.env.PATH;
+  try {
+    await writeFile(command, `#!${process.execPath}\nimport ${JSON.stringify(fixtureUrl)};\n`);
+    await chmod(command, 0o755);
+    const adapter = new PiRpcWorkerAdapter('pi', {
+      adapter: 'pi-rpc',
+      command: 'fake-pi',
+      noSession: true,
+      environment: {
+        PATH: commandDirectory,
+        PI_CODING_AGENT_DIR: authDirectory,
+        FAKE_PI_PATH_FILE: pathFile,
+      },
+    });
+    const testRoute = { ...route, provider: `provider-${randomUUID()}`, requiredEnv: [] };
+
+    const health = await adapter.doctor(testRoute);
+    assert.equal(health.ok, true);
+    assert.equal(health.details?.command, command);
+
+    const result = await adapter.run(
+      {
+        jobId: 'job_pi_worker_path',
+        prompt: 'do work',
+        workspace: directory,
+        route: testRoute,
+        attempt: 1,
+        signal: new AbortController().signal,
+      },
+      () => undefined
+    );
+
+    assert.equal(result.output, 'fake result');
+    assert.equal(await readFile(pathFile, 'utf8'), commandDirectory);
+    assert.equal(process.env.PATH, parentPath);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('PiRpcWorkerAdapter speaks JSONL RPC and normalizes Pi events', async () => {
   const fixture = path.resolve('test/fixtures/fake-pi.mjs');

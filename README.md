@@ -101,7 +101,7 @@ export OPENCODE_API_KEY="..."
 
 Alternatively, start `pi`, run `/login`, and store the key under the `opencode-go` provider in Pi's credential file. AgentKnot accepts either Pi's auth file or the configured environment variable and never copies the key into a Job record.
 
-Route diagnostics have two deliberately different modes. `doctor` is the fast configuration, credential, and runtime check; its successful result explicitly says that live inference was not checked, so it does not prove that the provider accepted a request from the current network path. The Stage 1 live check is opt-in and remains route-neutral. For this repository, selecting `luna` resolves Pi, `opencode-go`, `gpt-5.6-luna`, and `thinkingLevel: "max"`:
+Route diagnostics have two deliberately different modes. `doctor` is the fast configuration, credential, and runtime check; its successful result explicitly says that live inference was not checked, so it does not prove that the provider accepted a request from the current network path. For Pi routes, it evaluates command `PATH`, required environment names, `PI_CODING_AGENT_DIR`, and the worker home from the same `process.env`-plus-worker-environment snapshot passed to `run` and `probe`, without returning credential values. The Stage 1 live check is opt-in and remains route-neutral. For this repository, selecting `luna` resolves Pi, `opencode-go`, `gpt-5.6-luna`, and `thinkingLevel: "max"`:
 
 ```bash
 node dist/src/cli.js doctor --route luna --live
@@ -190,6 +190,8 @@ agentknot artifact-preview JOB_ID 1 --json
 ```
 
 The equivalent HTTP endpoints are `GET /v1/jobs/:id/artifacts`, `GET /v1/jobs/:id/artifacts/verify`, and `GET /v1/jobs/:id/artifacts/:attempt/preview`. Verification recomputes the recorded size and SHA-256 and compares the recorded base commit with the current source repository `HEAD`. Preview returns at most 1 MiB of UTF-8 Git patch text and withholds content when file integrity fails; a base mismatch remains visible in the verification evidence so the controller can inspect but must not promote blindly. These operations read job metadata, artifact bytes, and Git metadata only. They never apply, commit, push, or otherwise mutate the source repository.
+
+Until [incident 0010](postmortems/0010-read-only-cli-runtime-reconciliation.md) is resolved, do not invoke a second CLI process such as `show`, `jobs`, `artifacts`, or `doctor` against a file store with active jobs or orchestrations, especially across PID namespaces. Those commands currently construct a full runtime and can trigger startup reconciliation. Inspect active work through the already-serving HTTP process instead.
 
 Set `callbackUrl` in the request to receive the terminal job snapshot by HTTP POST.
 

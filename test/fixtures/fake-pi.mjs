@@ -1,3 +1,9 @@
+import { writeFileSync } from 'node:fs';
+
+if (process.env.FAKE_PI_PATH_FILE) {
+  writeFileSync(process.env.FAKE_PI_PATH_FILE, process.env.PATH ?? '');
+}
+
 let buffer = '';
 
 function send(value) {

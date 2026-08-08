@@ -36,4 +36,5 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Child records and delegation metadata carry the admitting plan hash and policy version.
 - Pi RPC waits for `agent_settled`, preserving queued continuation and retry output before declaring completion.
 - Pi RPC timeout and cancellation now use bounded `SIGTERM` → `SIGKILL` supervision for the exact owned child and bounded stdio draining, preventing a child that ignores `SIGTERM` from leaving the Job active indefinitely; malformed JSONL and exit-without-settlement errors now retain protocol context ([postmortem 0009](postmortems/0009-pi-rpc-child-supervision.md)).
+- Pi configuration-only diagnostics now use the same effective worker environment as `run` and `probe` for command discovery, required environment names, and Pi auth-directory/home resolution; empty credential values remain absent and secret values are not returned.
 - Worktree retries start from the same base commit and clean only AgentKnot-owned worktree registrations.
