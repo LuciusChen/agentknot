@@ -35,7 +35,7 @@
       "worker": "pi",
       "provider": "opencode-go",
       "model": "gpt-5.6-luna",
-      "thinkingLevel": "high",
+      "thinkingLevel": "max",
       "requiredEnv": [
         "OPENCODE_API_KEY"
       ],

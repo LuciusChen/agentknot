@@ -22,6 +22,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Planner instructions reserve parallel execution for independently verifiable subtasks without execution-order dependencies or overlapping expected write scopes; the scheduler starts only the available tasks up to the concurrency cap and refills slots as workers complete.
 - Controller metadata now follows one recursive JSON-compatible object contract across TypeScript and HTTP leaf/orchestration APIs.
 - Background Pi workers disable ambient skill discovery by default while retaining repository instructions.
+- The repository Luna route now uses Pi's `max` thinking level for both planning and delegated worker execution.
 
 ### Fixed
 

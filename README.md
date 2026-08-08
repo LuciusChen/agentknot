@@ -223,7 +223,7 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "worker": "pi",
       "provider": "opencode-go",
       "model": "gpt-5.6-luna",
-      "thinkingLevel": "high",
+      "thinkingLevel": "max",
       "requiredEnv": ["OPENCODE_API_KEY"],
       "maxAttempts": 2,
       "timeoutMs": 3600000
