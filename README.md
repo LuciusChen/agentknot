@@ -37,6 +37,7 @@ AgentKnot keeps current behavior, future intent, execution order, and historical
 - [Product requirements](docs/PRD.md) define the user problem, product thesis, scope, and non-goals.
 - [Technical specification](docs/SPEC.md) defines current contracts, invariants, limitations, and verification requirements.
 - [Roadmap](docs/ROADMAP.md) sequences work through objective exit gates rather than dates or feature wishlists.
+- [Changelog](CHANGELOG.md) records release-relevant changes under an unreleased version until publication.
 - [Postmortems and decision records](postmortems/README.md) preserve incidents, experiments, tradeoffs, and rejected alternatives without rewriting history.
 
 Material changes should map to all four layers before implementation starts.

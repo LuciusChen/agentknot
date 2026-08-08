@@ -96,6 +96,8 @@ export interface OrchestrationEvent {
 export interface OrchestrationChild {
   subtaskId: string;
   jobId: string;
+  planHash: string;
+  policyVersion: 1;
   status: JobStatus;
   output?: string;
   error?: JobError;

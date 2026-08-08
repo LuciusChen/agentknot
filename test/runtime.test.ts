@@ -136,9 +136,29 @@ test('createRuntime deterministically fails stale nonterminal jobs once without 
   };
   await store.create(activeRunning);
   const orchestrationStore = new FileOrchestrationStore(orchestrationStorageDirectory);
-  await orchestrationStore.create(
-    staleOrchestration('orchestration_stale', 'dispatching', workspace, exitedPid)
+  const staleChild = staleJob('job_stale_child', 'running', workspace);
+  staleChild.execution = {
+    runtimeId: 'runtime_exited',
+    pid: exitedPid,
+    startedAt: staleChild.createdAt,
+  };
+  await store.create(staleChild);
+  const staleParentRecord = staleOrchestration(
+    'orchestration_stale',
+    'dispatching',
+    workspace,
+    exitedPid
   );
+  staleParentRecord.children = [
+    {
+      subtaskId: 'subtask_1',
+      jobId: staleChild.id,
+      planHash: 'a'.repeat(64),
+      policyVersion: 1,
+      status: 'running',
+    },
+  ];
+  await orchestrationStore.create(staleParentRecord);
   const observed: string[] = [];
 
   const runtime = await createRuntime({
@@ -174,6 +194,8 @@ test('createRuntime deterministically fails stale nonterminal jobs once without 
   assert.equal(staleParent?.error?.name, 'ExecutionInterruptedError');
   assert.equal(staleParent?.events.at(-1)?.type, 'orchestration.failed');
   assert.equal(staleParent?.events.at(-1)?.data?.reason, 'runtime_restart');
+  assert.equal(staleParent?.children[0]?.status, 'failed');
+  assert.equal(staleParent?.children[0]?.error?.name, 'ExecutionInterruptedError');
 
   const queuedAfterFirstRecovery = await runtime.get('job_stale_queued');
   const secondRuntime = await createRuntime({ configPath });

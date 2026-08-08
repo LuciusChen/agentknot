@@ -115,3 +115,5 @@ Incident records should also include severity, user/controller impact, immediate
 | [0001](./0001-vendor-neutral-control-plane.md) | Decision | Accepted | Separate controller, worker, and provider/model routing |
 | [0002](./0002-git-worktree-artifact-handoff.md) | Decision | Accepted | Use Git worktrees and patch artifacts for handoff |
 | [0003](./0003-skill-minimal-pi-workers.md) | Decision | Accepted | Keep background Pi workers skill-minimal by default |
+| [0004](./0004-bounded-automatic-delegation.md) | Decision | Accepted | Put bounded automatic delegation in the control plane |
+| [0005](./0005-concurrent-job-event-persistence.md) | Incident | Resolved | Serialize concurrent job event persistence |

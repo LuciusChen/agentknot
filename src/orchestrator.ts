@@ -5,7 +5,12 @@ import path from 'node:path';
 import type { AgentKnotConfig } from './config.js';
 import { resolveRoute } from './config.js';
 import { isExecutorProcessAlive } from './execution.js';
-import { WorkspaceIsolationManager, type IsolatedWorkspace, type WorkspaceInspection } from './workspace-isolation.js';
+import {
+  WorkspaceIsolationManager,
+  workspaceIsolationMode,
+  type IsolatedWorkspace,
+  type WorkspaceInspection,
+} from './workspace-isolation.js';
 import type {
   JobEvent,
   JobEventType,
@@ -69,6 +74,7 @@ export class Orchestrator {
   readonly #fetch: typeof globalThis.fetch;
   readonly #workspaceIsolation: WorkspaceIsolationManager;
   readonly #execution: JobExecution;
+  readonly #recordMutations = new Map<string, Promise<void>>();
 
   constructor(options: OrchestratorOptions) {
     this.#config = options.config;
@@ -90,6 +96,10 @@ export class Orchestrator {
       const route = resolveRoute(this.#config, name);
       return { name, worker: route.worker, provider: route.provider, model: route.model };
     });
+  }
+
+  workspaceIsolationMode(): ReturnType<typeof workspaceIsolationMode> {
+    return workspaceIsolationMode(this.#config);
   }
 
   async doctor(routeName?: string): Promise<WorkerHealth & { route: string }> {
@@ -333,17 +343,27 @@ export class Orchestrator {
     data?: Record<string, unknown>,
     at = this.#now().toISOString()
   ): Promise<JobEvent> {
-    const event: JobEvent = {
-      sequence: job.events.length + 1,
-      jobId: job.id,
-      at,
-      type,
-      ...(data === undefined ? {} : { data }),
-    };
-    job.events.push(event);
-    job.updatedAt = at;
-    await this.#store.save(job);
-    return event;
+    let appended: JobEvent | undefined;
+    const previous = this.#recordMutations.get(job.id) ?? Promise.resolve();
+    const current = previous.then(async () => {
+      appended = {
+        sequence: job.events.length + 1,
+        jobId: job.id,
+        at,
+        type,
+        ...(data === undefined ? {} : { data }),
+      };
+      job.events.push(appended);
+      job.updatedAt = at;
+      await this.#store.save(job);
+    });
+    this.#recordMutations.set(job.id, current);
+    try {
+      await current;
+    } finally {
+      if (this.#recordMutations.get(job.id) === current) this.#recordMutations.delete(job.id);
+    }
+    return appended as JobEvent;
   }
 
   async #deliverCallback(job: JobRecord): Promise<void> {

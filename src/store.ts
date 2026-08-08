@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -77,7 +78,7 @@ export class FileJobStore implements JobStore {
 
   async #write(job: JobRecord): Promise<void> {
     const target = this.#path(job.id);
-    const temporary = `${target}.${process.pid}.tmp`;
+    const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temporary, `${JSON.stringify(job, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, target);
   }

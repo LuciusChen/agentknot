@@ -149,7 +149,7 @@ Ignored dependencies and build output are not present in a detached worktree. Th
 
 `MemoryJobStore` provides process-local snapshots.
 
-`FileJobStore` writes a complete JSON snapshot to a temporary file with mode `0600` and atomically renames it over the job path. It provides persistent audit snapshots under the assumptions of one AgentKnot process and a local filesystem with normal rename semantics.
+`FileJobStore` writes a complete JSON snapshot to a unique temporary file with mode `0600` and atomically renames it over the job path. The orchestrator serializes append/save mutations per job so concurrent adapter event sources retain gap-free sequence numbers. It provides persistent audit snapshots under the assumptions of one AgentKnot process and a local filesystem with normal rename semantics.
 
 Current persistence does not provide:
 
@@ -160,11 +160,11 @@ Current persistence does not provide:
 - restartable or resumable execution;
 - retention, compaction, or record-size limits.
 
-At runtime startup, a `queued` or `running` job whose recorded executor PID is absent is marked failed exactly once with `ExecutionInterruptedError` and `reason: runtime_restart`; it is never replayed and observers/callbacks are not invoked. A nonterminal orchestration is handled the same way without redispatching its persisted plan. A live PID is left untouched. This is deterministic fail-without-resume reconciliation, not a lease: PID reuse, multiple concurrent writers, crash-left processes, and crash-left managed worktrees remain limitations.
+At runtime startup, a `queued` or `running` job whose recorded executor PID is absent is marked failed exactly once with `ExecutionInterruptedError` and `reason: runtime_restart`; it is never replayed and observers/callbacks are not invoked. A nonterminal orchestration is handled the same way without redispatching its persisted plan, after its embedded child outcomes are refreshed from authoritative leaf Job records. A live PID is left untouched. This is deterministic fail-without-resume reconciliation, not a lease: PID reuse, multiple concurrent writers, crash-left processes, and crash-left managed worktrees remain limitations.
 
 ### Orchestration store
 
-`MemoryOrchestrationStore` and `FileOrchestrationStore` are separate from leaf job storage. The file store uses the same mode-`0600` temporary-write-and-rename snapshot model. Every parent record captures the normalized request, immutable effective delegation policy, executor identity, strict assessment and plan, plan hash, exact child prompts and routes, planner/child job IDs, ordered orchestration events, child outcomes, and terminal result or error.
+`MemoryOrchestrationStore` and `FileOrchestrationStore` are separate from leaf job storage. The file store uses the same mode-`0600` unique-temporary-write-and-rename snapshot model. Every parent record captures the normalized request, immutable effective delegation policy, executor identity, strict assessment and plan, plan hash, exact child prompts and routes, planner/child job IDs, ordered orchestration events, child outcomes, and terminal result or error. Every child record, child-start event, and child Job provenance carries the admitting plan hash and policy version.
 
 The stores assume one AgentKnot process. They provide no compare-and-swap, journal, schema migration, resume, distributed concurrency, or parent/child transaction spanning multiple snapshot files.
 
@@ -243,7 +243,7 @@ The parent plan and `orchestration.planned` event are persisted before the first
 
 ### Dispatch and cancellation
 
-Children are launched in plan order through `Orchestrator.start()`. A shared semaphore caps active workers across all parent orchestrations in one `OrchestrationService`; this is process-local and not a queue or multi-process admission control. A parent whose validated assessment has `parallelizable: false` receives an effective concurrency of one even when the configured cap is higher. `maxDepth` is exactly one in v1, and the orchestration engine does not recursively submit its own children. Worker prompts prohibit recursive delegation, commit, push, merge, or artifact application. Because the local HTTP API is unauthenticated, v1 cannot prevent a worker with host access from independently invoking a new orchestration; depth one is an engine invariant, not a hostile-worker security boundary.
+Planner and child jobs are launched through `Orchestrator.start()`. One shared semaphore caps all active planner and child worker executions across all parent orchestrations in one `OrchestrationService`; this is process-local and not a queue or multi-process admission control. A parent whose validated assessment has `parallelizable: false` receives an effective child concurrency of one even when the configured global cap is higher. If persistence of the parent planner-start or child-start evidence fails after leaf admission, AgentKnot cancels and awaits that admitted job before failing the parent. `maxDepth` is exactly one in v1, and the orchestration engine does not recursively submit its own children. Worker prompts prohibit recursive delegation, commit, push, merge, or artifact application. Because the local HTTP API is unauthenticated, v1 cannot prevent a worker with host access from independently invoking a new orchestration; depth one is an engine invariant, not a hostile-worker security boundary.
 
 Cancellation first persists `cancelRequestedAt` and `orchestration.cancel.requested`, then aborts the planner or active children and prevents later children from launching. Cancellation is process-local and cooperative through the underlying adapter. The parent completes only after launched child jobs settle. One or more non-succeeded children make a delegated parent failed; AgentKnot does not integrate their patch artifacts.
 

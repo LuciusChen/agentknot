@@ -22,5 +22,10 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 
 ### Fixed
 
+- Concurrent worker events are serialized per job and file snapshots use unique temporary names, preventing event gaps and temporary-file rename races.
+- Planner jobs now share the same process-wide concurrency budget as delegated child jobs.
+- Planner or child jobs admitted immediately before a parent persistence failure are cancelled and awaited instead of continuing as orphan executions.
+- Restart reconciliation refreshes embedded parent child outcomes from authoritative leaf Job records.
+- Child records and delegation metadata carry the admitting plan hash and policy version.
 - Pi RPC waits for `agent_settled`, preserving queued continuation and retry output before declaring completion.
 - Worktree retries start from the same base commit and clean only AgentKnot-owned worktree registrations.

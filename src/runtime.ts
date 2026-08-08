@@ -46,6 +46,14 @@ export class AgentKnotRuntime {
     return this.jobs.start(request);
   }
 
+  reconcileInterruptedJobs(): ReturnType<Orchestrator['reconcileInterruptedJobs']> {
+    return this.jobs.reconcileInterruptedJobs();
+  }
+
+  reconcileInterruptedOrchestrations(): Promise<OrchestrationRecord[]> {
+    return this.orchestrations.reconcileInterruptedOrchestrations();
+  }
+
   delegationPolicy(): DelegationConfig {
     return this.orchestrations.policy();
   }

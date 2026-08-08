@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -7,7 +7,8 @@ import test from 'node:test';
 import { createAdapters } from '../src/adapters/index.js';
 import type { AgentKnotConfig } from '../src/config.js';
 import { Orchestrator } from '../src/orchestrator.js';
-import { MemoryJobStore } from '../src/store.js';
+import { FileJobStore, MemoryJobStore } from '../src/store.js';
+import type { WorkerAdapter } from '../src/types.js';
 
 const config: AgentKnotConfig = {
   version: 1,
@@ -123,4 +124,39 @@ test('Orchestrator records observer failures without retrying or failing worker 
     message: 'observer unavailable',
   });
   assert.deepEqual((await store.get(job.id))?.events, job.events);
+});
+
+test('Orchestrator serializes concurrent worker events in the file store', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-concurrent-events-workspace-'));
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-concurrent-events-store-'));
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'burst adapter ready' };
+    },
+    async run(_input, emit) {
+      await Promise.all(
+        Array.from({ length: 100 }, (_, index) => emit('worker.raw', { index }))
+      );
+      return { output: 'burst complete' };
+    },
+  };
+  const store = new FileJobStore(directory);
+  const orchestrator = new Orchestrator({
+    config,
+    store,
+    adapters: new Map([['mock', adapter]]),
+  });
+
+  const job = await orchestrator.run({ prompt: 'emit concurrently', workspace });
+  const persisted = await store.get(job.id);
+
+  assert.equal(job.status, 'succeeded');
+  assert.equal(job.events.filter((event) => event.type === 'worker.raw').length, 100);
+  assert.deepEqual(
+    job.events.map((event) => event.sequence),
+    Array.from({ length: job.events.length }, (_, index) => index + 1)
+  );
+  assert.deepEqual(persisted, job);
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
 });

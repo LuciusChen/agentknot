@@ -135,6 +135,9 @@ export class OrchestrationService {
   readonly #recordMutations = new Map<string, Promise<void>>();
 
   constructor(options: OrchestrationServiceOptions) {
+    if (options.config.mode !== 'off' && options.jobs.workspaceIsolationMode() !== 'git-worktree') {
+      throw new Error('Automatic orchestration requires a job orchestrator with git-worktree isolation');
+    }
     this.#config = structuredClone(options.config);
     this.#jobs = options.jobs;
     this.#store = options.store;
@@ -167,6 +170,25 @@ export class OrchestrationService {
       record.completedAt = this.#now().toISOString();
       record.error = { name: 'ExecutionInterruptedError', message };
       delete record.result;
+      for (const child of record.children) {
+        const job = await this.#jobs.get(child.jobId);
+        if (!job) {
+          child.status = 'failed';
+          child.error = {
+            name: 'MissingChildJobError',
+            message: `Child job record was not found during restart reconciliation: ${child.jobId}`,
+            attempt: 0,
+            retryable: false,
+          };
+          delete child.output;
+          continue;
+        }
+        child.status = job.status;
+        if (job.result) child.output = job.result.output;
+        else delete child.output;
+        if (job.error) child.error = structuredClone(job.error);
+        else delete child.error;
+      }
       await this.#appendEvent(
         record,
         'orchestration.failed',
@@ -328,24 +350,36 @@ export class OrchestrationService {
       );
     }
 
-    const started = await this.#jobs.start({
-      prompt: buildPlannerPrompt(record.request, record.policy),
-      workspace: record.request.workspace,
-      route: record.policy.planner.route,
-      ...(record.request.source === undefined ? {} : { source: record.request.source }),
-      metadata: {
-        ...(record.request.metadata ?? {}),
-        agentknotDelegation: { orchestrationId: record.id, role: 'planner', depth: 0 },
-      },
-    });
-    record.plannerJobId = started.job.id;
-    await this.#appendEvent(record, 'orchestration.planner.started', { jobId: started.job.id });
-    const plannerJob = await this.#awaitJob(started, signal);
-    await this.#appendEvent(record, 'orchestration.planner.completed', {
-      jobId: plannerJob.id,
-      status: plannerJob.status,
-    });
-    throwIfAborted(signal);
+    const releaseSlot = await this.#dispatchSlots.acquire(signal);
+    let plannerJob: JobRecord;
+    try {
+      const started = await this.#jobs.start({
+        prompt: buildPlannerPrompt(record.request, record.policy),
+        workspace: record.request.workspace,
+        route: record.policy.planner.route,
+        ...(record.request.source === undefined ? {} : { source: record.request.source }),
+        metadata: {
+          ...(record.request.metadata ?? {}),
+          agentknotDelegation: { orchestrationId: record.id, role: 'planner', depth: 0 },
+        },
+      });
+      record.plannerJobId = started.job.id;
+      try {
+        await this.#appendEvent(record, 'orchestration.planner.started', { jobId: started.job.id });
+      } catch (error) {
+        started.cancel();
+        await started.completion;
+        throw error;
+      }
+      plannerJob = await this.#awaitJob(started, signal);
+      await this.#appendEvent(record, 'orchestration.planner.completed', {
+        jobId: plannerJob.id,
+        status: plannerJob.status,
+      });
+      throwIfAborted(signal);
+    } finally {
+      releaseSlot();
+    }
 
     try {
       if (plannerJob.status !== 'succeeded' || !plannerJob.result) {
@@ -392,6 +426,8 @@ export class OrchestrationService {
     maxConcurrency: number,
     signal: AbortSignal
   ): Promise<void> {
+    const plan = record.plan;
+    if (!plan) throw new Error('Cannot dispatch orchestration children without a persisted plan');
     const active: ActiveChild[] = [];
     let nextIndex = 0;
 
@@ -410,20 +446,35 @@ export class OrchestrationService {
               role: 'worker',
               subtaskId: subtask.id,
               depth: 1,
+              planHash: plan.planHash,
+              policyVersion: plan.policyVersion,
             },
           },
         });
         const child: OrchestrationChild = {
           subtaskId: subtask.id,
           jobId: started.job.id,
+          planHash: plan.planHash,
+          policyVersion: plan.policyVersion,
           status: started.job.status,
         };
         record.children.push(child);
-        await this.#appendEvent(record, 'orchestration.child.started', {
-          subtaskId: subtask.id,
-          jobId: started.job.id,
-          route: subtask.route,
-        });
+        try {
+          await this.#appendEvent(record, 'orchestration.child.started', {
+            subtaskId: subtask.id,
+            jobId: started.job.id,
+            route: subtask.route,
+            planHash: plan.planHash,
+            policyVersion: plan.policyVersion,
+          });
+        } catch (error) {
+          started.cancel();
+          const job = await started.completion;
+          child.status = job.status;
+          if (job.result) child.output = job.result.output;
+          if (job.error) child.error = structuredClone(job.error);
+          throw error;
+        }
         const onAbort = () => started.cancel();
         if (signal.aborted) started.cancel();
         else signal.addEventListener('abort', onAbort, { once: true });
