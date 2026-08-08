@@ -24,6 +24,15 @@
 - Use only public dependency APIs. Do not reach into another package's private or internal modules.
 - Add a dependency or Pi extension only for a current, demonstrated need. Prefer project-owned code when the requirement is small and security-sensitive.
 
+## AgentKnot dogfooding and delegation
+
+- When acting as the primary controller or maintainer, treat AgentKnot as part of the default development toolchain. For non-trivial work, proactively look for a bounded, independently verifiable subtask to delegate through the real Pi/Luna route; do not wait for the user to request delegation each time.
+- Good delegation candidates include architecture or contract review, test-gap analysis, documentation aligned to an already implemented change, and isolated implementation work with explicit acceptance criteria.
+- Keep trivial edits, tightly coupled root-cause diagnosis, integration decisions, and final acceptance with the primary controller when delegation overhead would exceed its value.
+- Run delegated work in `git-worktree` isolation, provide scope, non-goals, relevant files, and verification commands, and inspect the resulting patch artifact before applying anything.
+- The primary controller owns product decisions, artifact integration, final tests, commits, and reporting. A worker's claims about files or tests are evidence to verify, not proof by themselves.
+- A worker that is already executing a delegated AgentKnot job must not recursively delegate again unless its prompt explicitly requests that behavior.
+
 ## TypeScript and module discipline
 
 - Keep TypeScript strict. Do not weaken compiler options to make a change pass.
