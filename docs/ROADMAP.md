@@ -21,8 +21,8 @@ The source of product truth is [PRD.md](./PRD.md). Stable technical behavior is 
 | Stage | Outcome | Status |
 | --- | --- | --- |
 | 0 | Prove the vendor-neutral execution slice | Complete |
-| 1 | Make local execution and its bounded delegation slice dependable and honestly specified | In progress |
-| 2 | Prove controller and worker portability through contracts | Not started |
+| 1 | Make local execution and its bounded delegation slice dependable and honestly specified | Complete |
+| 2 | Prove controller and worker portability through contracts | In progress |
 | 3 | Add bounded local automation and security policy | Not started |
 | 4 | Evaluate remote/team operation only from demonstrated demand | Conditional |
 
@@ -198,13 +198,20 @@ Still outside this slice:
 
 ## Stage 2: Portable controller and worker contracts
 
+**Status: in progress (2026-08-09).** Stage 2 begins at the controller boundary: the already-neutral CLI, HTTP, and TypeScript orchestration paths need thin native Codex and Claude integrations before a second worker adapter is promoted.
+
 ### Outcome
 
 Prove that controllers and worker runtimes can change independently without core branches or misleading capability claims.
 
 ### Planned work
 
-- Publish minimal Codex and Claude controller examples that submit the same `JobRequest` and consume the same terminal/evidence contract.
+- Define one controller-integration contract that normalizes controller-native task entry into the existing `OrchestrationRequest` or `JobRequest`; controller commands, skills/plugins, and lifecycle hooks are adapters at this boundary, not new orchestration policy or controller-name branches in core.
+- Ship thin, installable Codex and Claude integrations rather than documentation-only examples. Each integration must provide at least one deterministic explicit task/delegation entry and one bounded intent-triggered workflow so users do not have to repeat delegation instructions in every prompt.
+- Treat `/goal` as one controller UX entry, not the protocol. Goal, task, delegate, controller-native skill/plugin invocation, and existing CLI/HTTP/TypeScript callers must converge on the same persisted request, limits, route policy, terminal record, and artifact-review workflow.
+- Keep trigger scope honest: informational conversation and product decisions remain upstream unless the user explicitly invokes delegation or the installed controller policy classifies the request as eligible; controller hooks may expose or enforce the bridge lifecycle but must not silently dispatch every prompt.
+- Keep integration context bounded so the upstream controller can hand off eligible implementation, test, analysis, and documentation work without first reproducing the worker's repository-reading and implementation effort.
+- During each integration slice, identify and delete superseded examples, prompt reminders, compatibility shims, duplicate request builders, and dead controller-specific branches after parity is proven; do not retain a second legacy path indefinitely.
 - Introduce an implemented-capabilities schema only after at least two real workers need meaningfully different lifecycle behavior.
 - Build a worker-adapter conformance kit for startup, route resolution, events, cancellation, termination, errors, artifacts, and health diagnostics.
 - Promote Pi from first adapter to reference-tested adapter rather than privileged architecture.
@@ -214,7 +221,10 @@ Prove that controllers and worker runtimes can change independently without core
 
 ### Exit gates
 
-- At least two controller types pass the same end-to-end contract without controller-name branches.
+- Installed Codex and Claude integrations each pass the same end-to-end request, terminal-record, and artifact-evidence contract without controller-name branches in core.
+- Each promoted controller integration proves a deterministic explicit entry beyond direct CLI use and a bounded task-intent workflow that delegates without a per-prompt reminder; ordinary informational chat is not claimed or tested as automatically delegated.
+- Controller integrations contain no orchestration, route-selection, artifact-promotion, or product-decision policy that duplicates the AgentKnot core, and removing one integration leaves the core and other controller integrations functional.
+- Code or documentation superseded by a promoted controller or worker path is removed in the same slice after parity tests pass; no unowned compatibility shim, duplicate request path, or stale capability claim remains.
 - At least two real worker adapters pass the same conformance suite.
 - Unsupported lifecycle and observability features are represented as unavailable, not emulated deceptively.
 - Swapping controller, worker, provider, or model changes configuration or an adapter, not unrelated orchestrator modules.
