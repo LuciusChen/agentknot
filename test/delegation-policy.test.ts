@@ -69,6 +69,19 @@ test('planner instructions reserve parallelism for independent non-overlapping w
   assert.match(prompt, /do not put acceptance criteria only in the "prompt" text/);
 });
 
+test('planner instructions separate delegation from parallelism and allow one nonparallel subtask', () => {
+  const prompt = buildPlannerPrompt(request, config);
+  assert.match(prompt, /Delegation and parallelism are separate decisions/);
+  assert.match(prompt, /exactly one nonparallel subtask/);
+  assert.match(prompt, /lack of a useful split alone must not cause a "do-not-delegate" recommendation/);
+  assert.match(prompt, /objectively trivial work upstream when direct execution and review are cheaper/);
+  assert.match(prompt, /state that overhead rationale rather than citing the lack of a parallel split/);
+  assert.match(prompt, /"parallelizable":true\|false/);
+  assert.match(prompt, /Use an empty subtasks array only when the work must remain upstream, cannot be bounded/);
+  assert.match(prompt, /or is objectively cheaper to execute and review directly/);
+  assert.doesNotMatch(prompt, /delegation would add no value/);
+});
+
 test('parseTaskAssessment strictly rejects a subtask that omits acceptanceCriteria', () => {
   const withoutAcceptanceCriteria = {
     ...assessment,
@@ -244,6 +257,53 @@ test('composeDelegationPlan applies only human-configured active routes with a c
     ]
   );
   assert.notEqual(low.planHash, medium.planHash);
+});
+
+test('a low-complexity nonparallel single subtask is delegated once and selected by the active deepseek-flash rule', () => {
+  const activeConfig: DelegationConfig = {
+    ...config,
+    dispatch: {
+      ...config.dispatch,
+      routeSelection: {
+        mode: 'active',
+        rules: [{ route: 'deepseek-flash', complexities: ['low'] }],
+      },
+    },
+  };
+  const single: TaskAssessment = {
+    ...assessment,
+    complexity: 'low',
+    parallelizable: false,
+    taskKinds: ['test-gap-analysis'],
+    reasoning: 'One bounded review task with no useful split.',
+    subtasks: [
+      {
+        title: 'Review test gaps',
+        kind: 'test-gap-analysis',
+        prompt: 'Review the implementation tests and identify missing cases.',
+        acceptanceCriteria: ['List concrete missing cases'],
+      },
+    ],
+  };
+
+  const plan = composeDelegationPlan(request, parseTaskAssessment(JSON.stringify(single)), activeConfig);
+  assert.equal(plan.decision, 'delegate');
+  assert.equal(plan.willDispatch, true);
+  assert.equal(plan.subtasks.length, 1);
+  assert.deepEqual(
+    plan.subtasks.map((subtask) => ({ route: subtask.route, evidence: subtask.routeSelection })),
+    [
+      {
+        route: 'deepseek-flash',
+        evidence: {
+          mode: 'active',
+          selectedRoute: 'deepseek-flash',
+          basis: 'rule',
+          ruleIndex: 0,
+        },
+      },
+    ]
+  );
 });
 
 test('composeDelegationPlan deterministically applies allowlists, keep-upstream rules, caps, and suggest mode', () => {

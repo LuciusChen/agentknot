@@ -6,7 +6,7 @@
 
 ## Product thesis
 
-AgentKnot is a small, local-first, vendor-neutral execution control plane for deciding when a goal should be split and for delegating bounded coding jobs from interchangeable controllers to interchangeable agent workers and model routes.
+AgentKnot is a small, local-first, vendor-neutral execution control plane for deciding whether and how a goal should be delegated, with or without splitting, from interchangeable controllers to interchangeable agent workers and model routes.
 
 Its job is to admit work, apply a bounded delegation policy, persist the plan and lifecycle evidence, invoke workers, and hand back results and artifacts. It does not own the worker's intelligence, the provider's model runtime, or a collaboration network.
 
@@ -91,7 +91,8 @@ Automatic delegation must be explicit at the API boundary, depth-limited, concur
 Version 0.0.1 currently implements:
 
 - controller-neutral CLI, HTTP, and TypeScript entry points;
-- experimental thin Codex and Claude plugin packages whose explicit or bounded intent-triggered skills submit through the existing orchestration CLI and return terminal/artifact evidence without moving policy or promotion into the controller adapter;
+- a compact CLI orchestration handoff projection for controller consumption that omits duplicated prompts, policy snapshots, and event history without changing the persisted full record or artifact-review authority;
+- experimental thin Codex and Claude plugin packages whose explicit or bounded intent-triggered skills submit through the existing orchestration CLI and return terminal/artifact evidence without moving policy or promotion into the controller adapter; the separately installed `agentknot` executable is a checked prerequisite, and a bounded prompt hook only reminds each host to apply the Skill contract without inspecting, classifying, blocking, or dispatching the prompt;
 - immutable resolved route snapshots with worker, provider, and model dimensions;
 - deterministic mock and Pi RPC worker adapters;
 - a reusable route-neutral adapter unit contract for healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and already-aborted runs; Mock supplies deterministic coverage but is not the second real adapter required for Stage 2;
@@ -128,7 +129,7 @@ The current file stores provide persistent audit snapshots. After acquiring excl
 
 Provider and model independence are currently routing properties implemented by the selected worker. AgentKnot does not yet expose an independent provider-runtime interface.
 
-A pinned OpenCode CLI probe established a plausible native worker protocol but no independent credential path or material correctness, lifecycle, observability, isolation, or maintenance benefit over Pi. A native adapter therefore remains proposed rather than implemented; it must not read or translate Pi credentials, and it requires a same-route experiment plus the Stage 2 conformance and soak gates before promotion ([decision 0028](../postmortems/0028-native-opencode-adapter-evidence-gate.md)).
+A pinned OpenCode CLI probe established a plausible native worker protocol and independent credential path, but two same-task Luna/max A/B pairs found no repeatable token or elapsed-time benefit over Pi. A native adapter therefore remains proposed rather than implemented; it must not read or translate Pi credentials, and it requires repeatable benefit plus the Stage 2 conformance and soak gates before promotion ([decision 0028](../postmortems/0028-native-opencode-adapter-evidence-gate.md)).
 
 Pi extensions are optional worker-profile inputs, not portable core dependencies. A community package can enter the repository dogfood route only after source/supply-chain review and repeated same-task comparison against the minimal Pi route show no regression in terminal completion, artifact validity, or tests and a measurable improvement in upstream intervention, token use, or elapsed work. Trials must use an exact version or immutable external path without global or repository-local installation, and must preserve the selected provider, model, and thinking level. AgentKnot never silently selects an extension or model fallback.
 
@@ -152,9 +153,9 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 ## Reference workflow
 
 1. The controller and user agree on a bounded task and acceptance criteria.
-2. The controller chooses the leaf Job API for an already bounded task or the orchestration API for policy-driven delegation. A thin installed controller plugin may make that call after explicit invocation or bounded Skill matching, but AgentKnot does not intercept arbitrary controller conversations and a native `/goal` is not a separate AgentKnot protocol.
+2. The controller chooses the leaf Job API for an already bounded task or the orchestration API for policy-driven delegation. A thin installed controller plugin may make that call after explicit invocation or bounded Skill matching. Its prompt hook may require the controller to consider the Skill but cannot itself classify or dispatch the prompt; a native `/goal` is not a separate AgentKnot protocol.
 3. For orchestration, AgentKnot snapshots the effective policy, asks the configured planner route for a strict read-only assessment, validates it, deterministically filters and caps it, optionally evaluates configured shadow or active rules using subtask kind and parent assessment complexity, and persists the plan before any child dispatch; the planner cannot name routes.
-4. An upstream or suggested decision returns without starting child jobs. An automatic decision submits each selected subtask through the ordinary Job API with depth-one provenance and bounded concurrency. Shadow keeps `dispatch.defaultRoute`; active uses the matched configured route or the conservative default, and both carry selection evidence, task kind, and parent complexity in structured child metadata.
+4. An upstream or suggested decision returns without starting child jobs. An automatic decision submits each selected subtask through the ordinary Job API with depth-one provenance and bounded concurrency. One bounded substantive task may be one non-parallel child; a lack of useful parallel splitting does not by itself retain the task upstream, while an objectively trivial direct check stays upstream when handoff and review cost more. Shadow keeps `dispatch.defaultRoute`; active uses the matched configured route or the conservative default, and both carry selection evidence, task kind, and parent complexity in structured child metadata.
 5. For a leaf job, the controller submits a `JobRequest` with a workspace, route, source identity, and optional callback.
 6. AgentKnot validates the request and snapshots the route, then atomically creates the queued job record with `job.queued`; failure starts no worker.
 7. AgentKnot begins execution, prepares an isolated attempt when configured, and invokes the route's worker adapter.

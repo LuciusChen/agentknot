@@ -156,6 +156,37 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
   assert.equal(record.result?.action, 'upstream');
   assert.deepEqual(record.children, []);
 
+  const handoffRun = await runCli(
+    fixture.configPath,
+    'orchestrate',
+    '--prompt',
+    'Keep this second task upstream.',
+    '--workspace',
+    fixture.workspace,
+    '--source',
+    'test',
+    '--handoff-json'
+  );
+  const handoff = JSON.parse(handoffRun.stdout) as Record<string, unknown> & {
+    request: Record<string, unknown>;
+    plan: Record<string, unknown>;
+    children: unknown[];
+    artifacts: unknown[];
+    result: { action: string };
+  };
+  assert.equal(handoff.status, 'succeeded');
+  assert.deepEqual(handoff.request, { source: 'test' });
+  assert.equal(handoff.plan.decision, 'upstream');
+  assert.deepEqual(handoff.children, []);
+  assert.deepEqual(handoff.artifacts, []);
+  assert.equal(handoff.result.action, 'upstream');
+  for (const omitted of ['policy', 'events', 'execution', 'createdAt', 'updatedAt']) {
+    assert.equal(omitted in handoff, false);
+  }
+  assert.equal('prompt' in handoff.request, false);
+  assert.equal('workspace' in handoff.request, false);
+  assert.ok(handoffRun.stdout.length < orchestrate.stdout.length);
+
   const humanDelegation = await runCli(fixture.configPath, 'delegation');
   assert.match(humanDelegation.stdout, /\tworker-default=alternate\t/);
   assert.match(humanDelegation.stdout, /\troute-selection=active\t/);
@@ -169,9 +200,9 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
 
   const list = await runCli(fixture.configPath, 'orchestrations', '--json');
   const records = JSON.parse(list.stdout) as OrchestrationRecord[];
-  assert.equal(records.length, 1);
-  assert.equal(records[0]?.id, record.id);
-  assert.equal(records[0]?.result?.action, 'upstream');
+  assert.equal(records.length, 2);
+  const listedRecord = records.find((candidate) => candidate.id === record.id);
+  assert.equal(listedRecord?.result?.action, 'upstream');
 
   const shown = await runCli(fixture.configPath, 'orchestration-show', record.id);
   const shownRecord = JSON.parse(shown.stdout) as OrchestrationRecord;

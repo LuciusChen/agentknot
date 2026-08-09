@@ -13,6 +13,8 @@ const integrations = [
     marketplace: '.agents/plugins/marketplace.json',
     marketplaceSource: './integrations/codex/agentknot',
     skill: 'integrations/codex/agentknot/skills/agentknot-delegate/SKILL.md',
+    hook: 'integrations/codex/agentknot/hooks/hooks.json',
+    hookScript: 'integrations/codex/agentknot/hooks/user-prompt-submit.mjs',
     explicitInvocation: '$agentknot-delegate',
   },
   {
@@ -21,6 +23,8 @@ const integrations = [
     marketplace: '.claude-plugin/marketplace.json',
     marketplaceSource: './integrations/claude/agentknot',
     skill: 'integrations/claude/agentknot/skills/agentknot-delegate/SKILL.md',
+    hook: 'integrations/claude/agentknot/hooks/hooks.json',
+    hookScript: 'integrations/claude/agentknot/hooks/user-prompt-submit.mjs',
     explicitInvocation: '/agentknot:agentknot-delegate',
   },
 ] as const;
@@ -55,7 +59,12 @@ function normalizeControllerDifferences(value: string): string {
 }
 
 test('Codex and Claude plugins expose the same bounded AgentKnot delegation contract', async () => {
-  const skills: Array<{ description: string; body: string }> = [];
+  const packageManifest = JSON.parse(
+    await readFile(path.join(repositoryRoot, 'package.json'), 'utf8')
+  ) as Record<string, unknown>;
+  assert.deepEqual(packageManifest.bin, { agentknot: './dist/src/cli.js' });
+
+  const skills: Array<{ description: string; body: string; hook: unknown; hookScript: string }> = [];
 
   for (const integration of integrations) {
     const marketplace = JSON.parse(
@@ -77,7 +86,7 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
       await readFile(path.join(repositoryRoot, integration.manifest), 'utf8')
     ) as Record<string, unknown>;
     assert.equal(manifest.name, 'agentknot');
-    assert.match(String(manifest.version), /^\d+\.\d+\.\d+$/);
+    assert.match(String(manifest.version), /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
     assert.equal(typeof manifest.description, 'string');
     assert.equal('hooks' in manifest, false);
     assert.equal('mcpServers' in manifest, false);
@@ -90,15 +99,28 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     assert.equal(metadata.name, 'agentknot-delegate');
     const description = requireString(metadata.description, `${integration.controller} skill description`);
     assert.match(description, /explicit/);
-    assert.match(description, /model-triggered/);
+    assert.match(description, /Use whenever a repository task/);
+    assert.match(description, /requires more than one direct upstream read or action/);
+    assert.match(description, /including one substantive nonparallel task/);
     assert.match(body, new RegExp(integration.explicitInvocation.replace('$', '\\$')));
+    assert.match(body, /requires more than one direct upstream read or action/);
+    assert.match(body, /including one substantive task with no useful parallel split/);
+    assert.match(body, /trivial one-read check upstream/);
     assert.match(body, new RegExp(`--source ${integration.controller}`));
+    assert.match(body, /command -v agentknot/);
+    assert.match(body, /In one shell call/);
+    assert.match(body, /stop before orchestration/);
+    assert.match(body, /installed and available on PATH/);
+    assert.match(body, /do not substitute another command, worker, provider, or model/);
     assert.match(body, /agentknot orchestrate/);
+    assert.match(body, /--handoff-json/);
     assert.match(body, /--workspace[\s\S]*git rev-parse --show-toplevel/);
-    assert.match(body, /terminal JSON record/);
-    for (const command of ['agentknot artifacts', 'agentknot artifact-verify', 'agentknot artifact-preview']) {
-      assert.ok(body.includes(command));
-    }
+    assert.match(body, /compact terminal JSON handoff/);
+    assert.match(body, /do not poll processes, relist full records, or repeat artifact verification/);
+    assert.match(body, /Do not independently repeat the delegated repository work/);
+    assert.match(body, /artifact-preview/);
+    assert.doesNotMatch(body, /agentknot artifacts/);
+    assert.doesNotMatch(body, /agentknot artifact-verify/);
 
     const contract = `${description}\n${body}`.toLowerCase();
     for (const eligible of ['implementation', 'test', 'analysis', 'repair', 'documentation']) {
@@ -109,7 +131,24 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     }
     assert.match(contract, /never apply a patch automatically/);
     assert.doesNotMatch(body, /git\s+(?:apply|am|commit|push|merge)\b/);
-    skills.push({ description, body });
+
+    const hook = JSON.parse(await readFile(path.join(repositoryRoot, integration.hook), 'utf8')) as {
+      hooks?: { UserPromptSubmit?: Array<{ hooks?: Array<Record<string, unknown>> }> };
+    };
+    const handlers = hook.hooks?.UserPromptSubmit;
+    assert.equal(handlers?.length, 1);
+    assert.equal(handlers?.[0]?.hooks?.length, 1);
+    assert.deepEqual(handlers?.[0]?.hooks?.[0], {
+      type: 'command',
+      command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs"',
+      timeout: 3,
+      additionalContextLimit: 100,
+    });
+    const hookScript = await readFile(path.join(repositoryRoot, integration.hookScript), 'utf8');
+    assert.match(hookScript, /matches the agentknot-delegate Skill description/);
+    assert.match(hookScript, /Otherwise continue normally/);
+    assert.doesNotMatch(hookScript, /JSON\.parse|process\.stdin/);
+    skills.push({ description, body, hook, hookScript });
   }
 
   assert.equal(
@@ -120,4 +159,6 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     normalizeControllerDifferences(skills[0]?.body ?? ''),
     normalizeControllerDifferences(skills[1]?.body ?? '')
   );
+  assert.deepEqual(skills[0]?.hook, skills[1]?.hook);
+  assert.equal(skills[0]?.hookScript, skills[1]?.hookScript);
 });

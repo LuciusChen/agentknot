@@ -1,0 +1,17 @@
+{
+  "description": "Remind the controller to apply the installed AgentKnot delegation Skill when its own eligibility contract matches.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\"",
+            "timeout": 3,
+            "additionalContextLimit": 100
+          }
+        ]
+      }
+    ]
+  }
+}

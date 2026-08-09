@@ -3,7 +3,8 @@
 import process from 'node:process';
 
 import { createAgentKnotHttpServer } from './http-server.js';
-import { createRuntime } from './runtime.js';
+import type { OrchestrationRecord } from './orchestration-types.js';
+import { createRuntime, type AgentKnotRuntime } from './runtime.js';
 import type { JobEvent } from './types.js';
 
 function takeOption(args: string[], name: string): string | undefined {
@@ -59,6 +60,7 @@ Orchestrate options:
   --delegation MODE   inherit, never, suggest, or force (default: inherit)
   --suggest           Alias for --delegation suggest
   --json              Print the terminal orchestration record as JSON
+  --handoff-json      Print compact terminal/controller handoff JSON
 
 Doctor options:
   --route NAME        Exact configured route to diagnose
@@ -78,6 +80,95 @@ function printEvent(event: JobEvent, json: boolean, events: boolean): void {
   } else if (event.type.startsWith('job.')) {
     process.stderr.write(`[${event.type}] ${event.jobId}\n`);
   }
+}
+
+async function orchestrationHandoff(
+  runtime: Pick<AgentKnotRuntime, 'verifyArtifacts'>,
+  record: OrchestrationRecord
+): Promise<object> {
+  const artifacts = await Promise.all(
+    record.children.map(async (child) => {
+      const verification = await runtime.verifyArtifacts(child.jobId);
+      if (verification === undefined) return { jobId: child.jobId, status: 'unavailable' };
+      return {
+        jobId: child.jobId,
+        status: 'verified',
+        valid: verification.valid,
+        attempts: verification.artifacts.map((attempt) => ({
+          attempt: attempt.artifact.attempt,
+          size: attempt.artifact.size,
+          sha256: attempt.artifact.sha256,
+          baseCommit: attempt.artifact.baseCommit,
+          changedFiles: attempt.artifact.changedFiles,
+          valid: attempt.valid,
+          issues: attempt.issues,
+          file: {
+            exists: attempt.file.exists,
+            actualSize: attempt.file.actualSize,
+            sizeMatches: attempt.file.sizeMatches,
+            actualSha256: attempt.file.actualSha256,
+            sha256Matches: attempt.file.sha256Matches,
+          },
+          source: {
+            repositoryAvailable: attempt.source.repositoryAvailable,
+            actualHead: attempt.source.actualHead,
+            headMatchesBase: attempt.source.headMatchesBase,
+          },
+        })),
+      };
+    })
+  );
+  return {
+    schemaVersion: record.schemaVersion,
+    id: record.id,
+    status: record.status,
+    request: {
+      source: record.request.source,
+      delegation: record.request.delegation,
+    },
+    plannerJobId: record.plannerJobId,
+    plan:
+      record.plan === undefined
+        ? undefined
+        : {
+            policyVersion: record.plan.policyVersion,
+            planHash: record.plan.planHash,
+            mode: record.plan.mode,
+            decision: record.plan.decision,
+            willDispatch: record.plan.willDispatch,
+            reasoning: record.plan.reasoning,
+            assessment: {
+              recommendation: record.plan.assessment.recommendation,
+              complexity: record.plan.assessment.complexity,
+              parallelizable: record.plan.assessment.parallelizable,
+              taskKinds: record.plan.assessment.taskKinds,
+            },
+            subtasks: record.plan.subtasks.map((subtask) => ({
+              id: subtask.id,
+              title: subtask.title,
+              kind: subtask.kind,
+              route: subtask.route,
+              routeSelection: subtask.routeSelection,
+            })),
+            plannerError: record.plan.plannerError,
+          },
+    children: record.children.map((child) => ({
+      subtaskId: child.subtaskId,
+      jobId: child.jobId,
+      status: child.status,
+      output: child.output,
+      error: child.error,
+    })),
+    artifacts,
+    result:
+      record.result === undefined
+        ? undefined
+        : {
+            action: record.result.action,
+            artifactReview: record.result.artifactReview,
+          },
+    error: record.error,
+  };
 }
 
 function cancelOnTermination(cancel: () => void | Promise<void>): () => void {
@@ -156,6 +247,8 @@ async function main(argv: string[]): Promise<void> {
     const delegationOption = takeOption(args, '--delegation');
     const suggest = takeFlag(args, '--suggest');
     const json = takeFlag(args, '--json');
+    const handoffJson = takeFlag(args, '--handoff-json');
+    if (json && handoffJson) throw new Error('--json and --handoff-json cannot be used together');
     if (suggest && delegationOption !== undefined) {
       throw new Error('--suggest and --delegation cannot be used together');
     }
@@ -167,7 +260,7 @@ async function main(argv: string[]): Promise<void> {
     const prompt = promptOption ?? args.join(' ');
     const runtime = await createRuntime({
       ...(configPath === undefined ? {} : { configPath }),
-      onEvent: (event) => printEvent(event, json, false),
+      onEvent: (event) => printEvent(event, json || handoffJson, false),
       reconcileOnStartup: true,
     });
     const started = await runtime
@@ -184,11 +277,18 @@ async function main(argv: string[]): Promise<void> {
         throw error;
       });
     const stopCancellation = cancelOnTermination(started.cancel);
-    const orchestration = await started.completion.finally(async () => {
+    let orchestration!: OrchestrationRecord;
+    let handoff: object | undefined;
+    try {
+      orchestration = await started.completion;
+      if (handoffJson) handoff = await orchestrationHandoff(runtime, orchestration);
+    } finally {
       stopCancellation();
       await runtime.close();
-    });
-    if (json) {
+    }
+    if (handoffJson) {
+      process.stdout.write(`${JSON.stringify(handoff, null, 2)}\n`);
+    } else if (json) {
       process.stdout.write(`${JSON.stringify(orchestration, null, 2)}\n`);
     } else {
       process.stdout.write(

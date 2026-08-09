@@ -11,7 +11,7 @@
 
 Codex and Claude receive separate thin installable plugins that adapt controller-native Skill invocation to the existing `agentknot orchestrate` CLI. Explicit commands and normal description-based Skill matching are controller UX; `/goal` is one possible upstream goal surface, not a new AgentKnot protocol. Delegation, routing, lifecycle, evidence, and artifact policy remain in AgentKnot.
 
-The initial slice deliberately adds no prompt hook, MCP server, wrapper daemon, or controller branch in `src`. It does not intercept every prompt and does not claim that informational conversation is automatically delegated.
+The initial slice deliberately added no prompt hook, MCP server, wrapper daemon, or controller branch in `src`. Decision 0029 later admitted one static, non-dispatching prompt hook after three real implicit-entry probes bypassed the Skill; the MCP, wrapper, daemon, and core boundaries remain unchanged.
 
 ## Context and evidence
 
@@ -52,7 +52,7 @@ Both final repository marketplaces installed successfully into isolated Codex an
 - [x] Add native Codex and Claude packages, marketplace manifests, validators, semantic-parity tests, and isolated install smoke evidence.
 - [x] Keep the core unchanged and remove test-only implementation inflation during upstream artifact review.
 - [ ] Run explicit and implicit real controller invocations for Codex and Claude through the same real AgentKnot terminal/artifact path before marking the controller exit gate complete.
-- [ ] Add a hook or MCP boundary only after a recorded failure or measurable benefit proves the thin Skill/CLI adapter insufficient.
+- [x] Add a bounded prompt hook only after recorded implicit-entry failures proved description matching insufficient; keep MCP deferred without separate evidence.
 
 ## Privacy and security review
 

@@ -1,11 +1,11 @@
 ---
 name: agentknot-delegate
-description: Delegate bounded, independently verifiable implementation, test, analysis, repair, or documentation work through AgentKnot. Use for explicit $agentknot-delegate requests or model-triggered delegation of eligible tasks. Keep informational chat, requirements and product decisions, artifact integration, commit, push, merge, and deployment upstream.
+description: Delegate bounded, independently verifiable implementation, test, analysis, repair, or documentation work through AgentKnot. Use whenever a repository task in those categories has objective acceptance criteria and requires more than one direct upstream read or action, including one substantive nonparallel task, or for explicit $agentknot-delegate requests. Keep trivial one-read checks, informational chat, requirements and product decisions, artifact integration, commit, push, merge, and deployment upstream.
 ---
 
 # AgentKnot bounded delegation
 
-Use this skill only for a bounded, independently verifiable task that can be handed to AgentKnot without an upstream decision. Explicit invocation may request the workflow; model-triggered use is allowed only for eligible independent implementation, test, analysis, repair, or documentation work. Preserve the upstream controller as the decision-maker.
+Use this skill for bounded, independently verifiable repository work that requires more than one direct upstream read or action and can be handed to AgentKnot without an upstream decision, including one substantive task with no useful parallel split. Keep a trivial one-read check upstream because planner, worker, and review overhead would cost more. Explicit invocation may request the workflow; model-triggered use applies to eligible independent implementation, test, analysis, repair, or documentation work. Preserve the upstream controller as the decision-maker.
 
 ## Keep upstream
 
@@ -23,27 +23,22 @@ Keep any task with unclear acceptance criteria, shared write scope, execution-or
 Invoke this skill explicitly as `$agentknot-delegate` with the bounded task, or allow model-triggered use only after the eligibility checks above.
 
 1. Confirm that the task has a bounded file or component scope, acceptance criteria, and no dependency on another delegated task. Set `TASK` to the exact task text.
-2. Resolve the workspace Git root and invoke the existing orchestration CLI with the Codex audit source:
+2. In one shell call, confirm that the CLI exists and immediately run orchestration with the Codex audit source:
 
    ```sh
-   terminal_record="$(
-     agentknot orchestrate \
-       --source codex \
-       --workspace "$(git rev-parse --show-toplevel)" \
-       --delegation force \
-       --json \
-       --prompt "$TASK"
-   )"
+   if ! command -v agentknot >/dev/null; then
+     echo "AgentKnot CLI must be installed and available on PATH." >&2
+     exit 127
+   fi
+   agentknot orchestrate \
+     --source codex \
+     --workspace "$(git rev-parse --show-toplevel)" \
+     --delegation force \
+     --handoff-json \
+     --prompt "$TASK"
    ```
 
-3. Consume `terminal_record` as the terminal JSON record. Parse and report its `status`, `result.action`, `error`, `children`, and `result.artifactReview`; a process exit code or worker prose alone is not a terminal record.
-4. For each child `jobId`, list recorded artifacts and, when artifacts are present, verify and preview every recorded attempt:
-
-   ```sh
-   agentknot artifacts "$jobId" --json
-   agentknot artifact-verify "$jobId" --json
-   agentknot artifact-preview "$jobId" "$attempt" --json
-   ```
-
-   Inspect verification validity, issue codes, preview content, truncation, base evidence, and the parent artifact review. Treat missing, invalid, or incomplete evidence as upstream review input rather than acceptance.
-5. Return the terminal record, artifact evidence, checks, and remaining risks to the upstream controller. Never apply a patch automatically; do not stage, commit, push, merge, deploy, or otherwise promote an artifact. Acceptance and any later repository mutation remain explicit upstream actions.
+   If the preflight fails, stop before orchestration and report the prerequisite; do not substitute another command, worker, provider, or model.
+3. Consume the compact terminal JSON handoff. Parse and report its `status`, `result.action`, `error`, `children`, `artifacts`, and `result.artifactReview`; a process exit code or worker prose alone is not a terminal record. The `artifacts` array already contains checksum, size, base, changed-file, validity, and issue evidence. Once this command returns a terminal status, do not poll processes, relist full records, or repeat artifact verification.
+4. Preview each valid non-empty artifact attempt once as plain patch content with `agentknot artifact-preview "$jobId" "$attempt"`. Treat unavailable, invalid, or incomplete evidence as upstream review input rather than acceptance.
+5. Return the terminal handoff, any patch preview, checks, and remaining risks to the upstream controller. Do not independently repeat the delegated repository work after successful terminal evidence. Never apply a patch automatically; do not stage, commit, push, merge, deploy, or otherwise promote an artifact. Acceptance and any later repository mutation remain explicit upstream actions.
