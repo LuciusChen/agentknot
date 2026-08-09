@@ -94,6 +94,7 @@ Version 0.0.1 currently implements:
 - experimental thin Codex and Claude plugin packages whose explicit or bounded intent-triggered skills submit through the existing orchestration CLI and return terminal/artifact evidence without moving policy or promotion into the controller adapter;
 - immutable resolved route snapshots with worker, provider, and model dimensions;
 - deterministic mock and Pi RPC worker adapters;
+- a reusable route-neutral adapter unit contract for healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and already-aborted runs; Mock supplies deterministic coverage but is not the second real adapter required for Stage 2;
 - OpenCode Go/Luna and xAI/Grok routes through Pi configuration;
 - file-backed or in-memory job snapshots and ordered events;
 - atomic leaf admission containing the queued snapshot and first event, with later persistence failures isolated from worker retry and terminal-result fabrication;

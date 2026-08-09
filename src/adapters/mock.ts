@@ -9,6 +9,9 @@ import type {
 import type { MockWorkerConfig } from '../config.js';
 
 function wait(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Aborted'));
+  }
   if (ms === 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
@@ -38,6 +41,9 @@ export class MockWorkerAdapter implements WorkerAdapter {
   }
 
   async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
+    if (input.signal.aborted) {
+      throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
+    }
     await emit('worker.started', { adapter: 'mock', attempt: input.attempt });
     await wait(this.config.delayMs ?? 0, input.signal);
     const output = `${this.config.responsePrefix ?? 'Mock completed'}: ${input.prompt}`;

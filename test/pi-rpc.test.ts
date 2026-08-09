@@ -16,6 +16,7 @@ import {
 } from '../src/adapters/pi-rpc.js';
 import { MemoryJobStore } from '../src/store.js';
 import type { JobEventType, ResolvedRoute } from '../src/types.js';
+import { registerWorkerAdapterConformanceTests } from './worker-adapter-conformance.js';
 
 const route: ResolvedRoute = {
   name: 'fake-pi',
@@ -172,6 +173,22 @@ function createConformanceOrchestrator(
     adapters: createAdapters(config),
   });
 }
+
+registerWorkerAdapterConformanceTests({
+  name: 'PiRpcWorkerAdapter',
+  createAdapter: () =>
+    new PiRpcWorkerAdapter('pi', {
+      adapter: 'pi-rpc',
+      command: process.execPath,
+      commandArgs: [fakePiFixture],
+      noSession: true,
+    }),
+  route,
+  expectedOutput: 'fake result',
+  assertHealth: (health) => {
+    assert.match(health.message, new RegExp(`${route.provider}/${route.model}`));
+  },
+});
 
 test('PiRpcWorkerAdapter doctor uses worker environment for required variables without mutating process.env', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-doctor-env-'));
@@ -541,7 +558,7 @@ test('Pi normal completion reports propagate to the terminal summary', async () 
   }
 });
 
-test('PiRpcWorkerAdapter speaks JSONL RPC and normalizes Pi events', async () => {
+test('PiRpcWorkerAdapter normalizes Pi tool events', async () => {
   const fixture = path.resolve('test/fixtures/fake-pi.mjs');
   const adapter = new PiRpcWorkerAdapter('pi', {
     adapter: 'pi-rpc',
@@ -552,7 +569,7 @@ test('PiRpcWorkerAdapter speaks JSONL RPC and normalizes Pi events', async () =>
   const controller = new AbortController();
   const events: JobEventType[] = [];
 
-  const result = await adapter.run(
+  await adapter.run(
     {
       jobId: 'job_test',
       prompt: 'do work',
@@ -566,11 +583,8 @@ test('PiRpcWorkerAdapter speaks JSONL RPC and normalizes Pi events', async () =>
     }
   );
 
-  assert.equal(result.output, 'fake result');
-  assert.ok(events.includes('worker.started'));
   assert.ok(events.includes('worker.tool.started'));
   assert.ok(events.includes('worker.tool.completed'));
-  assert.equal(events.filter((event) => event === 'worker.text.delta').length, 2);
 });
 
 test('PiRpcWorkerAdapter filters Pi lifecycle envelopes while counting every normal-run frame', async () => {
@@ -600,9 +614,6 @@ test('PiRpcWorkerAdapter filters Pi lifecycle envelopes while counting every nor
     }
   );
 
-  assert.equal(result.output, 'fake result');
-  assert.ok(events.some((event) => event.type === 'worker.started'));
-  assert.equal(events.filter((event) => event.type === 'worker.text.delta').length, 2);
   assert.ok(events.some((event) => event.type === 'worker.tool.started'));
   assert.ok(events.some((event) => event.type === 'worker.tool.completed'));
   assert.deepEqual(

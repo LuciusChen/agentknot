@@ -213,7 +213,7 @@ Prove that controllers and worker runtimes can change independently without core
 - Keep integration context bounded so the upstream controller can hand off eligible implementation, test, analysis, and documentation work without first reproducing the worker's repository-reading and implementation effort.
 - During each integration slice, identify and delete superseded examples, prompt reminders, compatibility shims, duplicate request builders, and dead controller-specific branches after parity is proven; do not retain a second legacy path indefinitely.
 - Introduce an implemented-capabilities schema only after at least two real workers need meaningfully different lifecycle behavior.
-- Build a worker-adapter conformance kit for startup, route resolution, events, cancellation, termination, errors, artifacts, and health diagnostics.
+- Continue the worker-adapter conformance kit across startup, route resolution, events, cancellation, termination, errors, artifacts, and health diagnostics. The reusable route-neutral unit layer now covers healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and pre-aborted runs for Mock and Pi RPC. Pi transport cases and core route/lifecycle/artifact suites remain separate; a second real adapter and per-adapter real-worker soak are still required.
 - Promote Pi from first adapter to reference-tested adapter rather than privileged architecture.
 - Evaluate a native OpenCode, Codex, Claude, Grok, or AI SDK harness adapter only when it provides a demonstrated lifecycle or observability benefit over Pi.
 - Keep provider/model selection as route data unless a second implementation proves that a standalone provider abstraction is required.
