@@ -29,6 +29,7 @@ import type {
   RouteDiagnostic,
   StartJobResult,
 } from './types.js';
+import { buildUsageReport, type UsageReport } from './usage-report.js';
 
 export interface CreateRuntimeOptions {
   configPath?: string;
@@ -127,6 +128,11 @@ export class AgentKnotRuntime {
 
   listOrchestrations(): Promise<OrchestrationRecord[]> {
     return this.orchestrations.list();
+  }
+
+  async usage(): Promise<UsageReport> {
+    const [jobs, orchestrations] = await Promise.all([this.list(), this.listOrchestrations()]);
+    return buildUsageReport(jobs, orchestrations);
   }
 
   orchestrate(request: OrchestrationRequest): Promise<OrchestrationRecord> {

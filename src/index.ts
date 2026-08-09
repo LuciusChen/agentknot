@@ -12,4 +12,5 @@ export * from './runtime.js';
 export * from './runtime-ownership.js';
 export * from './store.js';
 export * from './types.js';
+export * from './usage-report.js';
 export * from './workspace-isolation.js';

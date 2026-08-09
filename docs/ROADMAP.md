@@ -218,6 +218,7 @@ Prove that controllers and worker runtimes can change independently without core
 - Evaluate a native OpenCode, Codex, Claude, Grok, or AI SDK harness adapter only when it provides a demonstrated lifecycle or observability benefit over Pi.
 - Keep provider/model selection as route data unless a second implementation proves that a standalone provider abstraction is required.
 - Define exact versus inferred observability if multiple runtimes offer different event fidelity.
+- [x] Add one bounded read-only usage report over persisted evidence: exact downstream Pi token/cost coverage, an explicitly defined cache-read hit rate, and active/shadow route-selection rule/default counts. Controller usage and upstream/downstream proportions remain structurally unavailable until an exact controller boundary supplies comparable data; no controller transcripts are parsed and no live collector or inferred usage is added ([decision 0034](../postmortems/0034-persisted-usage-observability-boundary.md)).
 
 ### Controller integration slice delivered
 
@@ -237,6 +238,12 @@ Prove that controllers and worker runtimes can change independently without core
 - Two same-task Luna/max pairs produced correct scoped results but no repeatable token or elapsed-time benefit. Native OpenCode used 33.8% fewer tokens and 40.5% less elapsed time on a read-only audit, then used 6.3% more tokens and 0.6% more elapsed time on a documentation-writing task; provider-reported cost was lower in both pairs, while tool calls were 19 versus 16 and then 16 versus 16. The non-empty native patch applied cleanly and the Pi artifact passed controller-owned verification, but adapter-owned artifact/test coverage, deterministic protocol fixtures, cancellation/timeout/cleanup, shared conformance, and real-worker lifecycle soaks remain open. Native OpenCode therefore remains deferred under [decision 0028](../postmortems/0028-native-opencode-adapter-evidence-gate.md).
 - The unused xAI/Grok repository route and current-product examples were removed. Historical decision evidence remains unchanged; formal dogfood candidates are Luna/max and the human-authored low-complexity DeepSeek Flash/max route, with no fallback.
 
+### Usage observability slice delivered
+
+- Added `AgentKnotRuntime.usage()` plus `agentknot usage [--json]` as one read-only fold over persisted Job and Orchestration evidence. Exact available downstream token totals and provider-reported cost retain complete/partial coverage; zero remains distinct from missing or invalid data.
+- Defined cache-read hit rate as `cacheRead / (input + cacheRead)` after aggregation and route-rule hit rate as `rule / (rule + default)`, with active and shadow evidence kept separate. Route classifications come only from terminal plan evidence checked against its immutable policy snapshot; missing or inconsistent evidence remains unclassified.
+- Kept controller usage and upstream/downstream proportions explicitly unavailable because the current persisted controller contract has no comparable exact usage. The slice adds no transcript parser, telemetry store, live collector, import path, dashboard, HTTP endpoint, provider price table, or route/model behavior.
+
 ### Exit gates
 
 - Installed Codex and Claude integrations each pass the same end-to-end request, terminal-record, and artifact-evidence contract without controller-name branches in core.
@@ -245,6 +252,7 @@ Prove that controllers and worker runtimes can change independently without core
 - Code or documentation superseded by a promoted controller or worker path is removed in the same slice after parity tests pass; no unowned compatibility shim, duplicate request path, or stale capability claim remains.
 - At least two real worker adapters pass the same conformance suite.
 - Unsupported lifecycle and observability features are represented as unavailable, not emulated deceptively.
+- The usage report distinguishes complete, partial, and unavailable persisted evidence; zero is never substituted for missing statistics, route hits come from the recorded plan rather than current configuration, and unknown controller usage never produces a fabricated 0/100 upstream/downstream split.
 - Swapping controller, worker, provider, or model changes configuration or an adapter, not unrelated orchestrator modules.
 - A real-worker soak covers success, failure, cancellation, timeout, and artifact handoff for every promoted adapter.
 - Removing one adapter leaves the core and other adapters functional.

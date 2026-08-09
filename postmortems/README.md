@@ -145,3 +145,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0031](./0031-bounded-pi-output-drain.md) | Incident / Experiment | Resolved | Bound Pi output draining when an event sink never settles |
 | [0032](./0032-pre-model-multi-child-evidence.md) | Experiment | Accepted | Prove pre-model multi-child dispatch without a direct baseline |
 | [0033](./0033-controller-timeout-phase-claim.md) | Incident / Experiment | Resolved | Remove the false pre-dispatch claim from hook failures |
+| [0034](./0034-persisted-usage-observability-boundary.md) | Decision | Accepted | Report exact persisted usage without inventing controller telemetry |

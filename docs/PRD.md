@@ -103,6 +103,7 @@ Version 0.0.1 currently implements:
 - immediate execution with cooperative timeouts, retries, and cancellation, plus bounded exact-child and output-drain supervision in the bundled Pi adapter even when an external event sink does not settle;
 - reproducible Pi execution that disables ambient extension, skill, prompt-template, and theme discovery while preserving repository instructions and explicitly configured resources;
 - sanitized per-job Pi session statistics for measuring message/tool counts, token use, cost, and context use without retaining session paths, identifiers, or raw responses;
+- a read-only CLI and TypeScript usage projection over persisted terminal evidence, with exact available downstream token/cost aggregation, explicit cache-read and route-selection hit formulas, partial/unavailable coverage, and no fabricated controller usage or upstream/downstream proportion;
 - one-shot completion callbacks to trusted URLs, with callback-bookkeeping persistence isolated from the terminal execution result and no automatic redelivery;
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
@@ -189,6 +190,7 @@ The product remains on course when all of the following are true:
 - every terminal job is inspectable after the invoking call returns;
 - every newly terminal succeeded, failed, or cancelled Job has a schemaVersion 1 completion summary before its terminal event is persisted or observed, and retries summarize only the terminal attempt;
 - completion summaries distinguish controller-captured artifact paths from worker-reported claims, never infer reports from prose/events/stderr/session statistics, and preserve explicit unavailable reasons; normal Pi runs use only the exact end-marked envelope, with absent or malformed envelopes unable to fail an otherwise successful job;
+- usage reporting counts exact persisted successful-Job statistics once, preserves provider-reported totals and cost without currency normalization, classifies route hits only from terminal plan/policy evidence, and reports controller usage and cross-boundary proportions unavailable until comparable exact controller data is persisted;
 - new leaf Job and Orchestration records carry `schemaVersion: 1`, legacy file reads remain byte-stable, and unsupported explicit versions fail rather than defaulting to v1;
 - Git worktree mode leaves the source workspace clean and returns artifacts without applying them;
 - controllers can verify and preview recorded artifacts without source mutation, while acceptance and promotion remain explicit upstream decisions;

@@ -6,6 +6,7 @@ import { createAgentKnotHttpServer } from './http-server.js';
 import type { OrchestrationRecord } from './orchestration-types.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
 import type { JobEvent } from './types.js';
+import type { RouteSelectionModeUsage, UsageRate, UsageReport } from './usage-report.js';
 
 function takeOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -33,6 +34,7 @@ Usage:
   agentknot doctor [--route NAME] [--live]
   agentknot routes [--json]
   agentknot jobs [--json]
+  agentknot usage [--json]
   agentknot show JOB_ID
   agentknot artifacts JOB_ID [--json]
   agentknot artifact-verify JOB_ID [--json]
@@ -66,6 +68,60 @@ Doctor options:
   --route NAME        Exact configured route to diagnose
   --live              Perform one real inference probe; no fallback
 `;
+}
+
+function formatRate(value: UsageRate): string {
+  return value.status === 'available'
+    ? `${(value.value * 100).toFixed(2)}% (${value.formula})`
+    : `unavailable reason=${value.reason} (${value.formula})`;
+}
+
+function formatRouteMode(mode: string, value: RouteSelectionModeUsage): string {
+  const selections = value.selections
+    .map((selection) =>
+      selection.basis === 'rule'
+        ? `rule[${selection.ruleIndex}]=${selection.route}:${selection.count}`
+        : `default=${selection.route}:${selection.count}`
+    )
+    .join(',');
+  return `route-${mode} classified=${value.classifiedSelections} rule-hits=${value.ruleHits} defaults=${value.defaultSelections} hit-rate=${formatRate(value.ruleHitRate)}${selections === '' ? '' : ` selections=${selections}`}`;
+}
+
+function formatUsageReport(report: UsageReport): string {
+  const lines = [
+    `scope jobs=${report.scope.totalJobs} successful=${report.scope.successfulJobs} stats=${report.scope.statsAvailableJobs} stats-unavailable=${report.scope.statsUnavailableJobs} orchestrations=${report.scope.terminalOrchestrations} subtasks=${report.scope.plannedSubtasks}`,
+  ];
+  if (report.downstream.status === 'available') {
+    lines.push(
+      `downstream status=available coverage=${report.downstream.coverage}`,
+      `tokens input=${report.downstream.tokens.input} output=${report.downstream.tokens.output} cache-read=${report.downstream.tokens.cacheRead} cache-write=${report.downstream.tokens.cacheWrite} total=${report.downstream.tokens.total}`,
+      `provider-reported-cost=${report.downstream.providerReportedCost}`,
+      `cache-read-hit-rate=${formatRate(report.downstream.cacheReadHitRate)}`
+    );
+  } else {
+    lines.push(`downstream status=unavailable reason=${report.downstream.reason}`);
+  }
+  if (report.downstream.unavailable.length > 0) {
+    lines.push(
+      `stats-unavailable-reasons=${report.downstream.unavailable.map((item) => `${item.reason}:${item.count}`).join(',')}`
+    );
+  }
+  lines.push(
+    report.routeSelection.status === 'available'
+      ? `route-selection status=available coverage=${report.routeSelection.coverage} classified=${report.routeSelection.classifiedSelections} unavailable=${report.routeSelection.unavailableSelections}`
+      : `route-selection status=unavailable reason=${report.routeSelection.reason} unavailable=${report.routeSelection.unavailableSelections}`
+  );
+  if (report.routeSelection.active.classifiedSelections > 0) {
+    lines.push(formatRouteMode('active', report.routeSelection.active));
+  }
+  if (report.routeSelection.shadow.classifiedSelections > 0) {
+    lines.push(formatRouteMode('shadow', report.routeSelection.shadow));
+  }
+  lines.push(
+    `upstream=unavailable reason=${report.upstream.reason}`,
+    `proportions=unavailable reason=${report.proportions.reason}`
+  );
+  return `${lines.join('\n')}\n`;
 }
 
 function printEvent(event: JobEvent, json: boolean, events: boolean): void {
@@ -358,6 +414,14 @@ async function main(argv: string[]): Promise<void> {
     const jobs = await runtime.list();
     if (json) process.stdout.write(`${JSON.stringify(jobs, null, 2)}\n`);
     else for (const job of jobs) process.stdout.write(`${job.id}\t${job.status}\t${job.route.name}\t${job.createdAt}\n`);
+    return;
+  }
+
+  if (command === 'usage') {
+    const json = takeFlag(args, '--json');
+    if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
+    const report = await runtime.usage();
+    process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : formatUsageReport(report));
     return;
   }
 

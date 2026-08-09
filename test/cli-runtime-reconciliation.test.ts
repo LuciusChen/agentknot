@@ -278,6 +278,7 @@ test('read-oriented and invalid CLI commands do not reconcile persisted records'
       { args: ['doctor', '--live'], expectedCode: 0 },
       { args: ['routes', '--json'], expectedCode: 0 },
       { args: ['jobs', '--json'], expectedCode: 0 },
+      { args: ['usage', '--json'], expectedCode: 0 },
       { args: ['show', ids.jobId], expectedCode: 0 },
       { args: ['artifacts', ids.jobId, '--json'], expectedCode: 0 },
       { args: ['artifact-verify', ids.jobId, '--json'], expectedCode: 0 },
@@ -306,6 +307,17 @@ test('read-oriented and invalid CLI commands do not reconcile persisted records'
       assert.deepEqual(await readdir(fixture.jobsDirectory), jobsBefore);
       assert.deepEqual(await readdir(fixture.orchestrationDirectory), orchestrationsBefore);
     }
+
+    const usage = await runCli(fixture.configPath, 'usage');
+    assert.equal(usage.code, 0, usage.stderr);
+    assert.match(usage.stdout, /downstream status=unavailable reason=no-successful-jobs/);
+    assert.match(usage.stdout, /upstream=unavailable reason=controller-usage-not-persisted/);
+    assert.match(usage.stdout, /proportions=unavailable reason=controller-usage-not-persisted/);
+    assert.deepEqual(await readSnapshot(fixture.jobsDirectory, ids.jobId), jobSnapshot);
+    assert.deepEqual(
+      await readSnapshot(fixture.orchestrationDirectory, ids.orchestrationId),
+      orchestrationSnapshot
+    );
 
     const liveDiagnostic = await runCli(fixture.configPath, 'doctor', '--live');
     const diagnostic = JSON.parse(liveDiagnostic.stdout) as {
