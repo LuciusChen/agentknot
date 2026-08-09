@@ -307,7 +307,8 @@ for (const integration of integrations) {
     };
     const context = output.hookSpecificOutput.additionalContext;
     assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-    assert.equal(context.startsWith('AgentKnot automatic entry was unavailable before dispatch:'), true);
+    assert.equal(context.startsWith('AgentKnot automatic entry failed to return a usable handoff:'), true);
+    assert.equal(context.includes('before dispatch'), false);
     assert.match(context, /Continue upstream without silently substituting another worker, provider, or model\./);
     assert.ok(context.length <= 60_000);
     for (const forbidden of [

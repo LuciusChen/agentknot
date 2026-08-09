@@ -58,7 +58,7 @@ Skill descriptions and developer-context reminders influence a controller model 
 
 Every non-explicit prompt submitted inside an `auto` repository is sent to the configured Luna planner before the controller model, including vague continuation, informational, requirements, and product-decision prompts that the planner later retains upstream. This consumes downstream quota, adds planner latency, and expands the prompt-data boundary. Users must select `off` or `suggest` when that tradeoff is unacceptable.
 
-Evidence now covers the initial read-only direct comparison and one non-empty controller-first/manual-delegation comparison. In the second run, pre-model dispatch returned a verified patch before Codex applied and validated it, but the baseline was not pure direct. A later no-baseline Codex run proved automatic two-child dispatch, disjoint verified artifacts, and upstream integration; it does not establish a multi-child savings ratio. Real Claude parity, failure/timeout behavior through a real controller, broader task distributions, and repeated savings remain Stage 2 promotion gates ([incident 0031](./0031-bounded-pi-output-drain.md), [experiment 0032](./0032-pre-model-multi-child-evidence.md)).
+Evidence now covers the initial read-only direct comparison and one non-empty controller-first/manual-delegation comparison. In the second run, pre-model dispatch returned a verified patch before Codex applied and validated it, but the baseline was not pure direct. A later no-baseline Codex run proved automatic two-child dispatch, disjoint verified artifacts, and upstream integration; it does not establish a multi-child savings ratio. Real Codex deterministic fixtures now cover planner failure, route timeout, and exact cleanup through the installed hook; the timeout also required a phase-neutral failure message ([incident 0033](./0033-controller-timeout-phase-claim.md)). Real Claude parity, broader task distributions, and repeated savings remain Stage 2 promotion gates ([incident 0031](./0031-bounded-pi-output-drain.md), [experiment 0032](./0032-pre-model-multi-child-evidence.md)).
 
 ## Corrective actions and gates
 
@@ -72,9 +72,9 @@ Evidence now covers the initial read-only direct comparison and one non-empty co
 - [x] Prove automatic pre-model dispatch of two non-overlapping children and controller-owned artifact integration ([experiment 0032](./0032-pre-model-multi-child-evidence.md)).
 - [ ] Prove the same terminal/artifact contract through a real Claude controller invocation.
 - [ ] Compare the same multi-child task against an approved direct/controller-first baseline before making a savings claim.
-- [ ] Exercise real-controller planner failure, route timeout, and cleanup behavior.
+- [x] Exercise real Codex controller planner failure, deterministic Pi route timeout, and exact process/worktree cleanup behavior ([incident 0033](./0033-controller-timeout-phase-claim.md)).
 
-The deterministic malformed-handoff fixture closes only the thin-adapter catch boundary. Its fake CLI records exactly `delegation` followed by inherited `orchestrate`; it does not start a real planner or worker and therefore cannot close the final real-controller failure, timeout, or cleanup gate.
+The deterministic malformed-handoff fixture closes only the thin-adapter catch boundary. Real Codex plus the installed hook and actual AgentKnot CLI/runtime close the planner-failure and deterministic Pi timeout/cleanup gate; they do not substitute for real Claude or provider-timeout evidence.
 
 ## Privacy and security review
 

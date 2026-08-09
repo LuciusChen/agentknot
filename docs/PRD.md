@@ -92,7 +92,7 @@ Version 0.0.1 currently implements:
 
 - controller-neutral CLI, HTTP, and TypeScript entry points;
 - a compact CLI orchestration handoff projection for controller consumption that omits duplicated prompts, policy snapshots, and event history without changing the persisted full record or artifact-review authority;
-- experimental thin Codex and Claude plugin packages whose explicit Skill or pre-model hook submits through the existing orchestration CLI and returns terminal/artifact evidence without moving classification, route policy, or promotion into the controller adapter; the separately installed `agentknot` executable is a checked prerequisite, and pre-model entry is restricted to repositories whose resolved delegation mode is `auto`;
+- experimental thin Codex and Claude plugin packages whose explicit Skill or pre-model hook submits through the existing orchestration CLI and returns terminal/artifact evidence without moving classification, route policy, or promotion into the controller adapter; the separately installed `agentknot` executable is a checked prerequisite, pre-model entry is restricted to repositories whose resolved delegation mode is `auto`, and a failed CLI/handoff returns bounded phase-neutral context without silent worker/provider/model substitution;
 - immutable resolved route snapshots with worker, provider, and model dimensions;
 - deterministic mock and Pi RPC worker adapters;
 - a reusable route-neutral adapter unit contract for healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and already-aborted runs; Mock supplies deterministic coverage but is not the second real adapter required for Stage 2;

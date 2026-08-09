@@ -152,6 +152,6 @@ try {
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   context(
-    `AgentKnot automatic entry was unavailable before dispatch: ${truncate(message, 1_000)}. Continue upstream without silently substituting another worker, provider, or model.`
+    `AgentKnot automatic entry failed to return a usable handoff: ${truncate(message, 1_000)}. Continue upstream without silently substituting another worker, provider, or model.`
   );
 }
