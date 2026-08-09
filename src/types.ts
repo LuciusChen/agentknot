@@ -81,6 +81,8 @@ export interface JobArtifact {
   size: number;
   sha256: string;
   baseCommit: string;
+  /** Git-derived repository-relative paths; absent only on legacy persisted artifacts. */
+  changedFiles?: string[];
 }
 
 export const JOB_ARTIFACT_VERIFICATION_ISSUES = [

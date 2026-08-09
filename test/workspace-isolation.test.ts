@@ -71,11 +71,12 @@ async function managedEntries(directory: string): Promise<string[]> {
   return readdir(directory);
 }
 
-test('worktree jobs leave the source unchanged and capture binary/untracked patches', async () => {
+test('worktree jobs leave the source unchanged and capture tracked/untracked/binary patches', async () => {
   const paths = await repository();
   const adapter = new (class extends TestAdapter {
     async run(input: WorkerRunInput): Promise<WorkerRunResult> {
       assert.notEqual(input.workspace, paths.root);
+      await writeFile(path.join(input.workspace, 'nested.txt'), 'changed\n');
       await writeFile(path.join(input.workspace, 'worker-created.txt'), 'created\n');
       await writeFile(path.join(input.workspace, 'worker.bin'), Buffer.from([0, 1, 2, 255]));
       return { output: 'ok' };
@@ -92,12 +93,39 @@ test('worktree jobs leave the source unchanged and capture binary/untracked patc
   assert.equal(await status(paths.root), '');
   await assert.rejects(readFile(path.join(paths.root, 'nested', 'worker-created.txt')));
   assert.equal(job.artifacts?.length, 1);
+  assert.deepEqual(job.artifacts?.[0]?.changedFiles, [
+    'nested/nested.txt',
+    'nested/worker-created.txt',
+    'nested/worker.bin',
+  ]);
   const artifactPath = job.artifacts?.[0]?.path ?? '';
   const patch = await readFile(artifactPath);
   assert.match(patch.toString('utf8'), /worker-created\.txt/);
   assert.match(patch.toString('utf8'), /GIT binary patch/);
   await git(paths.root, 'apply', '--check', artifactPath);
   assert.equal(job.events.filter((event) => event.type === 'job.artifact').length, 1);
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+});
+
+test('changed-file evidence preserves newline-containing repository-relative names', async () => {
+  const paths = await repository();
+  const filename = 'worker-line\nbreak.txt';
+  const adapter = new (class extends TestAdapter {
+    async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+      await writeFile(path.join(input.workspace, filename), 'newline filename\n');
+      return { output: 'ok' };
+    }
+  })();
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory),
+    store: new MemoryJobStore(),
+    adapters: new Map([['test', adapter]]),
+  });
+
+  const job = await orchestrator.run({ prompt: 'unusual filename', workspace: paths.root });
+  assert.equal(job.status, 'succeeded');
+  assert.deepEqual(job.artifacts?.[0]?.changedFiles, [filename]);
+  assert.equal(await status(paths.root), '');
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
 });
 
@@ -118,6 +146,7 @@ test('artifact inspection reports integrity and base evidence without mutating t
   const job = await orchestrator.run({ prompt: 'inspect', workspace: paths.root });
   const artifact = job.artifacts?.[0];
   assert.ok(artifact);
+  assert.deepEqual(artifact.changedFiles, ['inspect-me.txt']);
   const originalPatch = await readFile(artifact.path);
   const sourceHead = (await git(paths.root, 'rev-parse', 'HEAD')).trim();
   const sourceStatus = await status(paths.root);
@@ -188,6 +217,7 @@ test('artifact inspection reports missing managed files without exposing preview
   const job = await orchestrator.run({ prompt: 'missing artifact', workspace: paths.root });
   const artifact = job.artifacts?.[0];
   assert.ok(artifact);
+  assert.deepEqual(artifact.changedFiles, []);
   await rm(artifact.path);
 
   const verification = await orchestrator.verifyArtifacts(job.id);
@@ -223,6 +253,7 @@ test('patches include tracked files committed after the job base commit', async 
   const job = await orchestrator.run({ prompt: 'commit', workspace: paths.root });
   assert.equal(job.status, 'succeeded');
   assert.equal(await status(paths.root), '');
+  assert.deepEqual(job.artifacts?.[0]?.changedFiles, ['worker-committed.txt']);
   const patch = await readFile(job.artifacts?.[0]?.path ?? '');
   assert.match(patch.toString(), /worker-committed\.txt/);
   assert.match(patch.toString(), /committed/);
@@ -278,6 +309,8 @@ test('each retry starts from the same clean base commit', async () => {
   assert.equal(job.status, 'succeeded');
   assert.notEqual(seen[0], seen[1]);
   assert.equal(job.artifacts?.length, 2);
+  assert.deepEqual(job.artifacts?.[0]?.changedFiles, ['attempt-1.txt']);
+  assert.deepEqual(job.artifacts?.[1]?.changedFiles, ['attempt-2.txt']);
   const firstPatch = await readFile(job.artifacts?.[0]?.path ?? '');
   const secondPatch = await readFile(job.artifacts?.[1]?.path ?? '');
   assert.match(firstPatch.toString(), /attempt-1\.txt/);

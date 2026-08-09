@@ -44,6 +44,19 @@ function outputText(value: Buffer | string): string {
   return Buffer.isBuffer(value) ? value.toString('utf8') : value;
 }
 
+function nulDelimitedPaths(value: Buffer | string): string[] {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  const paths: string[] = [];
+  let start = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] !== 0) continue;
+    paths.push(bytes.subarray(start, index).toString('utf8'));
+    start = index + 1;
+  }
+  if (start !== bytes.length) throw new Error('Git changed-file output was not NUL terminated');
+  return paths;
+}
+
 async function git(args: string[], cwd: string, binary = false): Promise<GitOutput> {
   try {
     return (await execFileAsync('git', args, {
@@ -275,6 +288,17 @@ export class WorkspaceIsolationManager {
     await git(['add', '--intent-to-add', '--', '.'], isolated.managedPath);
     // Compare with the job's source snapshot, not the worker's current HEAD. A worker
     // may commit or otherwise move HEAD, but the artifact must include all job changes.
+    // Run Git from the worktree root so these are repository-relative paths. `-z` keeps
+    // newlines and other unusual filename characters out of any line-oriented representation.
+    const changedFiles = nulDelimitedPaths(
+      (
+        await git(
+          ['diff', '--name-only', '-z', '--no-ext-diff', isolated.baseCommit, '--'],
+          isolated.managedPath,
+          true
+        )
+      ).stdout
+    );
     const patch = (await git(
       ['diff', '--binary', '--no-ext-diff', isolated.baseCommit, '--'],
       isolated.managedPath,
@@ -292,6 +316,7 @@ export class WorkspaceIsolationManager {
       size: bytes.byteLength,
       sha256: createHash('sha256').update(bytes).digest('hex'),
       baseCommit: isolated.baseCommit,
+      changedFiles,
     };
   }
 

@@ -88,7 +88,11 @@ The canonical TypeScript definitions are in `src/types.ts` and `src/orchestratio
 
 `source` must never alter route selection or execution logic.
 
-The HTTP boundary currently validates `metadata` only as a non-null object. Stricter JSON-value validation is required before AgentKnot can claim identical metadata fidelity across every entry point.
+### `JobArtifact`
+
+A `git-patch` artifact is controller-captured Git evidence from one isolated attempt. In addition to its attempt, managed path, size, SHA-256, and recorded base commit, it may expose `changedFiles`, a string array of repository-relative paths derived from Git. Newly captured git-worktree artifacts always include this field, including `[]` when the captured patch is empty. The paths describe repository changes relative to the recorded base; they are not worker claims, semantic verification, or a completion summary, and AgentKnot does not parse worker prose or tool events to populate them. Older persisted artifacts may omit `changedFiles` and remain valid.
+
+Leaf Job and Orchestration admission validate `metadata` recursively as a JSON-compatible object at both TypeScript and HTTP boundaries before persistence. Unsupported values fail before a Job or Orchestration record is admitted, so file and HTTP transports preserve one metadata contract.
 
 ### `ResolvedRoute`
 
@@ -152,8 +156,8 @@ A diagnostic probe does not create a `JobRecord`, lifecycle event, or artifact, 
 3. records the base commit before execution;
 4. creates a detached managed worktree for each attempt at that same base;
 5. gives the worker the corresponding subdirectory in the managed worktree;
-6. captures tracked, non-ignored untracked, binary, and worker-committed changes as a binary Git patch;
-7. records artifact path, attempt, size, SHA-256, and base commit;
+6. stages intent-to-add entries and derives repository-relative changed paths with a NUL-delimited Git diff, then captures tracked, non-ignored untracked, binary, and worker-committed changes as a binary Git patch;
+7. records artifact path, attempt, size, SHA-256, base commit, and the Git-derived `changedFiles` array; an empty patch records `[]`;
 8. removes only the exact worktree owned by that attempt.
 
 Ignored dependencies and build output are not present in a detached worktree. The worker must provision any required ignored state. Worktree mode protects Git repository state; it does not isolate host files, processes, credentials, or networks.
@@ -371,7 +375,7 @@ A future worker capability contract may need to distinguish:
 - cooperative cancellation versus process-supervised termination;
 - session resume;
 - active follow-up input;
-- file-change evidence;
+- worker-reported file-change evidence distinct from controller-captured Git paths;
 - terminal visualization;
 - approval requests;
 - usage and model-resolution evidence.
@@ -384,7 +388,7 @@ Runtime selection and provider fallback must be completed before a job starts. A
 
 - Public runtime input must be validated at its transport boundary.
 - Existing job snapshots must retain their resolved route and event meaning.
-- New optional fields may be added compatibly; changing state or event semantics requires a versioned contract and migration decision.
+- New optional fields may be added compatibly; changing state or event semantics requires a versioned contract and migration decision. `JobArtifact.changedFiles` is optional when reading persisted records, while newly captured git-worktree artifacts always emit an array.
 - One wire payload should have one canonical type/schema. HTTP, CLI, callbacks, and TypeScript APIs must not describe the same payload independently without a mechanical compatibility check.
 - Worker-specific fields belong in adapter-owned metadata or raw evidence, not in the controller-neutral top-level contract.
 - Removal or renaming of public states, event types, artifact fields, or endpoint semantics requires an explicit migration plan.
@@ -403,7 +407,7 @@ At minimum, the conformance suite must eventually prove:
 - callback failure isolation;
 - adapter decoding of split UTF-8, split JSONL frames, malformed frames, premature exit, and terminal settlement;
 - clean source repositories and independent retry worktrees;
-- patches for tracked, non-ignored untracked, binary, and worker-committed changes;
+- patches and Git-derived repository-relative `changedFiles` for tracked, non-ignored untracked, binary, worker-committed, empty, retry, and unusual-filename changes;
 - artifact checksum and base-application validity;
 - exact cleanup on success, failure, retry, timeout, and cancellation;
 - documented crash/restart behavior;

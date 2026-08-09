@@ -53,6 +53,16 @@ function legacyJob(id: string): Record<string, unknown> {
     completedAt: timestamp,
     attempt: 1,
     events: [],
+    artifacts: [
+      {
+        kind: 'git-patch',
+        attempt: 1,
+        path: '/tmp/legacy-artifact.patch',
+        size: 0,
+        sha256: 'legacy-sha256',
+        baseCommit: 'legacy-base',
+      },
+    ],
     result: {
       output: 'legacy output',
       attempt: 1,
@@ -156,9 +166,34 @@ test('FileJobStore materializes a legacy v1 record without rewriting read-only a
   const before = await writeSnapshot(directory, id, legacyJob(id));
   const store = new FileJobStore(directory);
 
-  assert.equal((await store.get(id))?.schemaVersion, 1);
+  const materialized = await store.get(id);
+  assert.equal(materialized?.schemaVersion, 1);
+  assert.equal(materialized?.artifacts?.[0]?.changedFiles, undefined);
   assert.deepEqual(await readFile(path.join(directory, `${id}.json`)), before);
   assert.equal((await store.list())[0]?.schemaVersion, 1);
+  assert.deepEqual(await readFile(path.join(directory, `${id}.json`)), before);
+});
+
+test('FileJobStore preserves changedFiles when a persisted artifact includes it', async () => {
+  const directory = await createTemporaryDirectory('agentknot-record-versioning-changed-files-');
+  const id = 'job_changed_files';
+  const before = await writeSnapshot(directory, id, {
+    ...legacyJob(id),
+    artifacts: [
+      {
+        kind: 'git-patch',
+        attempt: 1,
+        path: '/tmp/changed-files.patch',
+        size: 0,
+        sha256: 'changed-files-sha256',
+        baseCommit: 'changed-files-base',
+        changedFiles: ['nested/changed.ts'],
+      },
+    ],
+  });
+  const store = new FileJobStore(directory);
+
+  assert.deepEqual((await store.get(id))?.artifacts?.[0]?.changedFiles, ['nested/changed.ts']);
   assert.deepEqual(await readFile(path.join(directory, `${id}.json`)), before);
 });
 

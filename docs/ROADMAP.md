@@ -63,7 +63,7 @@ Make leaf-job semantics and the bounded delegation slice reliable enough that a 
 - Keep PRD, SPEC, ROADMAP, README, and postmortems linked and current.
 - [x] Add a capability/status table that distinguishes current, experimental, proposed, and deferred behavior.
 - [x] Version persisted leaf Job and Orchestration records before incompatible schema evolution begins; new records use `schemaVersion: 1`, legacy file reads materialize missing versions without rewriting, and explicit unsupported versions fail.
-- Validate controller metadata as JSON values so CLI/HTTP/TypeScript and file storage preserve one contract.
+- [x] Validate controller metadata recursively as JSON-compatible values so TypeScript/HTTP admission and file storage preserve one contract.
 - Define a structured completion summary: changed files, checks run, remaining risks, and worker-reported notes, without treating worker assertions as verified facts.
 
 ### Lifecycle and persistence work
@@ -140,7 +140,8 @@ Stage 1 keeps route diagnostics fast by default while adding one explicit live-i
 Delivered in this slice:
 
 - TypeScript, CLI, and HTTP contracts for artifact listing, size/SHA-256 verification, current-source base-commit verification, and integrity-gated bounded patch preview.
-- Deterministic tests for valid, missing, tampered, and base-mismatched evidence that prove inspection does not mutate the source repository.
+- Git-derived repository-relative `changedFiles` arrays on newly captured worktree artifacts, including `[]` for empty patches, with intent-to-add and NUL-delimited path handling for tracked, untracked, binary, committed, retry, and unusual-filename changes.
+- Deterministic tests for valid, missing, tampered, and base-mismatched evidence that prove inspection does not mutate the source repository; changed-file evidence remains controller-captured artifact data rather than the full structured completion summary.
 
 Still outside this slice:
 

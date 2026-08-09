@@ -12,6 +12,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Top-level `schemaVersion: 1` on new leaf Job and Orchestration records, with read-only legacy-v1 file materialization, byte-stable snapshots, and clear rejection of unsupported explicit versions; no migration command or automatic rewrite is added.
 - `off`, `suggest`, and `auto` delegation configuration with per-request `inherit`, `never`, `suggest`, and `force` controls.
 - Git worktree patch artifacts that include tracked, non-ignored untracked, binary, and worker-committed changes.
+- Controller-captured Git-derived repository-relative `changedFiles` evidence on newly captured worktree artifacts, including `[]` for an empty patch, with legacy artifacts remaining readable without the field.
 - Read-only artifact listing, SHA-256/size/base-commit verification, and bounded integrity-gated patch preview through TypeScript, CLI, and HTTP.
 - Opt-in `doctor --live --route NAME` diagnostics that perform one bounded real inference through the exact resolved route, without Job or artifact persistence; the repository promotion check covers Pi/OpenCode Go/Luna at `thinkingLevel: "max"`.
 - Canonical `GET /health/live` process liveness with an explicit not-checked storage/route/inference payload; `GET /health` remains an identical compatibility alias and HTTP readiness remains intentionally absent.
