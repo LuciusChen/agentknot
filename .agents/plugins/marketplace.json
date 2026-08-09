@@ -1,0 +1,20 @@
+{
+  "name": "agentknot",
+  "interface": {
+    "displayName": "AgentKnot"
+  },
+  "plugins": [
+    {
+      "name": "agentknot",
+      "source": {
+        "source": "local",
+        "path": "./integrations/codex/agentknot"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

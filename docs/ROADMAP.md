@@ -219,6 +219,13 @@ Prove that controllers and worker runtimes can change independently without core
 - Keep provider/model selection as route data unless a second implementation proves that a standalone provider abstraction is required.
 - Define exact versus inferred observability if multiple runtimes offer different event fidelity.
 
+### Controller integration slice delivered
+
+- Added separate Codex and Claude plugin packages with repository marketplace manifests, one bounded delegation Skill each, source-specific audit identity, and the same existing CLI/terminal/artifact workflow. Explicit invocation is `$agentknot-delegate` for Codex and `/agentknot:agentknot-delegate` for Claude; host description matching supplies the bounded intent-triggered path.
+- Added deterministic parity coverage, native manifest/Skill validation, and isolated marketplace install smoke tests for both installed packages. No controller model was invoked for the install smoke, so actual explicit and implicit controller-to-AgentKnot end-to-end runs remain open exit evidence.
+- Added no core branch, hook, MCP server, wrapper, daemon, or duplicate request builder. The pre-slice repository had no prior controller plugin/example implementation to retain or delete; the oversized first artifact test was reduced before integration so the stable contract is covered without coupling tests to every sentence.
+- Recorded the thin-adapter decision and Relay reference boundary in [decision 0027](../postmortems/0027-controller-native-integration-boundary.md).
+
 ### Exit gates
 
 - Installed Codex and Claude integrations each pass the same end-to-end request, terminal-record, and artifact-evidence contract without controller-name branches in core.

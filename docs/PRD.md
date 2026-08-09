@@ -91,6 +91,7 @@ Automatic delegation must be explicit at the API boundary, depth-limited, concur
 Version 0.0.1 currently implements:
 
 - controller-neutral CLI, HTTP, and TypeScript entry points;
+- experimental thin Codex and Claude plugin packages whose explicit or bounded intent-triggered skills submit through the existing orchestration CLI and return terminal/artifact evidence without moving policy or promotion into the controller adapter;
 - immutable resolved route snapshots with worker, provider, and model dimensions;
 - deterministic mock and Pi RPC worker adapters;
 - OpenCode Go/Luna and xAI/Grok routes through Pi configuration;
@@ -148,7 +149,7 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 ## Reference workflow
 
 1. The controller and user agree on a bounded task and acceptance criteria.
-2. The controller chooses the leaf Job API for an already bounded task or the orchestration API for policy-driven delegation. AgentKnot does not intercept arbitrary controller conversations.
+2. The controller chooses the leaf Job API for an already bounded task or the orchestration API for policy-driven delegation. A thin installed controller plugin may make that call after explicit invocation or bounded Skill matching, but AgentKnot does not intercept arbitrary controller conversations and a native `/goal` is not a separate AgentKnot protocol.
 3. For orchestration, AgentKnot snapshots the effective policy, asks the configured planner route for a strict read-only assessment, validates it, deterministically filters and caps it, optionally evaluates configured shadow or active rules using subtask kind and parent assessment complexity, and persists the plan before any child dispatch; the planner cannot name routes.
 4. An upstream or suggested decision returns without starting child jobs. An automatic decision submits each selected subtask through the ordinary Job API with depth-one provenance and bounded concurrency. Shadow keeps `dispatch.defaultRoute`; active uses the matched configured route or the conservative default, and both carry selection evidence, task kind, and parent complexity in structured child metadata.
 5. For a leaf job, the controller submits a `JobRequest` with a workspace, route, source identity, and optional callback.

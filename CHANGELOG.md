@@ -6,6 +6,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 
 ### Added
 
+- Experimental installable Codex and Claude controller plugins with explicit and bounded intent-triggered delegation skills. Both repository marketplaces pass isolated native installation smoke tests and converge on the existing orchestration/terminal/artifact contract without core controller branches; real controller-model invocation remains a Stage 2 promotion gate ([decision 0027](postmortems/0027-controller-native-integration-boundary.md)).
 - Controller-neutral automatic delegation through CLI, HTTP, and TypeScript orchestration APIs.
 - Strict planner assessments, deterministic task-kind policy, persisted plans, parent/child provenance, and bounded depth-one concurrent dispatch.
 - Separate file and memory orchestration stores with ordered lifecycle events, cancellation propagation, and fail-without-resume startup reconciliation.

@@ -43,6 +43,7 @@ The controller, worker, provider, and model are separate concepts:
 
 | Concern | Owner | Must not leak into |
 | --- | --- | --- |
+| Native command/Skill presentation and controller-specific audit `source` | controller integration adapter | orchestration policy, routes, worker adapters, or artifact promotion |
 | Prompt, workspace, caller identity | `JobRequest` | worker-specific request types |
 | Delegation mode, task-kind policy, child/depth/concurrency caps, and optional human-authored route-selection policy | orchestration service/configuration | controller-vendor branches or worker adapters |
 | Planner assessment parsing and deterministic plan composition | orchestration service | planner-model discretion at dispatch time |
@@ -65,6 +66,14 @@ Moving a responsibility across this table requires a SPEC update and a decision 
 ## Current public contracts
 
 The canonical TypeScript definitions are in `src/types.ts` and `src/orchestration-types.ts`. Other transports and documentation must derive from or remain mechanically checked against those contracts; one runtime payload must not acquire multiple hand-maintained definitions.
+
+### Experimental controller integrations
+
+The repository contains separate installable Codex and Claude plugin packages plus their native marketplace manifests. Each exposes one `agentknot-delegate` Skill. Codex uses explicit `$agentknot-delegate`; Claude uses its required plugin namespace `/agentknot:agentknot-delegate`. Both may also be selected by their host's normal description-based Skill matching for bounded independent implementation, test, analysis, repair, or documentation work.
+
+The Skill is an adapter over the existing CLI, not another public payload: it resolves the workspace Git root, calls `agentknot orchestrate` with `source: "codex"` or `source: "claude"`, consumes the terminal Orchestration record, and uses the existing artifact list/verify/preview commands. Informational chat, requirements/product decisions, artifact acceptance/promotion, commit, push, merge, and deployment remain upstream. The packages add no hook, MCP server, daemon, controller branch in `src`, or special `/goal` API.
+
+Manifest/Skill validation, deterministic semantic-parity coverage, and isolated native marketplace installation are current evidence. Explicit and implicit invocation through actual controller models and the same real AgentKnot terminal/artifact path remain Stage 2 promotion evidence, so the integrations are experimental rather than a completed controller-portability claim ([decision 0027](../postmortems/0027-controller-native-integration-boundary.md)).
 
 ### `OrchestrationRequest`
 

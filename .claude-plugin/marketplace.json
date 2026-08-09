@@ -1,0 +1,15 @@
+{
+  "name": "agentknot",
+  "description": "Install the AgentKnot controller integration for Claude Code.",
+  "owner": {
+    "name": "AgentKnot"
+  },
+  "plugins": [
+    {
+      "name": "agentknot",
+      "source": "./integrations/claude/agentknot",
+      "description": "Delegate bounded coding work through AgentKnot while keeping decisions and artifact promotion upstream.",
+      "version": "0.1.0"
+    }
+  ]
+}

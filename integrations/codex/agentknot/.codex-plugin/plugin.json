@@ -1,0 +1,28 @@
+{
+  "name": "agentknot",
+  "version": "0.1.0",
+  "description": "Delegate bounded independent coding work through AgentKnot while keeping decisions and artifact promotion upstream.",
+  "author": {
+    "name": "AgentKnot"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "orchestration",
+    "delegation",
+    "coding-agents"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AgentKnot",
+    "shortDescription": "Delegate bounded coding work",
+    "longDescription": "Use the AgentKnot orchestration CLI for eligible independent implementation, test, analysis, repair, and documentation work while retaining product decisions and artifact promotion upstream.",
+    "developerName": "AgentKnot",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Delegate a bounded independent coding task through AgentKnot"
+    ]
+  }
+}

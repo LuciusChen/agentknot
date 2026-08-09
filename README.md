@@ -22,6 +22,7 @@ The labels below are availability claims, not maturity ratings. **Current** mean
 | Status | Capability | Evidence or gate |
 | --- | --- | --- |
 | **Current** | Controller-neutral leaf jobs and bounded depth-one orchestration through CLI, HTTP, and TypeScript, with `off`, `suggest`, and `auto` delegation modes. | Implemented and covered by deterministic API, policy, lifecycle, and persistence tests; callers must invoke the Job or orchestration API rather than relying on native-chat interception. |
+| **Experimental** | Thin installable Codex and Claude controller plugins with explicit and bounded intent-triggered delegation skills. | Both repository marketplaces install successfully in isolated controller homes, their manifests and skills pass native validators, and one parity test checks the shared CLI/evidence boundary. Real controller-model explicit/implicit invocation is not yet promoted as end-to-end evidence; no hook intercepts every prompt ([decision 0027](postmortems/0027-controller-native-integration-boundary.md)). |
 | **Current** | Independent worker/provider/model routing with the mock and Pi RPC adapters. | Implemented and covered by routing and adapter tests; the formal planner and conservative default worker remain Pi/OpenCode Go/Luna/max, with the configured low-complexity dogfood rule selecting DeepSeek Flash/max. |
 | **Current** | Optional human-authored route-selection rules for eligible orchestration children. | `delegation.dispatch.routeSelection` is disabled by omission and accepts `shadow` or `active`; both modes use 1–20 ordered, validated rules and persist first-match/default evidence, while only `active` changes the planned and actual child route. The repository maps parent complexity `low` to DeepSeek Flash/max and conservatively leaves `medium`, `high`, and no-match work on Luna/max. There is no learned ranking or fallback; see [decisions 0016](postmortems/0016-shadow-route-selection.md) and [0020](postmortems/0020-human-authored-active-route-selection.md). |
 | **Current** | Ordered job/orchestration snapshots and normalized events with retries, timeouts, cancellation, one-shot callbacks, and bounded exact-child Pi supervision. | Implemented and covered by deterministic lifecycle, persistence, callback, and Pi conformance tests; catchable CLI/server shutdown cancels and awaits admitted work, late attempt events are ignored, and the bounded Stage 1 soak verifies exact process-group cleanup. File-backed execution owners hold advisory locks on both storage directories so a second conforming writer is refused before reconciliation or admission. |
@@ -38,7 +39,7 @@ The labels below are availability claims, not maturity ratings. **Current** mean
 | **Deferred** | Automatic patch application, commit, merge, push, deployment, or pull-request creation. | Not available by design; artifact inspection ends with an upstream controller or human decision. |
 | **Deferred** | Remote/team/fleet operation, collaboration surfaces, recursive or dependency-graph swarms, and silent provider/model fallback or optimization. | Not available; these remain conditional or deferred until an explicit PRD/SPEC change and evidence-gated roadmap stage. |
 
-Controllers still choose whether a request enters the leaf Job API or the orchestration API. AgentKnot cannot intercept arbitrary native Codex or Claude chats; a thin controller integration must call `agentknot orchestrate`, `POST /v1/orchestrations`, or `runtime.orchestrate()`.
+Controllers still choose whether a request enters the leaf Job API or the orchestration API. The experimental Codex and Claude plugins let an explicit skill invocation or a bounded task-intent match call `agentknot orchestrate`; they do not intercept arbitrary conversation. Other integrations can call the same CLI, `POST /v1/orchestrations`, or `runtime.orchestrate()` boundary.
 
 ## Product and architecture contracts
 
@@ -93,6 +94,28 @@ The repository configuration dogfoods `mode: "auto"` with Luna/max as planner an
 The successful self-orchestration was evidence for one normal planner-to-plan-to-child run, not standalone evidence of planner fail-fast behavior. Planner failure, timeout, cancellation, and waiting for a shared dispatch slot have separate outcomes and must be established by their deterministic tests; with the default `upstream` fallback, malformed or failed planner output is recorded in a persisted upstream plan, while `fail` terminates the parent before dispatch.
 
 Per request, `--delegation never`, `--delegation suggest`, and `--delegation force` can narrow or request behavior. `force` does not bypass global `off`, the child limit, depth limit, or `keepUpstream` policy. Set global mode to `off` when a caller only wants the leaf Job API. `suggest` and `auto` require Git worktree isolation.
+
+### Codex and Claude controller integrations
+
+Stage 2 includes experimental installable plugins under `integrations/`. They are thin controller adapters: both submit the same orchestration request, consume the same terminal record, inspect the same artifact evidence, and leave routing, product decisions, artifact promotion, commit, push, merge, and deployment outside the plugin.
+
+Install the Codex plugin from a local checkout, then start a new Codex session:
+
+```bash
+codex plugin marketplace add /path/to/agentknot
+codex plugin add agentknot@agentknot
+```
+
+Invoke it explicitly with `$agentknot-delegate`, or make an eligible bounded implementation, test, analysis, repair, or documentation request and allow Codex's normal Skill matching to select it.
+
+Install the Claude Code plugin from the same checkout, then start a new Claude session:
+
+```bash
+claude plugin marketplace add /path/to/agentknot
+claude plugin install agentknot@agentknot
+```
+
+Invoke it explicitly as `/agentknot:agentknot-delegate`, or allow Claude's normal Skill matching to select it for the same bounded task categories. A controller's `/goal` may preserve an upstream goal, but `/goal` is not the AgentKnot protocol and does not itself bypass the plugin or orchestration API. The initial slice deliberately has no prompt hook, MCP server, wrapper daemon, or automatic interception of informational chat; see [decision 0027](postmortems/0027-controller-native-integration-boundary.md).
 
 ### Human-authored route selection
 
