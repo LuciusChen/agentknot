@@ -111,9 +111,9 @@ Delivered in this slice:
 Next evidence gate:
 
 - The first isolated candidate, `pi-readseek@0.9.10`, passed source review, live loading, artifact verification, and target tests but was rejected after one same-task Luna/max pair materially regressed token use, elapsed time, tool calls, and persisted record size; see [experiment 0013](../postmortems/0013-pi-readseek-profile-ab.md).
-- The narrower `pi-lean-ctx@3.9.18` profile passed source and supply-chain review plus one same-task Luna/max pair, reducing total Pi tokens by 39.0% and elapsed time by 30.5% while producing the selected passing versioning artifact; it remains experimental because tool calls and final context grew and the benefit has not been replicated; see [experiment 0014](../postmortems/0014-pi-lean-ctx-profile-ab.md).
-- Repeat the isolated lean profile against the minimal profile on an independent real AgentKnot workload, without installing it globally or into the target repository.
-- Promote a separate dogfood worker/profile only if completion, artifact verification, and target tests do not regress and session statistics, elapsed work, or recorded upstream intervention show a repeatable net benefit; otherwise keep the minimal route and record the negative result.
+- The narrower `pi-lean-ctx@3.9.18` profile passed source and supply-chain review and produced selected passing artifacts in two same-task Luna/max pairs. Its 39.0% token reduction on a larger implementation reversed into 36.2% more tokens and 45.7% more elapsed time on an independent smaller test task, so it did not clear the repeatability gate; see [experiment 0014](../postmortems/0014-pi-lean-ctx-profile-ab.md).
+- [x] Apply the profile promotion gate: neither reviewed candidate is a general dogfood profile, the repository and global Pi state remain unpolluted, and the minimal route remains formal.
+- Reopen profile work only with a new bounded hypothesis and a reliable selection rule that can avoid workloads where the profile regresses; keep task-dependent automatic selection deferred until that rule has evidence.
 
 ### Runtime reconciliation correctness
 

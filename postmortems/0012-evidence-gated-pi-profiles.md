@@ -60,8 +60,8 @@ Positive consequences are measurable self-hosting improvements, reproducible wor
 - [x] Capture sanitized advisory Pi session statistics after successful normal jobs.
 - [x] Review and pin candidate extensions without persistent installation — `pi-readseek@0.9.10` and `pi-lean-ctx@3.9.18`; see experiments 0013 and 0014.
 - [x] Run one same-task Luna/max A/B pair for each candidate and record completion, artifact, tests, retries, elapsed time, session statistics, and upstream intervention.
-- [ ] Repeat the promising lean profile on an independent real workload before promotion.
-- [ ] Add a formal dogfood profile only if it clears the promotion gates; otherwise record the negative experiment and retain the minimal route.
+- [x] Repeat the promising lean profile on an independent real workload before promotion; the smaller task regressed token use, elapsed time, tool calls, raw events, and final context despite a smaller selected artifact.
+- [x] Apply the formal promotion gate: no candidate cleared repeatable net benefit, so retain the minimal route and record the result in experiment 0014.
 
 ## Deferred work
 

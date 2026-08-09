@@ -31,7 +31,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Configuration-only `doctor` output explicitly says that live inference was not checked; `doctor --live` uses a 30-second control-plane timeout, reports provider errors with a nonzero exit status, reports unsupported adapters honestly, never falls back to another route, and does not add a preflight to normal jobs.
 - README now includes a capability/status table that labels implemented and tested behavior as current, gates Pi profile experiments with repeated A/B evidence, and marks proposed and deferred features as unavailable.
 - The isolated `pi-readseek@0.9.10` profile remains unpromoted after its first same-task Luna/max trial materially increased token use, elapsed time, tool calls, and persisted record size despite producing a valid passing artifact ([experiment 0013](postmortems/0013-pi-readseek-profile-ab.md)).
-- One isolated `pi-lean-ctx@3.9.18` Luna/max A/B pair reduced total Pi tokens by 39.0% and elapsed time by 30.5% while producing the selected passing versioning artifact, but the profile remains unpromoted until an independent repeat confirms the benefit and addresses higher tool-call and final-context counts ([experiment 0014](postmortems/0014-pi-lean-ctx-profile-ab.md)).
+- Two isolated `pi-lean-ctx@3.9.18` Luna/max A/B pairs produced selected artifacts that passed upstream verification, but the profile remains unpromoted: a 39.0% token reduction on the larger task reversed into 36.2% more tokens and 45.7% more elapsed time on an independent smaller task ([experiment 0014](postmortems/0014-pi-lean-ctx-profile-ab.md)).
 
 ### Fixed
 

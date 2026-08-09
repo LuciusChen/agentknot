@@ -85,10 +85,28 @@ function legacyOrchestration(id: string): Record<string, unknown> {
   };
 }
 
-async function writeSnapshot(directory: string, id: string, record: Record<string, unknown>): Promise<Buffer> {
+async function writeSnapshot(directory: string, id: string, record: unknown): Promise<Buffer> {
   const bytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
   await writeFile(path.join(directory, `${id}.json`), bytes);
   return bytes;
+}
+
+async function assertFailedReadsPreserveSnapshot(
+  store: FileJobStore | FileOrchestrationStore,
+  directory: string,
+  id: string,
+  before: Buffer,
+  expectedMessage: string
+): Promise<void> {
+  const snapshotPath = path.join(directory, `${id}.json`);
+  for (const read of [() => store.get(id), () => store.list()]) {
+    await assert.rejects(read(), (error: unknown) => {
+      assert(error instanceof Error);
+      assert.equal(error.message, expectedMessage);
+      return true;
+    });
+    assert.deepEqual(await readFile(snapshotPath), before);
+  }
 }
 
 test('new Job and Orchestration records persist schemaVersion 1', async () => {
@@ -156,28 +174,98 @@ test('FileOrchestrationStore materializes a legacy v1 record without rewriting r
   assert.deepEqual(await readFile(path.join(directory, `${id}.json`)), before);
 });
 
+test('FileJobStore rejects a non-object snapshot without rewriting it', async () => {
+  const directory = await createTemporaryDirectory('agentknot-record-versioning-invalid-job-');
+  const id = 'job_invalid_snapshot';
+  const before = await writeSnapshot(directory, id, null);
+  const store = new FileJobStore(directory);
+
+  await assertFailedReadsPreserveSnapshot(
+    store,
+    directory,
+    id,
+    before,
+    'Invalid persisted Job record: expected an object'
+  );
+});
+
+test('FileOrchestrationStore rejects a non-object snapshot without rewriting it', async () => {
+  const directory = await createTemporaryDirectory('agentknot-record-versioning-invalid-orchestration-');
+  const id = 'orchestration_invalid_snapshot';
+  const before = await writeSnapshot(directory, id, null);
+  const store = new FileOrchestrationStore(directory);
+
+  await assertFailedReadsPreserveSnapshot(
+    store,
+    directory,
+    id,
+    before,
+    'Invalid persisted Orchestration record: expected an object'
+  );
+});
+
+test('FileJobStore rejects a structured schemaVersion without exposing nested content', async () => {
+  const directory = await createTemporaryDirectory('agentknot-record-versioning-structured-job-');
+  const id = 'job_structured_schema_version';
+  const before = await writeSnapshot(directory, id, {
+    ...legacyJob(id),
+    schemaVersion: { version: 2, details: { secret: 'job-secret-must-not-leak' } },
+  });
+  const store = new FileJobStore(directory);
+
+  await assertFailedReadsPreserveSnapshot(
+    store,
+    directory,
+    id,
+    before,
+    'Unsupported Job schemaVersion <object>; supported schemaVersion is 1'
+  );
+});
+
+test('FileOrchestrationStore rejects a structured schemaVersion without exposing nested content', async () => {
+  const directory = await createTemporaryDirectory('agentknot-record-versioning-structured-orchestration-');
+  const id = 'orchestration_structured_schema_version';
+  const before = await writeSnapshot(directory, id, {
+    ...legacyOrchestration(id),
+    schemaVersion: { version: 2, details: { secret: 'orchestration-secret-must-not-leak' } },
+  });
+  const store = new FileOrchestrationStore(directory);
+
+  await assertFailedReadsPreserveSnapshot(
+    store,
+    directory,
+    id,
+    before,
+    'Unsupported Orchestration schemaVersion <object>; supported schemaVersion is 1'
+  );
+});
+
 test('FileJobStore rejects an unsupported explicit schemaVersion', async () => {
   const directory = await createTemporaryDirectory('agentknot-record-versioning-unsupported-job-');
   const id = 'job_unsupported_v2';
-  await writeSnapshot(directory, id, { ...legacyJob(id), schemaVersion: 2 });
+  const before = await writeSnapshot(directory, id, { ...legacyJob(id), schemaVersion: 2 });
   const store = new FileJobStore(directory);
 
-  await assert.rejects(store.get(id), /Unsupported Job schemaVersion 2; supported schemaVersion is 1/);
-  await assert.rejects(store.list(), /Unsupported Job schemaVersion 2; supported schemaVersion is 1/);
+  await assertFailedReadsPreserveSnapshot(
+    store,
+    directory,
+    id,
+    before,
+    'Unsupported Job schemaVersion 2; supported schemaVersion is 1'
+  );
 });
 
 test('FileOrchestrationStore rejects an unsupported explicit schemaVersion', async () => {
   const directory = await createTemporaryDirectory('agentknot-record-versioning-unsupported-orchestration-');
   const id = 'orchestration_unsupported_v2';
-  await writeSnapshot(directory, id, { ...legacyOrchestration(id), schemaVersion: 2 });
+  const before = await writeSnapshot(directory, id, { ...legacyOrchestration(id), schemaVersion: 2 });
   const store = new FileOrchestrationStore(directory);
 
-  await assert.rejects(
-    store.get(id),
-    /Unsupported Orchestration schemaVersion 2; supported schemaVersion is 1/
-  );
-  await assert.rejects(
-    store.list(),
-    /Unsupported Orchestration schemaVersion 2; supported schemaVersion is 1/
+  await assertFailedReadsPreserveSnapshot(
+    store,
+    directory,
+    id,
+    before,
+    'Unsupported Orchestration schemaVersion 2; supported schemaVersion is 1'
   );
 });

@@ -1,7 +1,7 @@
 # 0014: Keep pi-lean-ctx experimental after one beneficial A/B pair
 
 - Type: Experiment
-- Status: Needs replication
+- Status: Rejected for general promotion
 - Date: 2026-08-09
 - Owners: AgentKnot maintainers
 - Affected versions/commits: `72ceac8` and the unreleased persisted-record versioning slice
@@ -100,3 +100,33 @@ Task-dependent automatic profile selection, MCP features, persistent knowledge, 
 ## Privacy and security review
 
 No credentials, auth-file contents, private model output, or raw event payloads are copied into this record. Package code ran with worker process authority, so the temporary HOME and disabled optional capabilities reduce contamination but do not constitute an operating-system sandbox. The package and binary hashes identify exactly what was reviewed.
+
+## Addenda
+
+### 2026-08-09: Independent repeat rejected general promotion
+
+The profile was repeated on a smaller real test-hardening task from base `7a2a35e50caf9b3a9f6afe1f61ef208264dec43f`: add deterministic Job and Orchestration file-store coverage for non-object snapshots, redaction of structured unsupported version values, and byte stability after failed `get` and `list` reads. Both arms used the identical prompt, one attempt, OpenCode Go, `gpt-5.6-luna`, and `thinkingLevel: "max"`. Both passed live inference before execution, produced checksum-valid artifacts that passed `git apply --check`, and reported 92 passing tests.
+
+| Measure | Minimal | `pi-lean-ctx@3.9.18` | Profile change |
+| --- | ---: | ---: | ---: |
+| Job | `job_b8ac290c-e199-4a2d-9c1c-8eb0213a8910` | `job_5abfd1bc-5ee5-4b3d-b52b-fc3781520bad` | — |
+| Artifact SHA-256 | `ffb8d87f67883133ef763ff4ee43961df12fe3a6e19a148f02913279c8930f33` | `00fbf88bcff7caf3930b90e284136c1f2f1b38a0ab58693d977a4b6a22e4cce4` | — |
+| Elapsed | 117.606 s | 171.361 s | +45.7% |
+| Tool calls | 26 | 36 | +38.5% |
+| Assistant messages | 13 | 15 | +15.4% |
+| Raw events | 393 | 509 | +29.5% |
+| Input tokens | 39 | 45 | +15.4% |
+| Output tokens | 12,547 | 16,427 | +30.9% |
+| Cache-read tokens | 470,952 | 650,762 | +38.2% |
+| Cache-write tokens | 59,763 | 72,501 | +21.3% |
+| Total tokens | 543,301 | 739,735 | +36.2% |
+| Final context usage | 62,048 | 73,193 | +18.0% |
+| Reported cost | 0.019711995 | 0.025430945 | +29.0% |
+| Persisted Job size | 1,350,464 B | 1,489,294 B | +10.3% |
+| Artifact size | 7,472 B | 5,826 B | -22.0% |
+
+The lean artifact used one shared helper for exact errors and failed-read byte stability and was selected as the smaller, clearer integration. Upstream applied it manually and reran the unmodified repository suite: 92 of 92 passed. The implementation value was real, but the efficiency benefit did not replicate.
+
+Across both pairs, the lean arm used 30.0% fewer total Pi tokens and 11.1% less elapsed time in aggregate, but that aggregate is dominated by the larger first workload. It also made 18.6% more tool calls overall, and the independent smaller workload regressed every measured efficiency dimension except artifact size. AgentKnot has no validated task-dependent profile-selection contract, so aggregate savings do not justify exposing smaller jobs to a known regression.
+
+The exact profile is therefore rejected for general dogfood promotion. The minimal route remains formal. Reconsideration requires a new bounded hypothesis, such as a profile explicitly limited to independently classified large-context implementation work, plus evidence that the classifier and profile together outperform the minimal route without hiding necessary output. The selected artifacts remain valid upstream-reviewed contributions; rejection applies to automatic/general routing, not to the usefulness of those two outputs.
