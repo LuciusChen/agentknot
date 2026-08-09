@@ -803,6 +803,30 @@ test('PiRpcWorkerAdapter sanitizes correlated session stats without retaining se
   }
 });
 
+test('PiRpcWorkerAdapter retains successful all-zero session stats as valid metadata', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-stats-zero-'));
+  try {
+    const orchestrator = createFakePiOrchestrator({ FAKE_PI_STATS_MODE: 'zero' });
+    const started = await orchestrator.start({ prompt: 'collect zero stats', workspace: directory });
+    const job = await started.completion;
+
+    assert.equal(job.status, 'succeeded');
+    const metadata = recordValue(recordValue(job.result).metadata);
+    assert.deepEqual(metadata.sessionStats, {
+      userMessages: 0,
+      assistantMessages: 0,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: 0,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      cost: 0,
+      contextUsage: { tokens: 0, contextWindow: 0, percent: 0 },
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('PiRpcWorkerAdapter keeps stats advisory for unsupported, malformed, and timed-out responses', async () => {
   const cases = [
     ['unsupported', 'unsupported'],

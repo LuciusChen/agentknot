@@ -86,7 +86,8 @@ function handle(command) {
       });
       return;
     }
-    if (mode !== 'success') throw new Error(`Unknown stats mode: ${mode}`);
+    if (mode !== 'success' && mode !== 'zero') throw new Error(`Unknown stats mode: ${mode}`);
+    const zero = mode === 'zero';
     send({
       id: command.id,
       type: 'response',
@@ -95,14 +96,24 @@ function handle(command) {
       data: {
         sessionFile: '/private/session.json',
         sessionId: 'secret-session-id',
-        userMessages: 2,
-        assistantMessages: 3,
-        toolCalls: 4,
-        toolResults: 5,
-        totalMessages: 6,
-        tokens: { input: 11, output: 12, cacheRead: 13, cacheWrite: 14, total: 50 },
-        cost: 0.42,
-        contextUsage: { tokens: 321, contextWindow: 1000, percent: 32.1 },
+        userMessages: zero ? 0 : 2,
+        assistantMessages: zero ? 0 : 3,
+        toolCalls: zero ? 0 : 4,
+        toolResults: zero ? 0 : 5,
+        totalMessages: zero ? 0 : 6,
+        tokens: {
+          input: zero ? 0 : 11,
+          output: zero ? 0 : 12,
+          cacheRead: zero ? 0 : 13,
+          cacheWrite: zero ? 0 : 14,
+          total: zero ? 0 : 50,
+        },
+        cost: zero ? 0 : 0.42,
+        contextUsage: {
+          tokens: zero ? 0 : 321,
+          contextWindow: zero ? 0 : 1000,
+          percent: zero ? 0 : 32.1,
+        },
         path: '/private/raw-stats-path',
         credential: 'secret-token',
         rawResponse: { secret: 'secret-raw-stats' },
