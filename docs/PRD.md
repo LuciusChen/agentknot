@@ -103,7 +103,7 @@ Version 0.0.1 currently implements:
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
 - read-only artifact listing, integrity/base verification, and bounded patch preview through TypeScript, CLI, and HTTP;
-- additive schemaVersion 1 terminal Job completion summaries with terminal outcome/attempt, controller-captured artifact path provenance, and explicit unavailable states; strict worker completion reports are accepted from custom adapters and normal Pi runs, with missing or malformed Pi envelopes remaining advisory; the deterministic emission slice is implemented but its Luna/max dogfood gate remains open;
+- additive schemaVersion 1 terminal Job completion summaries with terminal outcome/attempt, controller-captured artifact path provenance, and explicit unavailable states; strict worker completion reports are accepted from custom adapters and normal Pi runs, with missing or malformed Pi envelopes remaining advisory; deterministic coverage and a real Pi/OpenCode Go/Luna/max dogfood emission satisfy the evidence gate;
 - configuration validation and explicit configuration-only and opt-in live route diagnostics;
 - canonical HTTP process liveness that explicitly reports storage, routes, and inference as not checked, without claiming route readiness.
 - controller-neutral orchestration through CLI, HTTP, and TypeScript;
