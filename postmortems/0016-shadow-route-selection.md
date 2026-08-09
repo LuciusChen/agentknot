@@ -35,6 +35,7 @@ A shadow baseline is important because a suggestion that changes the worker rout
 2. The existing plan hash and child metadata provide durable, controller-neutral evidence surfaces, so route suggestions can be added without a provider-specific branch or a new persisted-record schema.
 3. The upstream contract fixes strict config validation, first-match/default semantics, plan-hash coverage, and public orchestration verification as the deterministic evidence required for this slice.
 4. No measured scorecard currently establishes that a task kind or complexity should run on a different model or provider, so automatic selection is intentionally not admitted. No DeepSeek route or integration is configured by this decision.
+5. Real shadow dogfood orchestration `orchestration_0ad86cfb-6e6a-4cb7-89a5-154edb768a11` used a temporary candidate set containing only `mock` and `luna`. Its low-complexity `test-gap-analysis` subtask persisted `suggestedRoute: "mock"`, `basis: "rule"`, and `ruleIndex: 0`, while the plan route, child request route, child-start event, and resolved Job route all remained `luna`. Child `job_18a11560-276c-4c45-b73b-9016566ed636` ran through Pi/OpenCode Go/`gpt-5.6-luna` with `thinkingLevel=max`, succeeded with an empty controller-captured patch, and copied the exact shadow evidence plus `taskKind` and `parentComplexity` into structured metadata.
 
 ## Decision rationale
 
