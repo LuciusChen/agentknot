@@ -124,3 +124,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0010](./0010-read-only-cli-runtime-reconciliation.md) | Incident | Resolved | Prevent read-only CLI runtime reconciliation from mutating active jobs |
 | [0011](./0011-explicit-http-liveness-contract.md) | Decision | Accepted | Name HTTP process liveness without implying route readiness |
 | [0012](./0012-evidence-gated-pi-profiles.md) | Decision | Accepted | Promote isolated Pi profiles only on measured dogfood benefit |
+| [0013](./0013-pi-readseek-profile-ab.md) | Experiment | Rejected | Reject the first pi-readseek profile after measured regressions |

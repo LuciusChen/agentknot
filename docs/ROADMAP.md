@@ -61,7 +61,7 @@ Make leaf-job semantics and the bounded delegation slice reliable enough that a 
 ### Product-contract work
 
 - Keep PRD, SPEC, ROADMAP, README, and postmortems linked and current.
-- Add a capability/status table that distinguishes current, experimental, proposed, and deferred behavior.
+- [x] Add a capability/status table that distinguishes current, experimental, proposed, and deferred behavior.
 - Version persisted job records before incompatible schema evolution begins.
 - Validate controller metadata as JSON values so CLI/HTTP/TypeScript and file storage preserve one contract.
 - Define a structured completion summary: changed files, checks run, remaining risks, and worker-reported notes, without treating worker assertions as verified facts.
@@ -110,7 +110,8 @@ Delivered in this slice:
 
 Next evidence gate:
 
-- Review one bounded community Pi extension without installing it globally or into the target repository, pin its exact version, and run repeated same-task Luna/max A/B trials against the minimal profile.
+- The first isolated candidate, `pi-readseek@0.9.10`, passed source review, live loading, artifact verification, and target tests but was rejected after one same-task Luna/max pair materially regressed token use, elapsed time, tool calls, and persisted record size; see [experiment 0013](../postmortems/0013-pi-readseek-profile-ab.md).
+- Review the next bounded candidate without installing it globally or into the target repository, pin its exact version, and run repeated same-task Luna/max A/B trials against the minimal profile.
 - Promote a separate dogfood worker/profile only if completion, artifact verification, and target tests do not regress and session statistics, elapsed work, or recorded upstream intervention show a repeatable net benefit; otherwise keep the minimal route and record the negative result.
 
 ### Runtime reconciliation correctness

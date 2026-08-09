@@ -13,22 +13,23 @@ The first real worker adapter uses [Pi RPC](https://pi.dev/docs/latest/rpc), a s
 
 To try it, install dependencies and run the deterministic Quick Start below. Use `agentknot run` for an already bounded leaf task or `agentknot orchestrate` when AgentKnot should decide whether and how to delegate.
 
-## Current status
+## Capability status
 
-This is an MVP. It already provides:
+The labels below are availability claims, not maturity ratings. **Current** means implemented and covered by deterministic tests. **Experimental** means evaluation-only and not a promoted default; its evidence gates are part of the status. **Proposed** and **Deferred** are not available.
 
-- controller-neutral CLI, HTTP, and TypeScript entry points;
-- policy-driven `off`, `suggest`, and `auto` delegation modes;
-- strict planner output validation, immutable plan/policy evidence, and bounded child dispatch;
-- independent worker/provider/model routing;
-- Pi RPC and deterministic mock adapters;
-- durable job and orchestration snapshots with ordered events;
-- timeouts, retries, cancellation, and completion callbacks;
-- optional vendor-neutral Git worktree isolation with per-attempt patch artifacts;
-- read-only artifact listing, integrity/base verification, and bounded patch preview;
-- normalized text, tool, retry, lifecycle, artifact, and stderr events;
-- reproducible Pi workers with ambient extensions, skills, prompt templates, and themes disabled, plus sanitized per-job Pi session statistics;
-- configuration validation, explicit configuration-only and opt-in live route diagnostics, and an explicit HTTP process-liveness contract.
+| Status | Capability | Evidence or gate |
+| --- | --- | --- |
+| **Current** | Controller-neutral leaf jobs and bounded depth-one orchestration through CLI, HTTP, and TypeScript, with `off`, `suggest`, and `auto` delegation modes. | Implemented and covered by deterministic API, policy, lifecycle, and persistence tests; callers must invoke the Job or orchestration API rather than relying on native-chat interception. |
+| **Current** | Independent worker/provider/model routing with the mock and Pi RPC adapters. | Implemented and covered by routing and adapter tests; current real promotion evidence is specific to Pi/OpenCode Go/Luna/max and does not make another configured route available. |
+| **Current** | Ordered job/orchestration snapshots and normalized events with retries, timeouts, cancellation, one-shot callbacks, and bounded exact-child Pi supervision. | Implemented and covered by deterministic lifecycle, persistence, callback, and Pi conformance tests; Pi also suppresses ambient resources and captures sanitized advisory session statistics, while custom adapters retain their own termination obligations. |
+| **Current** | Git worktree attempt isolation, patch artifacts, and read-only artifact listing, verification, and bounded preview. | Implemented and covered by worktree and artifact tests; artifacts are handoff data and are never applied, committed, merged, or pushed automatically. |
+| **Current** | Configuration-only `doctor`, opt-in exact-route `doctor --live`, and HTTP process liveness. | Implemented and covered by diagnostic and HTTP contract tests; live probes are point-in-time evidence and are not run as normal-job preflights. |
+| **Experimental** | Reviewed Pi worker profiles/extensions; none is promoted. | Evaluation only: use an exact version or immutable path without global or repository installation, then run repeated same-task Luna/max A/B trials against the minimal profile; completion, artifact verification, and target tests must not regress and session-statistics, elapsed-time, retry, or upstream-intervention evidence must show a repeatable net benefit before promotion. The first `pi-readseek@0.9.10` trial was rejected for material token, time, tool-call, and record-size regressions; see [experiment 0013](postmortems/0013-pi-readseek-profile-ab.md). |
+| **Proposed** | Additional native worker adapters, a worker conformance kit, and an independent provider-runtime interface. | Not available; requires a demonstrated lifecycle or observability benefit, or evidence that route data is insufficient, followed by the applicable Stage 2 contract and real-worker gates. |
+| **Proposed** | Authenticated local automation, signed callbacks, restart-aware queues/backpressure, approval/policy controls, and an OS-sandbox backend. | Not available; each capability requires its own threat model and the Stage 3 authentication, recovery, approval, and boundary tests. |
+| **Proposed** | An explicit artifact-promotion operation. | Not available; it may be considered only if dirty-target, base-mismatch, checksum, and explicit controller/human-approval checks are safe and tested. |
+| **Deferred** | Automatic patch application, commit, merge, push, deployment, or pull-request creation. | Not available by design; artifact inspection ends with an upstream controller or human decision. |
+| **Deferred** | Remote/team/fleet operation, collaboration surfaces, recursive or dependency-graph swarms, and silent provider/model fallback or optimization. | Not available; these remain conditional or deferred until an explicit PRD/SPEC change and evidence-gated roadmap stage. |
 
 Controllers still choose whether a request enters the leaf Job API or the orchestration API. AgentKnot cannot intercept arbitrary native Codex or Claude chats; a thin controller integration must call `agentknot orchestrate`, `POST /v1/orchestrations`, or `runtime.orchestrate()`.
 
