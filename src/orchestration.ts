@@ -13,6 +13,7 @@ import {
   skippedTaskAssessment,
 } from './delegation-policy.js';
 import type {
+  AgentKnotDelegationMetadata,
   DelegationPlan,
   OrchestrationChild,
   OrchestrationEvent,
@@ -437,6 +438,19 @@ export class OrchestrationService {
     const launch = async (subtask: PlannedSubtask): Promise<ActiveChild> => {
       const releaseSlot = await this.#dispatchSlots.acquire(signal);
       try {
+        const delegationMetadata: AgentKnotDelegationMetadata = {
+          orchestrationId: record.id,
+          role: 'worker',
+          subtaskId: subtask.id,
+          depth: 1,
+          planHash: plan.planHash,
+          policyVersion: plan.policyVersion,
+          taskKind: subtask.kind,
+          parentComplexity: plan.assessment.complexity,
+          ...(subtask.routeSelection === undefined
+            ? {}
+            : { routeSelection: subtask.routeSelection }),
+        };
         const started = await this.#jobs.start({
           prompt: subtask.executionPrompt,
           workspace: record.request.workspace,
@@ -444,14 +458,7 @@ export class OrchestrationService {
           ...(record.request.source === undefined ? {} : { source: record.request.source }),
           metadata: {
             ...(record.request.metadata ?? {}),
-            agentknotDelegation: {
-              orchestrationId: record.id,
-              role: 'worker',
-              subtaskId: subtask.id,
-              depth: 1,
-              planHash: plan.planHash,
-              policyVersion: plan.policyVersion,
-            },
+            agentknotDelegation: delegationMetadata,
           },
         });
         const child: OrchestrationChild = {

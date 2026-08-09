@@ -60,7 +60,7 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 
 ### Explicit routing
 
-A route resolves worker, provider, model, timeout, and retry settings before execution. Existing jobs retain that resolved snapshot even if configuration changes later.
+A route resolves worker, provider, model, timeout, and retry settings before execution. Existing jobs retain that resolved snapshot even if configuration changes later. The optional `delegation.dispatch.routeSelection` policy is shadow-only evidence: it may suggest a route for an eligible planned child, but `dispatch.defaultRoute` and the ordinary child `Job.route` remain the execution authority.
 
 ### Records first, live signals second
 
@@ -111,7 +111,10 @@ Version 0.0.1 currently implements:
 - strict planner assessments followed by deterministic task-kind policy;
 - immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
 - bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with four active slots, and a configuration ceiling of six for each with concurrency never exceeding the child count;
-- fail-without-resume startup reconciliation for stale jobs and orchestration records.
+- fail-without-resume startup reconciliation for stale jobs and orchestration records;
+- optional vendor-neutral shadow route-selection evidence under `delegation.dispatch`, disabled by omission and limited to 1–20 ordered rules whose candidate routes validate at config load, with first-match/default evidence in plans and child metadata while actual children remain on `dispatch.defaultRoute` ([decision 0016](../postmortems/0016-shadow-route-selection.md)).
+
+Rules may match non-empty unique `taskKinds` and/or non-empty unique `complexities` from `low`, `medium`, and `high`; both predicates must match when both are present, a rule with neither is an explicit catch-all, and a zero-based rule index is recorded only for a match. Shadow evidence is for later measurement, not automatic model/provider selection, and no DeepSeek or formal Luna/max route change belongs to this scope.
 
 Route diagnostics have two explicit modes. The default `doctor` command is a fast configuration, credential, and runtime check and must say that live inference was not checked. The opt-in `doctor --live` path performs one bounded real inference through the exact selected worker, provider, model, and thinking level; its 30-second control-plane timer triggers cooperative abort, and a supported adapter must settle after abort and clean up its resources. It reports provider errors with failure status and unsupported adapters honestly, does not fall back or select another route, does not create Job or artifact records, and does not add a probe before normal jobs or orchestrations.
 
@@ -132,6 +135,7 @@ AgentKnot is not intended to become:
 - an IDE, terminal multiplexer, or graphical agent cockpit;
 - an operating-system security sandbox;
 - an implicit provider optimizer that silently changes models or falls back across providers;
+- an automatic model/provider ranking system: shadow route-selection evidence requires separate measured scorecards before any ranking can drive execution;
 - a system that automatically applies patches, creates branches or pull requests, merges, commits, or pushes;
 - a reimplementation of Pi, MCP, OpenCode, Codex, Claude Code, or Relay.
 
@@ -141,8 +145,8 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 
 1. The controller and user agree on a bounded task and acceptance criteria.
 2. The controller chooses the leaf Job API for an already bounded task or the orchestration API for policy-driven delegation. AgentKnot does not intercept arbitrary controller conversations.
-3. For orchestration, AgentKnot snapshots the effective policy, asks the configured planner route for a strict read-only assessment, validates it, deterministically filters and caps it, and persists the plan before any child dispatch.
-4. An upstream or suggested decision returns without starting child jobs. An automatic decision submits each selected subtask through the ordinary Job API with depth-one provenance and bounded concurrency.
+3. For orchestration, AgentKnot snapshots the effective policy, asks the configured planner route for a strict read-only assessment, validates it, deterministically filters and caps it, optionally evaluates the configured shadow rules using subtask kind and parent assessment complexity, and persists the plan before any child dispatch; the planner cannot name routes.
+4. An upstream or suggested decision returns without starting child jobs. An automatic decision submits each selected subtask through the ordinary Job API with depth-one provenance and bounded concurrency, keeping the actual child route at `dispatch.defaultRoute` and carrying shadow evidence, task kind, and parent complexity in structured child metadata.
 5. For a leaf job, the controller submits a `JobRequest` with a workspace, route, source identity, and optional callback.
 6. AgentKnot validates the request, snapshots the route, creates the job record, and records `job.queued`.
 7. AgentKnot begins execution, prepares an isolated attempt when configured, and invokes the route's worker adapter.
@@ -163,6 +167,7 @@ The product remains on course when all of the following are true:
 - the same orchestration policy and record shape work through CLI, HTTP, and TypeScript without controller-name branches;
 - every automatically dispatched child is admitted through the ordinary Job API only after its plan is persisted;
 - automatic delegation is isolated, depth-one, capped, non-recursive, and cannot select configured keep-upstream task kinds;
+- omitted route-selection configuration disables selection, only `shadow` is accepted, strict 1–20 ordered rules validate existing candidate routes, first-match/default evidence is plan-hash-covered, and public child records show that suggestions never replace `dispatch.defaultRoute` while metadata carries task kind, parent complexity, and evidence;
 - every emitted job event is already present in the persisted record;
 - every terminal job is inspectable after the invoking call returns;
 - every newly terminal succeeded, failed, or cancelled Job has a schemaVersion 1 completion summary before its terminal event is persisted or observed, and retries summarize only the terminal attempt;
@@ -195,7 +200,8 @@ These are evidence requirements, not claims that the current MVP has already met
 - Worker completion reports are claims at the adapter boundary; accepting their strict shape does not verify changed paths, check outcomes, remaining risks, or notes.
 - A custom adapter may ignore cooperative cancellation unless the adapter contract and process supervision enforce termination.
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete job record.
-- A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk.
+- A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk, and shadow route suggestions inherit the limits of those classifications.
+- Shadow route evidence is not a measured model ranking; separate scorecards must compare routes on the same bounded workloads before any automatic selection is proposed.
 - Process-local concurrency and PID liveness checks are not a distributed scheduler, lease, or reliable defense against PID reuse and multiple AgentKnot writers.
 - Multiple execution-owning runtimes can still race whole-snapshot writes, and PID liveness observed from one namespace is not authoritative across namespaces. Read-oriented CLI commands no longer invoke that reconciliation path, resolving the immediate mutation in [incident 0010](../postmortems/0010-read-only-cli-runtime-reconciliation.md), but leases or compare-and-set storage remain absent.
 - Depth one constrains AgentKnot's own parent/child engine; the unauthenticated local API cannot prevent a host-capable worker from independently submitting another top-level orchestration.

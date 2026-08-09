@@ -83,6 +83,114 @@ test('parseTaskAssessment strictly rejects a subtask that omits acceptanceCriter
   );
 });
 
+test('composeDelegationPlan uses ordered shadow rules with AND predicates and keeps default execution routes', () => {
+  const shadowConfig: DelegationConfig = {
+    ...config,
+    dispatch: {
+      ...config.dispatch,
+      routeSelection: {
+        mode: 'shadow',
+        rules: [
+          { route: 'combined', taskKinds: ['test-gap-analysis'], complexities: ['high'] },
+          { route: 'first-kind', taskKinds: ['test-gap-analysis'] },
+          { route: 'second-kind', taskKinds: ['test-gap-analysis'] },
+          { route: 'complexity', complexities: ['medium'] },
+          { route: 'catch-all' },
+        ],
+      },
+    },
+  };
+
+  const plan = composeDelegationPlan(request, assessment, shadowConfig);
+  assert.equal(plan.willDispatch, true);
+  assert.deepEqual(
+    plan.subtasks.map((subtask) => ({
+      kind: subtask.kind,
+      route: subtask.route,
+      routeSelection: subtask.routeSelection,
+    })),
+    [
+      {
+        kind: 'test-gap-analysis',
+        route: 'worker',
+        routeSelection: {
+          mode: 'shadow',
+          suggestedRoute: 'first-kind',
+          basis: 'rule',
+          ruleIndex: 1,
+        },
+      },
+      {
+        kind: 'documentation',
+        route: 'worker',
+        routeSelection: {
+          mode: 'shadow',
+          suggestedRoute: 'complexity',
+          basis: 'rule',
+          ruleIndex: 3,
+        },
+      },
+    ]
+  );
+
+  const catchAll = composeDelegationPlan(request, assessment, {
+    ...shadowConfig,
+    dispatch: {
+      ...shadowConfig.dispatch,
+      routeSelection: { mode: 'shadow', rules: [{ route: 'catch-all' }] },
+    },
+  });
+  assert.equal(catchAll.subtasks.every((subtask) => subtask.route === 'worker'), true);
+  assert.equal(
+    catchAll.subtasks.every(
+      (subtask) =>
+        subtask.routeSelection?.basis === 'rule' &&
+        subtask.routeSelection.suggestedRoute === 'catch-all' &&
+        subtask.routeSelection.ruleIndex === 0
+    ),
+    true
+  );
+
+  const noMatch = composeDelegationPlan(request, assessment, {
+    ...shadowConfig,
+    dispatch: {
+      ...shadowConfig.dispatch,
+      routeSelection: {
+        mode: 'shadow',
+        rules: [{ route: 'candidate', taskKinds: ['architecture-review'] }],
+      },
+    },
+  });
+  assert.deepEqual(
+    noMatch.subtasks.map((subtask) => subtask.routeSelection),
+    [
+      { mode: 'shadow', suggestedRoute: 'worker', basis: 'default' },
+      { mode: 'shadow', suggestedRoute: 'worker', basis: 'default' },
+    ]
+  );
+  assert.equal(noMatch.subtasks.every((subtask) => subtask.route === 'worker'), true);
+
+  const withoutSelection = composeDelegationPlan(request, assessment, config);
+  assert.notEqual(plan.planHash, withoutSelection.planHash);
+  const changedSuggestion = composeDelegationPlan(request, assessment, {
+    ...shadowConfig,
+    dispatch: {
+      ...shadowConfig.dispatch,
+      routeSelection: {
+        mode: 'shadow',
+        rules: [
+          { route: 'combined', taskKinds: ['test-gap-analysis'], complexities: ['high'] },
+          { route: 'changed-kind', taskKinds: ['test-gap-analysis'] },
+          { route: 'second-kind', taskKinds: ['test-gap-analysis'] },
+          { route: 'complexity', complexities: ['medium'] },
+          { route: 'catch-all' },
+        ],
+      },
+    },
+  });
+  assert.notEqual(plan.planHash, changedSuggestion.planHash);
+});
+
 test('composeDelegationPlan deterministically applies allowlists, keep-upstream rules, caps, and suggest mode', () => {
   const plan = composeDelegationPlan(request, assessment, config);
   assert.equal(plan.policyVersion, 1);

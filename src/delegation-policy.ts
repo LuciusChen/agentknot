@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 
-import type { DelegationConfig, DelegationMode } from './config.js';
+import type { DelegationConfig, DelegationMode, RouteSelectionConfig } from './config.js';
 import type {
   AssessedSubtask,
   DelegationPlan,
   OrchestrationRequest,
+  RouteSelectionEvidence,
   TaskAssessment,
   TaskComplexity,
 } from './orchestration-types.js';
@@ -168,6 +169,28 @@ function executionPrompt(parentPrompt: string, subtask: AssessedSubtask): string
   ].join('\n');
 }
 
+function selectShadowRouteEvidence(
+  routeSelection: RouteSelectionConfig,
+  subtask: AssessedSubtask,
+  parentComplexity: TaskComplexity,
+  defaultRoute: string
+): RouteSelectionEvidence {
+  for (const [ruleIndex, rule] of routeSelection.rules.entries()) {
+    const taskKindMatches = rule.taskKinds === undefined || rule.taskKinds.includes(subtask.kind);
+    const complexityMatches =
+      rule.complexities === undefined || rule.complexities.includes(parentComplexity);
+    if (taskKindMatches && complexityMatches) {
+      return {
+        mode: 'shadow',
+        suggestedRoute: rule.route,
+        basis: 'rule',
+        ruleIndex,
+      };
+    }
+  }
+  return { mode: 'shadow', suggestedRoute: defaultRoute, basis: 'default' };
+}
+
 function withPlanHash(plan: Omit<DelegationPlan, 'planHash'>): DelegationPlan {
   return {
     ...plan,
@@ -237,12 +260,24 @@ export function composeDelegationPlan(
   const eligible = assessment.subtasks
     .filter((subtask) => !upstreamKinds.has(subtask.kind))
     .filter((subtask) => forceEligibility || delegatedKinds.has(subtask.kind))
-    .map((subtask, index) => ({
-      ...subtask,
-      id: `subtask_${index + 1}`,
-      route: config.dispatch.defaultRoute,
-      executionPrompt: executionPrompt(request.prompt, subtask),
-    }));
+    .map((subtask, index) => {
+      const selectionEvidence =
+        config.dispatch.routeSelection === undefined
+          ? undefined
+          : selectShadowRouteEvidence(
+              config.dispatch.routeSelection,
+              subtask,
+              assessment.complexity,
+              config.dispatch.defaultRoute
+            );
+      return {
+        ...subtask,
+        id: `subtask_${index + 1}`,
+        route: config.dispatch.defaultRoute,
+        executionPrompt: executionPrompt(request.prompt, subtask),
+        ...(selectionEvidence === undefined ? {} : { routeSelection: selectionEvidence }),
+      };
+    });
 
   if (eligible.length === 0) {
     return withPlanHash({

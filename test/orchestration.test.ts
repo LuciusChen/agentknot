@@ -7,12 +7,14 @@ import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import type { AgentKnotConfig } from '../src/config.js';
+import type { AgentKnotConfig, RouteSelectionConfig } from '../src/config.js';
 import { OrchestrationService } from '../src/orchestration.js';
 import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
 import type {
+  DelegationPlan,
   OrchestrationRecord,
   OrchestrationStore,
+  PlannedSubtask,
   TaskAssessment,
 } from '../src/orchestration-types.js';
 import { Orchestrator } from '../src/orchestrator.js';
@@ -254,7 +256,8 @@ function createServices(
   adapter: WorkerAdapter,
   maxConcurrency = 1,
   workerMaxAttempts = 1,
-  maxChildren = 2
+  maxChildren = 2,
+  routeSelection?: RouteSelectionConfig
 ): {
   jobs: Orchestrator;
   jobStore: MemoryJobStore;
@@ -262,6 +265,7 @@ function createServices(
   orchestrationStore: MemoryOrchestrationStore;
 } {
   const config = testConfig(maxConcurrency, workerMaxAttempts, maxChildren);
+  if (routeSelection !== undefined) config.delegation!.dispatch.routeSelection = routeSelection;
   const jobStore = new MemoryJobStore();
   const jobs = new Orchestrator({
     config,
@@ -317,6 +321,57 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
     const provenance = child.request.metadata?.agentknotDelegation as Record<string, unknown>;
     assert.equal(provenance.planHash, record.plan?.planHash);
     assert.equal(provenance.policyVersion, 1);
+  }
+});
+
+test('OrchestrationService keeps shadow suggestions out of child route authority and preserves metadata', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-shadow-route-');
+  const adapter = new PlannerAndWorkerAdapter(assessment);
+  const routeSelection: RouteSelectionConfig = {
+    mode: 'shadow',
+    rules: [
+      { route: 'planner', taskKinds: ['test-gap-analysis'] },
+      { route: 'planner', complexities: ['medium'] },
+      { route: 'worker' },
+    ],
+  };
+  const { jobStore, orchestrations } = createServices(adapter, 2, 1, 2, routeSelection);
+
+  const record = await orchestrations.run({
+    prompt: 'Review the tests and update the documentation.',
+    workspace,
+  });
+
+  assert.equal(record.status, 'succeeded');
+  assert.equal(record.plan?.willDispatch, true);
+  assert.equal(record.plan?.subtasks.every((subtask) => subtask.route === 'worker'), true);
+  assert.deepEqual(
+    record.plan?.subtasks.map((subtask) => subtask.routeSelection),
+    [
+      { mode: 'shadow', suggestedRoute: 'planner', basis: 'rule', ruleIndex: 0 },
+      { mode: 'shadow', suggestedRoute: 'planner', basis: 'rule', ruleIndex: 1 },
+    ]
+  );
+
+  const childJobs = (await jobStore.list()).filter(
+    (job) => (job.request.metadata?.agentknotDelegation as Record<string, unknown> | undefined)?.role === 'worker'
+  );
+  assert.equal(childJobs.length, 2);
+  for (const childJob of childJobs) {
+    assert.equal(childJob.request.route, 'worker');
+    assert.equal(childJob.route.name, 'worker');
+    assert.equal(childJob.route.model, 'worker');
+    const metadata = childJob.request.metadata?.agentknotDelegation as Record<string, unknown>;
+    const subtaskId = metadata.subtaskId;
+    const plan: DelegationPlan | undefined = record.plan;
+    assert.ok(plan);
+    const matchedSubtask: PlannedSubtask | undefined = plan.subtasks.find(
+      (candidate: PlannedSubtask) => candidate.id === subtaskId
+    );
+    assert.ok(matchedSubtask);
+    assert.equal(metadata.taskKind, matchedSubtask.kind);
+    assert.equal(metadata.parentComplexity, 'medium');
+    assert.deepEqual(metadata.routeSelection, matchedSubtask.routeSelection);
   }
 });
 

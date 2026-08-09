@@ -127,3 +127,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0013](./0013-pi-readseek-profile-ab.md) | Experiment | Rejected | Reject the first pi-readseek profile after measured regressions |
 | [0014](./0014-pi-lean-ctx-profile-ab.md) | Experiment | Rejected | Keep pi-lean-ctx experimental after one beneficial A/B pair |
 | [0015](./0015-terminal-completion-provenance-boundary.md) | Decision | Accepted | Keep terminal completion provenance explicit |
+| [0016](./0016-shadow-route-selection.md) | Decision | Accepted | Keep route selection shadow-only until measured scorecards |

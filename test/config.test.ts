@@ -92,7 +92,19 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
     delegation: {
       mode: 'auto',
       planner: { strategy: 'hybrid', route: 'luna' },
-      dispatch: { defaultRoute: 'grok', maxChildren: 3, maxDepth: 1, maxConcurrency: 2 },
+      dispatch: {
+        defaultRoute: 'grok',
+        maxChildren: 3,
+        maxDepth: 1,
+        maxConcurrency: 2,
+        routeSelection: {
+          mode: 'shadow',
+          rules: [
+            { route: 'luna', taskKinds: ['documentation'], complexities: ['low', 'medium'] },
+            { route: 'grok' },
+          ],
+        },
+      },
       policy: {
         delegate: ['documentation', 'test-gap-analysis'],
         keepUpstream: ['product-decision', 'artifact-integration'],
@@ -108,7 +120,19 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
   assert.deepEqual(config.delegation, {
     mode: 'auto',
     planner: { strategy: 'hybrid', route: 'luna' },
-    dispatch: { defaultRoute: 'grok', maxChildren: 3, maxDepth: 1, maxConcurrency: 2 },
+    dispatch: {
+      defaultRoute: 'grok',
+      maxChildren: 3,
+      maxDepth: 1,
+      maxConcurrency: 2,
+      routeSelection: {
+        mode: 'shadow',
+        rules: [
+          { route: 'luna', taskKinds: ['documentation'], complexities: ['low', 'medium'] },
+          { route: 'grok' },
+        ],
+      },
+    },
     policy: {
       delegate: ['documentation', 'test-gap-analysis'],
       keepUpstream: ['product-decision', 'artifact-integration'],
@@ -131,6 +155,67 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
     maxDepth: 1,
     maxConcurrency: 2,
   });
+  assert.equal(defaults.delegation?.dispatch.routeSelection, undefined);
+});
+
+test('parseConfig strictly validates optional shadow route selection rules', () => {
+  const base = {
+    version: 1,
+    defaultRoute: 'mock',
+    storage: { directory: '.agentknot/jobs' },
+    workers: {
+      mock: { adapter: 'mock' },
+    },
+    routes: {
+      mock: { worker: 'mock', provider: 'mock', model: 'mock' },
+      alternate: { worker: 'mock', provider: 'mock', model: 'alternate' },
+    },
+  };
+  const valid = {
+    mode: 'shadow',
+    rules: [
+      { route: 'alternate', taskKinds: ['documentation'], complexities: ['low', 'medium'] },
+      { route: 'mock', complexities: ['high'] },
+      { route: 'mock' },
+    ],
+  };
+  assert.deepEqual(
+    parseConfig({ ...base, delegation: { mode: 'off', dispatch: { routeSelection: valid } } })
+      .delegation?.dispatch.routeSelection,
+    valid
+  );
+
+  const invalidRouteSelections: unknown[] = [
+    null,
+    {},
+    { mode: 'shadow' },
+    { mode: 'shadow', rules: null },
+    { mode: 'shadow', rules: 'not-an-array' },
+    { mode: 'auto', rules: [{ route: 'mock' }] },
+    { mode: 'unknown', rules: [{ route: 'mock' }] },
+    { mode: 'shadow', rules: [] },
+    { mode: 'shadow', rules: Array.from({ length: 21 }, () => ({ route: 'mock' })) },
+    { mode: 'shadow', rules: [null] },
+    { mode: 'shadow', rules: [{ route: '' }] },
+    { mode: 'shadow', rules: [{ route: 'missing' }] },
+    { mode: 'shadow', rules: [{ route: 'mock', taskKinds: 'documentation' }] },
+    { mode: 'shadow', rules: [{ route: 'mock', taskKinds: [1] }] },
+    { mode: 'shadow', rules: [{ route: 'mock', taskKinds: [] }] },
+    { mode: 'shadow', rules: [{ route: 'mock', taskKinds: ['documentation', 'documentation'] }] },
+    { mode: 'shadow', rules: [{ route: 'mock', complexities: 'medium' }] },
+    { mode: 'shadow', rules: [{ route: 'mock', complexities: [1] }] },
+    { mode: 'shadow', rules: [{ route: 'mock', complexities: [] }] },
+    { mode: 'shadow', rules: [{ route: 'mock', complexities: ['medium', 'medium'] }] },
+    { mode: 'shadow', rules: [{ route: 'mock', complexities: ['urgent'] }] },
+    { mode: 'shadow', rules: [{ route: 'mock' }], unexpected: true },
+    { mode: 'shadow', rules: [{ route: 'mock', unexpected: true }] },
+  ];
+  for (const routeSelection of invalidRouteSelections) {
+    assert.throws(
+      () => parseConfig({ ...base, delegation: { mode: 'off', dispatch: { routeSelection } } }),
+      /routeSelection/
+    );
+  }
 });
 
 test('parseConfig rejects unsafe or unresolved delegation settings', () => {

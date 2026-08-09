@@ -57,6 +57,25 @@ export interface AgentKnotConfig {
 export const DELEGATION_MODES = ['off', 'suggest', 'auto'] as const;
 export type DelegationMode = (typeof DELEGATION_MODES)[number];
 
+export const ROUTE_SELECTION_MODES = ['shadow'] as const;
+export type RouteSelectionMode = (typeof ROUTE_SELECTION_MODES)[number];
+
+export const ROUTE_SELECTION_COMPLEXITIES = ['low', 'medium', 'high'] as const;
+export type RouteSelectionComplexity = (typeof ROUTE_SELECTION_COMPLEXITIES)[number];
+
+export interface RouteSelectionRule {
+  route: string;
+  taskKinds?: string[];
+  complexities?: RouteSelectionComplexity[];
+}
+
+export interface ShadowRouteSelectionConfig {
+  mode: 'shadow';
+  rules: RouteSelectionRule[];
+}
+
+export type RouteSelectionConfig = ShadowRouteSelectionConfig;
+
 export const DELEGATION_FALLBACKS = ['upstream', 'fail'] as const;
 export type DelegationFallback = (typeof DELEGATION_FALLBACKS)[number];
 
@@ -72,6 +91,8 @@ export interface DelegationConfig {
     /** Automatic recursive delegation is intentionally unsupported in v1. */
     maxDepth: 1;
     maxConcurrency: number;
+    /** Omitted means no route-selection evidence is produced. */
+    routeSelection?: RouteSelectionConfig;
   };
   policy: {
     delegate: string[];
@@ -112,6 +133,14 @@ function assertRecord(value: unknown, label: string): asserts value is Record<st
 function assertNonEmptyString(value: unknown, label: string): asserts value is string {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new Error(`${label} must be a non-empty string`);
+  }
+}
+
+function assertKnownKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
+  const allowed = new Set(keys);
+  const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new Error(`${label} contains unknown fields: ${unknown.join(', ')}`);
   }
 }
 
@@ -227,6 +256,70 @@ function parseRoute(name: string, value: unknown, workers: Record<string, Worker
   };
 }
 
+function parseRouteSelectionStringArray(
+  value: unknown,
+  label: string,
+  allowed?: readonly string[]
+): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${label} must be a non-empty array`);
+  }
+  const values = [...value];
+  if (!values.every((item): item is string => typeof item === 'string' && item.trim() !== '')) {
+    throw new Error(`${label} must be an array of non-empty strings`);
+  }
+  if (new Set(values).size !== values.length) {
+    throw new Error(`${label} must contain unique values`);
+  }
+  if (allowed && values.some((item) => !allowed.includes(item))) {
+    throw new Error(`${label} contains an invalid value`);
+  }
+  return values;
+}
+
+function parseRouteSelection(
+  value: unknown,
+  routes: Record<string, RouteConfig>
+): RouteSelectionConfig {
+  assertRecord(value, 'config.delegation.dispatch.routeSelection');
+  assertKnownKeys(value, ['mode', 'rules'], 'config.delegation.dispatch.routeSelection');
+  if (value.mode !== 'shadow') {
+    throw new Error('config.delegation.dispatch.routeSelection.mode must be "shadow"');
+  }
+  if (!Array.isArray(value.rules) || value.rules.length < 1 || value.rules.length > 20) {
+    throw new Error('config.delegation.dispatch.routeSelection.rules must contain 1-20 entries');
+  }
+
+  const rules: RouteSelectionRule[] = Array.from(value.rules, (item, index) => {
+    const label = `config.delegation.dispatch.routeSelection.rules[${index}]`;
+    assertRecord(item, label);
+    assertKnownKeys(item, ['route', 'taskKinds', 'complexities'], label);
+    assertNonEmptyString(item.route, `${label}.route`);
+    if (!Object.hasOwn(routes, item.route)) {
+      throw new Error(`${label}.route references unknown route "${item.route}"`);
+    }
+    const taskKinds =
+      item.taskKinds === undefined
+        ? undefined
+        : parseRouteSelectionStringArray(item.taskKinds, `${label}.taskKinds`);
+    const complexities =
+      item.complexities === undefined
+        ? undefined
+        : (parseRouteSelectionStringArray(
+            item.complexities,
+            `${label}.complexities`,
+            ROUTE_SELECTION_COMPLEXITIES
+          ) as RouteSelectionComplexity[]);
+    return {
+      route: item.route,
+      ...(taskKinds === undefined ? {} : { taskKinds }),
+      ...(complexities === undefined ? {} : { complexities }),
+    };
+  });
+
+  return { mode: 'shadow', rules };
+}
+
 function parseDelegation(
   value: unknown,
   routes: Record<string, RouteConfig>,
@@ -280,6 +373,10 @@ function parseDelegation(
   if (maxConcurrency > maxChildren) {
     throw new Error('config.delegation.dispatch.maxConcurrency must not exceed maxChildren');
   }
+  const routeSelection =
+    dispatch.routeSelection === undefined
+      ? undefined
+      : parseRouteSelection(dispatch.routeSelection, routes);
 
   if (value.policy !== undefined) assertRecord(value.policy, 'config.delegation.policy');
   const policy = (value.policy ?? {}) as Record<string, unknown>;
@@ -296,6 +393,7 @@ function parseDelegation(
       maxChildren,
       maxDepth: 1,
       maxConcurrency,
+      ...(routeSelection === undefined ? {} : { routeSelection }),
     },
     policy: {
       delegate: parseStringArray(

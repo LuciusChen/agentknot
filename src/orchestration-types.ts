@@ -27,6 +27,19 @@ export interface OrchestrationRequest {
 
 export type TaskComplexity = 'low' | 'medium' | 'high';
 
+export type RouteSelectionEvidence =
+  | {
+      mode: 'shadow';
+      suggestedRoute: string;
+      basis: 'rule';
+      ruleIndex: number;
+    }
+  | {
+      mode: 'shadow';
+      suggestedRoute: string;
+      basis: 'default';
+    };
+
 export interface AssessedSubtask {
   title: string;
   kind: string;
@@ -48,9 +61,30 @@ export type DelegationDecision = 'upstream' | 'delegate' | 'split';
 
 export interface PlannedSubtask extends AssessedSubtask {
   id: string;
+  /** The actual execution route; shadow suggestions never replace this value. */
   route: string;
   executionPrompt: string;
+  routeSelection?: RouteSelectionEvidence;
 }
+
+export type AgentKnotDelegationMetadata =
+  | {
+      orchestrationId: string;
+      role: 'planner';
+      depth: 0;
+    }
+  | {
+      orchestrationId: string;
+      role: 'worker';
+      subtaskId: string;
+      depth: 1;
+      planHash: string;
+      policyVersion: 1;
+      taskKind: string;
+      /** Complexity assessed for the parent orchestration goal. */
+      parentComplexity: TaskComplexity;
+      routeSelection?: RouteSelectionEvidence;
+    };
 
 export interface DelegationPlan {
   policyVersion: 1;
