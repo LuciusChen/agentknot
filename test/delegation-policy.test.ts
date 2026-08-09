@@ -69,16 +69,20 @@ test('planner instructions reserve parallelism for independent non-overlapping w
   assert.match(prompt, /do not put acceptance criteria only in the "prompt" text/);
 });
 
-test('planner instructions separate delegation from parallelism and allow one nonparallel subtask', () => {
+test('planner instructions delegate bounded repository deliverables regardless of size or parallelism', () => {
   const prompt = buildPlannerPrompt(request, config);
   assert.match(prompt, /Delegation and parallelism are separate decisions/);
   assert.match(prompt, /exactly one nonparallel subtask/);
   assert.match(prompt, /lack of a useful split alone must not cause a "do-not-delegate" recommendation/);
-  assert.match(prompt, /objectively trivial work upstream when direct execution and review are cheaper/);
+  assert.match(prompt, /expected to create or modify a repository file must receive a "delegate" recommendation/);
+  assert.match(prompt, /even when it is small, low-complexity, or nonparallel/);
+  assert.match(prompt, /task size and generic handoff\/review overhead alone are not reasons/);
+  assert.match(prompt, /genuinely trivial read-only inspection or direct-answer work with no repository file deliverable upstream/);
   assert.match(prompt, /state that overhead rationale rather than citing the lack of a parallel split/);
   assert.match(prompt, /"parallelizable":true\|false/);
   assert.match(prompt, /Use an empty subtasks array only when the work must remain upstream, cannot be bounded/);
-  assert.match(prompt, /or is objectively cheaper to execute and review directly/);
+  assert.match(prompt, /genuinely trivial read-only inspection or direct-answer work with no repository file deliverable/);
+  assert.match(prompt, /never use it merely because the work is small or cannot be split/);
   assert.doesNotMatch(prompt, /delegation would add no value/);
 });
 
@@ -259,7 +263,7 @@ test('composeDelegationPlan applies only human-configured active routes with a c
   assert.notEqual(low.planHash, medium.planHash);
 });
 
-test('a low-complexity nonparallel single subtask is delegated once and selected by the active deepseek-flash rule', () => {
+test('a small low-complexity repository edit is delegated once and selected by the active deepseek-flash rule', () => {
   const activeConfig: DelegationConfig = {
     ...config,
     dispatch: {
@@ -274,14 +278,14 @@ test('a low-complexity nonparallel single subtask is delegated once and selected
     ...assessment,
     complexity: 'low',
     parallelizable: false,
-    taskKinds: ['test-gap-analysis'],
-    reasoning: 'One bounded review task with no useful split.',
+    taskKinds: ['independent-implementation'],
+    reasoning: 'One small bounded repository edit with no useful split.',
     subtasks: [
       {
-        title: 'Review test gaps',
-        kind: 'test-gap-analysis',
-        prompt: 'Review the implementation tests and identify missing cases.',
-        acceptanceCriteria: ['List concrete missing cases'],
+        title: 'Fix the range helper',
+        kind: 'independent-implementation',
+        prompt: 'Modify src/ranges.js to fix the bounded range helper behavior.',
+        acceptanceCriteria: ['src/ranges.js implements the specified behavior'],
       },
     ],
   };
