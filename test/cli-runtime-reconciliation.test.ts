@@ -310,9 +310,10 @@ test('read-oriented and invalid CLI commands do not reconcile persisted records'
 
     const usage = await runCli(fixture.configPath, 'usage');
     assert.equal(usage.code, 0, usage.stderr);
-    assert.match(usage.stdout, /downstream status=unavailable reason=no-successful-jobs/);
-    assert.match(usage.stdout, /upstream=unavailable reason=controller-usage-not-persisted/);
-    assert.match(usage.stdout, /proportions=unavailable reason=controller-usage-not-persisted/);
+    assert.match(usage.stdout, /^AgentKnot usage report/);
+    assert.match(usage.stdout, /Downstream tokens\n  Status +unavailable \(no-successful-jobs\)/);
+    assert.match(usage.stdout, /Upstream tokens +unavailable \(not persisted\)/);
+    assert.match(usage.stdout, /Upstream \/ downstream +unavailable \(not persisted\)/);
     assert.deepEqual(await readSnapshot(fixture.jobsDirectory, ids.jobId), jobSnapshot);
     assert.deepEqual(
       await readSnapshot(fixture.orchestrationDirectory, ids.orchestrationId),

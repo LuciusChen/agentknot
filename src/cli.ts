@@ -72,54 +72,107 @@ Doctor options:
 
 function formatRate(value: UsageRate): string {
   return value.status === 'available'
-    ? `${(value.value * 100).toFixed(2)}% (${value.formula})`
-    : `unavailable reason=${value.reason} (${value.formula})`;
+    ? `${(value.value * 100).toFixed(2)}%`
+    : `unavailable (${value.reason})`;
 }
 
-function formatRouteMode(mode: string, value: RouteSelectionModeUsage): string {
-  const selections = value.selections
-    .map((selection) =>
-      selection.basis === 'rule'
-        ? `rule[${selection.ruleIndex}]=${selection.route}:${selection.count}`
-        : `default=${selection.route}:${selection.count}`
+function formatCount(value: number): string {
+  return value.toLocaleString('en-US');
+}
+
+function formatShare(numerator: number, denominator: number): string {
+  return denominator === 0 ? 'n/a' : `${((numerator / denominator) * 100).toFixed(2)}%`;
+}
+
+function reportRow(label: string, value: string, indent = 2): string {
+  return `${' '.repeat(indent)}${label}${' '.repeat(Math.max(2, 27 - indent - label.length))}${value}`;
+}
+
+function formatRouteMode(mode: 'Active' | 'Shadow', value: RouteSelectionModeUsage): string[] {
+  const total = value.classifiedSelections;
+  const lines = [
+    reportRow(`${mode} rule hits`, `${formatCount(value.ruleHits)} / ${formatCount(total)} (${formatRate(value.ruleHitRate)})`),
+  ];
+  for (const selection of value.selections.filter((item) => item.basis === 'rule')) {
+    lines.push(
+      reportRow(`rule[${selection.ruleIndex}] → ${selection.route}`, formatCount(selection.count), 4)
+    );
+  }
+  lines.push(
+    reportRow(
+      `${mode} defaults`,
+      `${formatCount(value.defaultSelections)} / ${formatCount(total)} (${formatShare(value.defaultSelections, total)})`
     )
-    .join(',');
-  return `route-${mode} classified=${value.classifiedSelections} rule-hits=${value.ruleHits} defaults=${value.defaultSelections} hit-rate=${formatRate(value.ruleHitRate)}${selections === '' ? '' : ` selections=${selections}`}`;
+  );
+  for (const selection of value.selections.filter((item) => item.basis === 'default')) {
+    lines.push(reportRow(`default → ${selection.route}`, formatCount(selection.count), 4));
+  }
+  return lines;
 }
 
 function formatUsageReport(report: UsageReport): string {
   const lines = [
-    `scope jobs=${report.scope.totalJobs} successful=${report.scope.successfulJobs} stats=${report.scope.statsAvailableJobs} stats-unavailable=${report.scope.statsUnavailableJobs} orchestrations=${report.scope.terminalOrchestrations} subtasks=${report.scope.plannedSubtasks}`,
+    'AgentKnot usage report',
+    '',
+    'Coverage',
+    reportRow(
+      'Successful jobs',
+      `${formatCount(report.scope.successfulJobs)} / ${formatCount(report.scope.totalJobs)} (${formatShare(report.scope.successfulJobs, report.scope.totalJobs)})`
+    ),
+    reportRow(
+      'Downstream stats',
+      `${formatCount(report.scope.statsAvailableJobs)} / ${formatCount(report.scope.successfulJobs)} (${formatShare(report.scope.statsAvailableJobs, report.scope.successfulJobs)})`
+    ),
+    reportRow('Terminal orchestrations', formatCount(report.scope.terminalOrchestrations)),
+    reportRow('Planned subtasks', formatCount(report.scope.plannedSubtasks)),
+    '',
+    'Downstream tokens',
   ];
   if (report.downstream.status === 'available') {
     lines.push(
-      `downstream status=available coverage=${report.downstream.coverage}`,
-      `tokens input=${report.downstream.tokens.input} output=${report.downstream.tokens.output} cache-read=${report.downstream.tokens.cacheRead} cache-write=${report.downstream.tokens.cacheWrite} total=${report.downstream.tokens.total}`,
-      `provider-reported-cost=${report.downstream.providerReportedCost}`,
-      `cache-read-hit-rate=${formatRate(report.downstream.cacheReadHitRate)}`
+      reportRow('Coverage', report.downstream.coverage),
+      reportRow('Total', formatCount(report.downstream.tokens.total)),
+      reportRow('Input', formatCount(report.downstream.tokens.input)),
+      reportRow('Output', formatCount(report.downstream.tokens.output)),
+      reportRow('Cache read', formatCount(report.downstream.tokens.cacheRead)),
+      reportRow('Cache write', formatCount(report.downstream.tokens.cacheWrite)),
+      reportRow('Cache-read hit rate', formatRate(report.downstream.cacheReadHitRate)),
+      reportRow(
+        'Provider-reported cost',
+        `${report.downstream.providerReportedCost.toLocaleString('en-US', { maximumFractionDigits: 6 })} (unit unspecified)`
+      )
     );
   } else {
-    lines.push(`downstream status=unavailable reason=${report.downstream.reason}`);
+    lines.push(reportRow('Status', `unavailable (${report.downstream.reason})`));
   }
   if (report.downstream.unavailable.length > 0) {
     lines.push(
-      `stats-unavailable-reasons=${report.downstream.unavailable.map((item) => `${item.reason}:${item.count}`).join(',')}`
+      reportRow(
+        'Missing stats',
+        `${formatCount(report.scope.statsUnavailableJobs)} (${report.downstream.unavailable.map((item) => `${item.reason}: ${formatCount(item.count)}`).join(', ')})`
+      )
     );
   }
-  lines.push(
-    report.routeSelection.status === 'available'
-      ? `route-selection status=available coverage=${report.routeSelection.coverage} classified=${report.routeSelection.classifiedSelections} unavailable=${report.routeSelection.unavailableSelections}`
-      : `route-selection status=unavailable reason=${report.routeSelection.reason} unavailable=${report.routeSelection.unavailableSelections}`
-  );
+  lines.push('', 'Routing');
+  const selectionCoverage = `${formatCount(report.routeSelection.classifiedSelections)} / ${formatCount(report.scope.plannedSubtasks)} (${formatShare(report.routeSelection.classifiedSelections, report.scope.plannedSubtasks)})`;
+  lines.push(reportRow('Classified selections', selectionCoverage));
+  if (report.routeSelection.status === 'available') {
+    lines.push(reportRow('Coverage', report.routeSelection.coverage));
+  } else {
+    lines.push(reportRow('Status', `unavailable (${report.routeSelection.reason})`));
+  }
   if (report.routeSelection.active.classifiedSelections > 0) {
-    lines.push(formatRouteMode('active', report.routeSelection.active));
+    lines.push(...formatRouteMode('Active', report.routeSelection.active));
   }
   if (report.routeSelection.shadow.classifiedSelections > 0) {
-    lines.push(formatRouteMode('shadow', report.routeSelection.shadow));
+    lines.push(...formatRouteMode('Shadow', report.routeSelection.shadow));
   }
   lines.push(
-    `upstream=unavailable reason=${report.upstream.reason}`,
-    `proportions=unavailable reason=${report.proportions.reason}`
+    reportRow('Unclassified', formatCount(report.routeSelection.unavailableSelections)),
+    '',
+    'Controller usage',
+    reportRow('Upstream tokens', 'unavailable (not persisted)'),
+    reportRow('Upstream / downstream', 'unavailable (not persisted)')
   );
   return `${lines.join('\n')}\n`;
 }
