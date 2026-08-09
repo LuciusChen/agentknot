@@ -170,6 +170,41 @@ function formatUsageReport(report: UsageReport): string {
   lines.push(
     reportRow('Unclassified', formatCount(report.routeSelection.unavailableSelections)),
     '',
+    'Advisory quality review',
+    reportRow('Configured terminal runs', formatCount(report.qualityReview.configuredOrchestrations)),
+    reportRow(
+      'Classified reviews',
+      `${formatCount(report.qualityReview.classifiedReviews)} / ${formatCount(report.qualityReview.configuredOrchestrations)} (${formatShare(report.qualityReview.classifiedReviews, report.qualityReview.configuredOrchestrations)})`
+    )
+  );
+  if (report.qualityReview.status === 'available') {
+    lines.push(reportRow('Coverage', report.qualityReview.coverage));
+  } else {
+    lines.push(reportRow('Status', `unavailable (${report.qualityReview.reason})`));
+  }
+  lines.push(
+    reportRow(
+      'Outcomes',
+      `completed: ${formatCount(report.qualityReview.outcomes.completed)}, skipped: ${formatCount(report.qualityReview.outcomes.skipped)}, unavailable: ${formatCount(report.qualityReview.outcomes.unavailable)}`
+    ),
+    reportRow(
+      'Verdicts',
+      `accept: ${formatCount(report.qualityReview.verdicts.accept)}, changes: ${formatCount(report.qualityReview.verdicts.changesRequested)}, uncertain: ${formatCount(report.qualityReview.verdicts.uncertain)}`
+    ),
+    reportRow(
+      'Findings',
+      `high: ${formatCount(report.qualityReview.findingSeverities.high)}, medium: ${formatCount(report.qualityReview.findingSeverities.medium)}, low: ${formatCount(report.qualityReview.findingSeverities.low)}`
+    )
+  );
+  for (const route of report.qualityReview.reviewerRoutes) {
+    lines.push(reportRow(`reviewer → ${route.route}`, formatCount(route.count), 4));
+  }
+  for (const reason of report.qualityReview.reasons) {
+    lines.push(reportRow(`${reason.status}: ${reason.reason}`, formatCount(reason.count), 4));
+  }
+  lines.push(
+    reportRow('Controller disposition', 'unavailable (not persisted)'),
+    '',
     'Controller usage',
     reportRow('Upstream tokens', 'unavailable (not persisted)'),
     reportRow('Upstream / downstream', 'unavailable (not persisted)')
@@ -268,6 +303,7 @@ async function orchestrationHandoff(
       output: child.output,
       error: child.error,
     })),
+    qualityReview: record.qualityReview,
     artifacts,
     result:
       record.result === undefined
@@ -550,7 +586,7 @@ async function main(argv: string[]): Promise<void> {
     if (json) process.stdout.write(`${JSON.stringify(policy, null, 2)}\n`);
     else {
       process.stdout.write(
-        `${policy.mode}\tplanner=${policy.planner.route}\tworker-default=${policy.dispatch.defaultRoute}\troute-selection=${policy.dispatch.routeSelection?.mode ?? 'off'}\tchildren<=${policy.dispatch.maxChildren}\tconcurrency<=${policy.dispatch.maxConcurrency}\n`
+        `${policy.mode}\tplanner=${policy.planner.route}\tworker-default=${policy.dispatch.defaultRoute}\treviewer=${policy.qualityReview?.route ?? 'off'}\troute-selection=${policy.dispatch.routeSelection?.mode ?? 'off'}\tchildren<=${policy.dispatch.maxChildren}\tconcurrency<=${policy.dispatch.maxConcurrency}\n`
       );
     }
     return;

@@ -109,6 +109,7 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
         delegate: ['documentation', 'test-gap-analysis'],
         keepUpstream: ['product-decision', 'artifact-integration'],
       },
+      qualityReview: { route: 'luna', complexities: ['low'] },
       fallback: 'upstream',
     },
   });
@@ -137,6 +138,7 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
       delegate: ['documentation', 'test-gap-analysis'],
       keepUpstream: ['product-decision', 'artifact-integration'],
     },
+    qualityReview: { route: 'luna', complexities: ['low'] },
     fallback: 'upstream',
   });
 
@@ -156,6 +158,50 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
     maxConcurrency: 2,
   });
   assert.equal(defaults.delegation?.dispatch.routeSelection, undefined);
+  assert.equal(defaults.delegation?.qualityReview, undefined);
+});
+
+test('parseConfig strictly validates an optional single-attempt quality reviewer route', () => {
+  const base = {
+    version: 1,
+    defaultRoute: 'worker',
+    storage: { directory: '.agentknot/jobs' },
+    workers: { mock: { adapter: 'mock' } },
+    routes: {
+      worker: { worker: 'mock', provider: 'mock', model: 'worker' },
+      reviewer: { worker: 'mock', provider: 'mock', model: 'reviewer', maxAttempts: 1 },
+      retrying: { worker: 'mock', provider: 'mock', model: 'retrying', maxAttempts: 2 },
+    },
+  };
+  assert.deepEqual(
+    parseConfig({
+      ...base,
+      delegation: {
+        mode: 'off',
+        qualityReview: { route: 'reviewer', complexities: ['low', 'medium'] },
+      },
+    }).delegation?.qualityReview,
+    { route: 'reviewer', complexities: ['low', 'medium'] }
+  );
+
+  const invalid: unknown[] = [
+    null,
+    {},
+    { route: '', complexities: ['low'] },
+    { route: 'missing', complexities: ['low'] },
+    { route: 'reviewer' },
+    { route: 'reviewer', complexities: [] },
+    { route: 'reviewer', complexities: ['low', 'low'] },
+    { route: 'reviewer', complexities: ['urgent'] },
+    { route: 'retrying', complexities: ['low'] },
+    { route: 'reviewer', complexities: ['low'], unexpected: true },
+  ];
+  for (const qualityReview of invalid) {
+    assert.throws(
+      () => parseConfig({ ...base, delegation: { mode: 'off', qualityReview } }),
+      /qualityReview/
+    );
+  }
 });
 
 test('parseConfig strictly validates optional shadow and active route selection rules', () => {

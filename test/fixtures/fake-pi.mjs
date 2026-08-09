@@ -28,6 +28,12 @@ function completionOutput(message) {
   ) {
     return process.env.FAKE_PI_PLANNER_OUTPUT;
   }
+  if (
+    process.env.FAKE_PI_REVIEW_OUTPUT !== undefined &&
+    message.startsWith("You are AgentKnot's independent advisory quality reviewer")
+  ) {
+    return process.env.FAKE_PI_REVIEW_OUTPUT;
+  }
   if (process.env.FAKE_PI_COMPLETION_OUTPUT !== undefined) return process.env.FAKE_PI_COMPLETION_OUTPUT;
   const humanOutput = process.env.FAKE_PI_HUMAN_OUTPUT ?? 'fake result';
   const validReport = {
@@ -135,6 +141,12 @@ function handle(command) {
 
   if (process.env.FAKE_PI_PROMPT_FILE) {
     writeFileSync(process.env.FAKE_PI_PROMPT_FILE, command.message);
+  }
+  if (
+    process.env.FAKE_PI_WRITE_REVIEWED_FILE === 'true' &&
+    command.message.startsWith('You are executing one bounded subtask selected by AgentKnot.')
+  ) {
+    writeFileSync('reviewed.txt', 'reviewed fixture\n');
   }
   const output = completionOutput(command.message);
   const splitAt = Math.min(5, output.length);

@@ -160,6 +160,13 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
       status: 'running',
     },
   ];
+  staleParentRecord.policy.qualityReview = { route: 'mock', complexities: ['low'] };
+  staleParentRecord.qualityReview = {
+    status: 'pending',
+    route: 'mock',
+    childJobId: staleChild.id,
+    reviewerJobId: 'job_stale_reviewer',
+  };
   await orchestrationStore.create(staleParentRecord);
   const staleQueuedParent = staleOrchestration(
     'orchestration_stale_queued',
@@ -255,6 +262,14 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
   assert.equal(staleParent?.events.at(-1)?.data?.reason, 'runtime_restart');
   assert.equal(staleParent?.children[0]?.status, 'failed');
   assert.equal(staleParent?.children[0]?.error?.name, 'ExecutionInterruptedError');
+  assert.deepEqual(staleParent?.qualityReview, {
+    status: 'unavailable',
+    route: 'mock',
+    childJobId: staleChild.id,
+    reviewerJobId: 'job_stale_reviewer',
+    reason: 'runtime-restart',
+  });
+  assert.equal(staleParent?.events.at(-2)?.type, 'orchestration.review.unavailable');
   for (const [id, previousStatus] of [
     [staleQueuedParent.id, 'queued'],
     [stalePlanningParent.id, 'planning'],

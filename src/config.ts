@@ -81,6 +81,13 @@ export interface ActiveRouteSelectionConfig {
 
 export type RouteSelectionConfig = ShadowRouteSelectionConfig | ActiveRouteSelectionConfig;
 
+export interface QualityReviewConfig {
+  /** Human-selected advisory reviewer route. The referenced route must use exactly one attempt. */
+  route: string;
+  /** Only parent assessments with one of these complexities are eligible. */
+  complexities: RouteSelectionComplexity[];
+}
+
 export const DELEGATION_FALLBACKS = ['upstream', 'fail'] as const;
 export type DelegationFallback = (typeof DELEGATION_FALLBACKS)[number];
 
@@ -103,6 +110,8 @@ export interface DelegationConfig {
     delegate: string[];
     keepUpstream: string[];
   };
+  /** Omission disables the advisory post-artifact quality review. */
+  qualityReview?: QualityReviewConfig;
   fallback: DelegationFallback;
 }
 
@@ -325,6 +334,31 @@ function parseRouteSelection(
   return value.mode === 'active' ? { mode: 'active', rules } : { mode: 'shadow', rules };
 }
 
+function parseQualityReview(
+  value: unknown,
+  routes: Record<string, RouteConfig>
+): QualityReviewConfig {
+  assertRecord(value, 'config.delegation.qualityReview');
+  assertKnownKeys(value, ['route', 'complexities'], 'config.delegation.qualityReview');
+  assertNonEmptyString(value.route, 'config.delegation.qualityReview.route');
+  if (!Object.hasOwn(routes, value.route)) {
+    throw new Error(
+      `config.delegation.qualityReview.route references unknown route "${value.route}"`
+    );
+  }
+  if ((routes[value.route]?.maxAttempts ?? 1) !== 1) {
+    throw new Error('config.delegation.qualityReview.route must reference a route with maxAttempts 1');
+  }
+  return {
+    route: value.route,
+    complexities: parseRouteSelectionStringArray(
+      value.complexities,
+      'config.delegation.qualityReview.complexities',
+      ROUTE_SELECTION_COMPLEXITIES
+    ) as RouteSelectionComplexity[],
+  };
+}
+
 function parseDelegation(
   value: unknown,
   routes: Record<string, RouteConfig>,
@@ -383,6 +417,11 @@ function parseDelegation(
       ? undefined
       : parseRouteSelection(dispatch.routeSelection, routes);
 
+  const qualityReview =
+    value.qualityReview === undefined
+      ? undefined
+      : parseQualityReview(value.qualityReview, routes);
+
   if (value.policy !== undefined) assertRecord(value.policy, 'config.delegation.policy');
   const policy = (value.policy ?? {}) as Record<string, unknown>;
 
@@ -412,6 +451,7 @@ function parseDelegation(
         DEFAULT_KEEP_UPSTREAM_TASK_KINDS
       ),
     },
+    ...(qualityReview === undefined ? {} : { qualityReview }),
     fallback: (value.fallback as DelegationFallback | undefined) ?? 'upstream',
   };
 }

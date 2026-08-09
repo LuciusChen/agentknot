@@ -237,6 +237,9 @@ test('usage report aggregates exact persisted stats and separates active and sha
     reason: 'controller-usage-not-persisted',
   });
   assert.deepEqual(report.proportions, report.upstream);
+  assert.equal(report.qualityReview.status, 'unavailable');
+  if (report.qualityReview.status !== 'unavailable') assert.fail('review usage should be unavailable');
+  assert.equal(report.qualityReview.reason, 'no-configured-quality-reviews');
 });
 
 test('usage report keeps valid zero stats distinct from missing evidence', () => {
@@ -258,4 +261,84 @@ test('usage report keeps valid zero stats distinct from missing evidence', () =>
     reason: 'zero-denominator',
   });
   assert.equal(report.routeSelection.status, 'unavailable');
+});
+
+test('usage report aggregates route-neutral advisory review evidence without inferring controller acceptance', () => {
+  const completedAccept = orchestration('orchestration_review_accept', 'active', []);
+  completedAccept.policy.qualityReview = { route: 'reviewer-a', complexities: ['low'] };
+  completedAccept.qualityReview = {
+    status: 'completed',
+    route: 'reviewer-a',
+    childJobId: 'job_worker_a',
+    reviewerJobId: 'job_reviewer_a',
+    verdict: 'accept',
+    summary: 'The patch satisfies the stated acceptance criteria.',
+    findings: [
+      { severity: 'low', message: 'Minor naming issue.', evidence: 'src/example.ts:10' },
+      { severity: 'high', message: 'High-risk edge case checked.', evidence: 'test/example.test.ts:20' },
+    ],
+  };
+
+  const completedChanges = orchestration('orchestration_review_changes', 'active', []);
+  completedChanges.policy.qualityReview = { route: 'reviewer-b', complexities: ['low'] };
+  completedChanges.qualityReview = {
+    status: 'completed',
+    route: 'reviewer-b',
+    childJobId: 'job_worker_b',
+    reviewerJobId: 'job_reviewer_b',
+    verdict: 'changes-requested',
+    summary: 'One bounded correction is required.',
+    findings: [
+      { severity: 'medium', message: 'Missing boundary handling.', evidence: 'src/example.ts:25' },
+    ],
+  };
+
+  const skipped = orchestration('orchestration_review_skipped', 'active', []);
+  skipped.policy.qualityReview = { route: 'reviewer-a', complexities: ['low'] };
+  skipped.qualityReview = { status: 'skipped', route: 'reviewer-a', reason: 'artifact-empty' };
+
+  const unavailable = orchestration('orchestration_review_unavailable', 'active', []);
+  unavailable.policy.qualityReview = { route: 'reviewer-a', complexities: ['low'] };
+  unavailable.qualityReview = {
+    status: 'unavailable',
+    route: 'reviewer-a',
+    reason: 'reviewer-failed',
+  };
+
+  const unclassified = orchestration('orchestration_review_missing', 'active', []);
+  unclassified.policy.qualityReview = { route: 'reviewer-a', complexities: ['low'] };
+
+  const report = buildUsageReport([], [
+    completedAccept,
+    completedChanges,
+    skipped,
+    unavailable,
+    unclassified,
+  ]);
+
+  assert.equal(report.qualityReview.status, 'available');
+  if (report.qualityReview.status !== 'available') assert.fail('review usage should be available');
+  assert.equal(report.qualityReview.coverage, 'partial');
+  assert.equal(report.qualityReview.configuredOrchestrations, 5);
+  assert.equal(report.qualityReview.classifiedReviews, 4);
+  assert.equal(report.qualityReview.unclassifiedReviews, 1);
+  assert.deepEqual(report.qualityReview.outcomes, { completed: 2, skipped: 1, unavailable: 1 });
+  assert.deepEqual(report.qualityReview.verdicts, {
+    accept: 1,
+    changesRequested: 1,
+    uncertain: 0,
+  });
+  assert.deepEqual(report.qualityReview.findingSeverities, { low: 1, medium: 1, high: 1 });
+  assert.deepEqual(report.qualityReview.reviewerRoutes, [
+    { route: 'reviewer-a', count: 3 },
+    { route: 'reviewer-b', count: 1 },
+  ]);
+  assert.deepEqual(report.qualityReview.reasons, [
+    { status: 'skipped', reason: 'artifact-empty', count: 1 },
+    { status: 'unavailable', reason: 'reviewer-failed', count: 1 },
+  ]);
+  assert.deepEqual(report.qualityReview.controllerDisposition, {
+    status: 'unavailable',
+    reason: 'controller-review-disposition-not-persisted',
+  });
 });

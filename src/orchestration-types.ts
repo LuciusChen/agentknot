@@ -100,6 +100,14 @@ export type AgentKnotDelegationMetadata =
       /** Complexity assessed for the parent orchestration goal. */
       parentComplexity: TaskComplexity;
       routeSelection?: RouteSelectionEvidence;
+    }
+  | {
+      orchestrationId: string;
+      role: 'reviewer';
+      depth: 1;
+      childJobId: string;
+      planHash: string;
+      policyVersion: 1;
     };
 
 export interface DelegationPlan {
@@ -127,6 +135,10 @@ export const ORCHESTRATION_EVENT_TYPES = [
   'orchestration.dispatching',
   'orchestration.child.started',
   'orchestration.child.completed',
+  'orchestration.review.skipped',
+  'orchestration.review.started',
+  'orchestration.review.completed',
+  'orchestration.review.unavailable',
   'orchestration.cancel.requested',
   'orchestration.succeeded',
   'orchestration.failed',
@@ -170,6 +182,74 @@ export interface OrchestrationArtifactReview {
   }>;
 }
 
+export const QUALITY_REVIEW_VERDICTS = ['accept', 'changes-requested', 'uncertain'] as const;
+export type QualityReviewVerdict = (typeof QUALITY_REVIEW_VERDICTS)[number];
+
+export const QUALITY_REVIEW_FINDING_SEVERITIES = ['low', 'medium', 'high'] as const;
+export type QualityReviewFindingSeverity = (typeof QUALITY_REVIEW_FINDING_SEVERITIES)[number];
+
+export interface QualityReviewFinding {
+  severity: QualityReviewFindingSeverity;
+  message: string;
+  evidence: string;
+}
+
+export const QUALITY_REVIEW_SKIPPED_REASONS = [
+  'not-delegated',
+  'complexity-not-selected',
+  'child-count-not-one',
+  'child-not-succeeded',
+  'child-job-unavailable',
+  'artifact-count-not-one',
+  'artifact-invalid',
+  'artifact-empty',
+  'artifact-too-large',
+  'artifact-truncated',
+  'handoff-too-large',
+] as const;
+export type QualityReviewSkippedReason = (typeof QUALITY_REVIEW_SKIPPED_REASONS)[number];
+
+export const QUALITY_REVIEW_UNAVAILABLE_REASONS = [
+  'reviewer-start-failed',
+  'reviewer-failed',
+  'reviewer-output-truncated',
+  'reviewer-output-invalid',
+  'parent-cancelled',
+  'runtime-restart',
+] as const;
+export type QualityReviewUnavailableReason =
+  (typeof QUALITY_REVIEW_UNAVAILABLE_REASONS)[number];
+
+export type OrchestrationQualityReview =
+  | {
+      status: 'skipped';
+      route: string;
+      reason: QualityReviewSkippedReason;
+    }
+  | {
+      status: 'pending';
+      route: string;
+      childJobId: string;
+      reviewerJobId: string;
+    }
+  | {
+      status: 'unavailable';
+      route: string;
+      childJobId?: string;
+      reviewerJobId?: string;
+      reason: QualityReviewUnavailableReason;
+      error?: { name: string; message: string };
+    }
+  | {
+      status: 'completed';
+      route: string;
+      childJobId: string;
+      reviewerJobId: string;
+      verdict: QualityReviewVerdict;
+      summary: string;
+      findings: QualityReviewFinding[];
+    };
+
 export interface OrchestrationResult {
   action: 'upstream' | 'suggested' | 'delegated';
   children: OrchestrationChild[];
@@ -199,6 +279,8 @@ export interface OrchestrationRecord {
   plannerJobId?: string;
   plan?: DelegationPlan;
   children: OrchestrationChild[];
+  /** Optional advisory evidence from one separately configured depth-one reviewer Job. */
+  qualityReview?: OrchestrationQualityReview;
   result?: OrchestrationResult;
   error?: OrchestrationError;
 }

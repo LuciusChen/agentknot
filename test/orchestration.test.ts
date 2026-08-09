@@ -43,6 +43,10 @@ async function createGitWorkspace(prefix: string): Promise<string> {
   return workspace;
 }
 
+async function gitStatus(workspace: string): Promise<string> {
+  return String((await execFileAsync('git', ['status', '--short'], { cwd: workspace })).stdout);
+}
+
 function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
@@ -72,6 +76,7 @@ class PlannerAndWorkerAdapter implements WorkerAdapter {
   workerRuns = 0;
   activeRuns = 0;
   peakRuns = 0;
+  reviewerRuns = 0;
 
   constructor(
     readonly assessment: TaskAssessment,
@@ -93,6 +98,17 @@ class PlannerAndWorkerAdapter implements WorkerAdapter {
         await abortableDelay(this.plannerDelayMs, input.signal);
         return { output: this.plannerOutput ?? JSON.stringify(this.assessment) };
       }
+      if (input.route.name === 'reviewer') {
+        this.reviewerRuns += 1;
+        return {
+          output: JSON.stringify({
+            schemaVersion: 1,
+            verdict: 'accept',
+            summary: 'The bounded patch satisfies the stated criteria.',
+            findings: [],
+          }),
+        };
+      }
       this.workerRuns += 1;
       this.activeWorkers += 1;
       this.peakWorkers = Math.max(this.peakWorkers, this.activeWorkers);
@@ -110,10 +126,17 @@ class PlannerAndWorkerAdapter implements WorkerAdapter {
 
 class ArtifactWritingAdapter implements WorkerAdapter {
   readonly name = 'test';
+  reviewerRuns = 0;
 
   constructor(
     readonly assessment: TaskAssessment,
-    readonly pathsByPrompt: Map<string, string[]>
+    readonly pathsByPrompt: Map<string, string[]>,
+    readonly reviewerOutput = JSON.stringify({
+      schemaVersion: 1,
+      verdict: 'accept',
+      summary: 'The patch is correct for the bounded task.',
+      findings: [],
+    })
   ) {}
 
   async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
@@ -123,6 +146,10 @@ class ArtifactWritingAdapter implements WorkerAdapter {
   async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
     await emit('worker.started', { route: input.route.name });
     if (input.route.name === 'planner') return { output: JSON.stringify(this.assessment) };
+    if (input.route.name === 'reviewer') {
+      this.reviewerRuns += 1;
+      return { output: this.reviewerOutput };
+    }
     for (const [prompt, changedPaths] of this.pathsByPrompt) {
       if (!input.prompt.includes(prompt)) continue;
       for (const changedPath of changedPaths) {
@@ -130,6 +157,41 @@ class ArtifactWritingAdapter implements WorkerAdapter {
       }
     }
     return { output: `completed ${input.route.name}` };
+  }
+}
+
+class BlockingReviewerAdapter implements WorkerAdapter {
+  readonly name = 'test';
+  reviewerJobId: string | undefined;
+  #reviewerStartedResolve: (() => void) | undefined;
+  readonly reviewerStarted = new Promise<void>((resolve) => {
+    this.#reviewerStartedResolve = resolve;
+  });
+
+  constructor(readonly assessment: TaskAssessment) {}
+
+  async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
+    return { ok: true, message: 'blocking reviewer ready' };
+  }
+
+  async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
+    await emit('worker.started', { route: input.route.name });
+    if (input.route.name === 'planner') return { output: JSON.stringify(this.assessment) };
+    if (input.route.name === 'worker') {
+      await writeFile(path.join(input.workspace, 'reviewed.ts'), 'export const reviewed = true;\n');
+      return { output: 'implemented reviewed.ts' };
+    }
+    this.reviewerJobId = input.jobId;
+    this.#reviewerStartedResolve?.();
+    await new Promise<void>((_resolve, reject) => {
+      const onAbort = () => {
+        input.signal.removeEventListener('abort', onAbort);
+        reject(input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted'));
+      };
+      if (input.signal.aborted) onAbort();
+      else input.signal.addEventListener('abort', onAbort, { once: true });
+    });
+    return { output: 'unreachable' };
   }
 }
 
@@ -285,6 +347,25 @@ const assessment: TaskAssessment = {
   ],
 };
 
+function singleQualityReviewAssessment(prompt: string): TaskAssessment {
+  return {
+    schemaVersion: 1,
+    recommendation: 'delegate',
+    complexity: 'low',
+    parallelizable: false,
+    taskKinds: ['documentation'],
+    reasoning: 'One small repository deliverable needs independent review.',
+    subtasks: [
+      {
+        title: 'Produce one reviewed file',
+        kind: 'documentation',
+        prompt,
+        acceptanceCriteria: ['The bounded reviewed file is added with the expected value'],
+      },
+    ],
+  };
+}
+
 function testConfig(maxConcurrency = 1, workerMaxAttempts = 1, maxChildren = 2): AgentKnotConfig {
   return {
     version: 1,
@@ -311,6 +392,13 @@ function testConfig(maxConcurrency = 1, workerMaxAttempts = 1, maxChildren = 2):
         maxAttempts: workerMaxAttempts,
         timeoutMs: 30_000,
       },
+      reviewer: {
+        worker: 'test',
+        provider: 'test',
+        model: 'reviewer',
+        maxAttempts: 1,
+        timeoutMs: 30_000,
+      },
     },
     delegation: {
       mode: 'auto',
@@ -330,7 +418,8 @@ function createServices(
   maxConcurrency = 1,
   workerMaxAttempts = 1,
   maxChildren = 2,
-  routeSelection?: RouteSelectionConfig
+  routeSelection?: RouteSelectionConfig,
+  qualityReview = false
 ): {
   jobs: Orchestrator;
   jobStore: MemoryJobStore;
@@ -339,6 +428,9 @@ function createServices(
 } {
   const config = testConfig(maxConcurrency, workerMaxAttempts, maxChildren);
   if (routeSelection !== undefined) config.delegation!.dispatch.routeSelection = routeSelection;
+  if (qualityReview) {
+    config.delegation!.qualityReview = { route: 'reviewer', complexities: ['low'] };
+  }
   const jobStore = new MemoryJobStore();
   const jobs = new Orchestrator({
     config,
@@ -400,6 +492,190 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
     assert.equal(provenance.planHash, record.plan?.planHash);
     assert.equal(provenance.policyVersion, 1);
   }
+});
+
+test('OrchestrationService runs one advisory reviewer after one valid low-complexity patch', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-quality-review-');
+  const lowAssessment = singleQualityReviewAssessment('Produce reviewed file.');
+  const adapter = new ArtifactWritingAdapter(
+    lowAssessment,
+    new Map([['Produce reviewed file.', ['reviewed.ts']]])
+  );
+  const { jobStore, orchestrations, orchestrationStore } = createServices(
+    adapter,
+    2,
+    1,
+    1,
+    undefined,
+    true
+  );
+
+  const record = await orchestrations.run({
+    prompt: 'Add the bounded reviewed file and verify it.',
+    workspace,
+    source: 'controller-test',
+  });
+
+  assert.equal(record.status, 'succeeded');
+  assert.equal(record.children.length, 1);
+  assert.equal(adapter.reviewerRuns, 1);
+  assert.equal(record.qualityReview?.status, 'completed');
+  if (record.qualityReview?.status !== 'completed') assert.fail('quality review should complete');
+  assert.equal(record.qualityReview.route, 'reviewer');
+  assert.equal(record.qualityReview.childJobId, record.children[0]?.jobId);
+  assert.equal(record.qualityReview.verdict, 'accept');
+  assert.deepEqual(record.qualityReview.findings, []);
+  const reviewerJobId = record.qualityReview.reviewerJobId;
+  assert.equal(record.result?.children.length, 1);
+  assert.equal(
+    record.events.findIndex((event) => event.type === 'orchestration.child.completed') <
+      record.events.findIndex((event) => event.type === 'orchestration.review.started'),
+    true
+  );
+  assert.equal(
+    record.events.findIndex((event) => event.type === 'orchestration.review.completed') <
+      record.events.findIndex((event) => event.type === 'orchestration.succeeded'),
+    true
+  );
+  const jobs = await jobStore.list();
+  assert.equal(jobs.length, 3);
+  const reviewer = jobs.find((job) => job.id === reviewerJobId);
+  assert.ok(reviewer);
+  assert.equal(reviewer.request.route, 'reviewer');
+  assert.equal(reviewer.request.source, 'controller-test');
+  assert.match(reviewer.request.prompt, /Worker completion\/test claims \(unverified\)/);
+  assert.match(reviewer.request.prompt, /diff --git a\/reviewed\.ts b\/reviewed\.ts/);
+  const provenance = reviewer.request.metadata?.agentknotDelegation as Record<string, unknown>;
+  assert.equal(provenance.role, 'reviewer');
+  assert.equal(provenance.depth, 1);
+  assert.equal(provenance.childJobId, record.children[0]?.jobId);
+  assert.deepEqual(await orchestrationStore.get(record.id), record);
+  assert.equal(await gitStatus(workspace), '');
+});
+
+test('OrchestrationService keeps malformed reviewer output advisory and does not fall back', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-quality-review-invalid-');
+  const lowAssessment = singleQualityReviewAssessment('Produce invalid review target.');
+  const adapter = new ArtifactWritingAdapter(
+    lowAssessment,
+    new Map([['Produce invalid review target.', ['target.ts']]]),
+    'not reviewer JSON'
+  );
+  const { jobStore, orchestrations } = createServices(adapter, 2, 1, 1, undefined, true);
+
+  const record = await orchestrations.run({ prompt: 'Produce one reviewed target.', workspace });
+
+  assert.equal(record.status, 'succeeded');
+  assert.equal(record.result?.action, 'delegated');
+  assert.equal(record.qualityReview?.status, 'unavailable');
+  if (record.qualityReview?.status !== 'unavailable') assert.fail('review should be unavailable');
+  assert.equal(record.qualityReview.reason, 'reviewer-output-invalid');
+  assert.equal(adapter.reviewerRuns, 1);
+  assert.equal(
+    (await jobStore.list()).filter(
+      (job) =>
+        (job.request.metadata?.agentknotDelegation as Record<string, unknown> | undefined)?.role ===
+        'reviewer'
+    ).length,
+    1
+  );
+  assert.equal(await gitStatus(workspace), '');
+});
+
+test('OrchestrationService preserves success when the advisory reviewer requests changes', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-quality-review-changes-');
+  const lowAssessment = singleQualityReviewAssessment('Produce change-request target.');
+  const adapter = new ArtifactWritingAdapter(
+    lowAssessment,
+    new Map([['Produce change-request target.', ['target.ts']]]),
+    JSON.stringify({
+      schemaVersion: 1,
+      verdict: 'changes-requested',
+      summary: 'The patch misses one stated behavior.',
+      findings: [
+        { severity: 'high', message: 'Required behavior is absent.', evidence: 'The patch adds only a placeholder.' },
+      ],
+    })
+  );
+  const { orchestrations } = createServices(adapter, 2, 1, 1, undefined, true);
+
+  const record = await orchestrations.run({ prompt: 'Produce a target for advisory review.', workspace });
+
+  assert.equal(record.status, 'succeeded');
+  assert.equal(record.result?.action, 'delegated');
+  assert.equal(record.qualityReview?.status, 'completed');
+  if (record.qualityReview?.status !== 'completed') assert.fail('review should complete');
+  assert.equal(record.qualityReview.verdict, 'changes-requested');
+  assert.equal(record.qualityReview.findings.length, 1);
+  assert.equal(await gitStatus(workspace), '');
+});
+
+test('OrchestrationService explicitly skips configured review for an empty patch', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-quality-review-empty-');
+  const adapter = new PlannerAndWorkerAdapter(singleQualityReviewAssessment('Inspect without editing.'));
+  const { orchestrations } = createServices(adapter, 2, 1, 1, undefined, true);
+
+  const record = await orchestrations.run({ prompt: 'Produce an empty artifact.', workspace });
+
+  assert.deepEqual(record.qualityReview, {
+    status: 'skipped',
+    route: 'reviewer',
+    reason: 'artifact-empty',
+  });
+  assert.equal(adapter.reviewerRuns, 0);
+  assert.equal(await gitStatus(workspace), '');
+});
+
+test('OrchestrationService explicitly skips configured review for multiple children', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-quality-review-multiple-');
+  const lowMultiple: TaskAssessment = {
+    ...assessment,
+    complexity: 'low',
+  };
+  const adapter = new ArtifactWritingAdapter(
+    lowMultiple,
+    new Map([
+      ['Review the tests', ['review.ts']],
+      ['Update documentation', ['documentation.ts']],
+    ])
+  );
+  const { orchestrations } = createServices(adapter, 2, 1, 2, undefined, true);
+
+  const record = await orchestrations.run({ prompt: 'Produce two independent artifacts.', workspace });
+
+  assert.equal(record.status, 'succeeded');
+  assert.deepEqual(record.qualityReview, {
+    status: 'skipped',
+    route: 'reviewer',
+    reason: 'child-count-not-one',
+  });
+  assert.equal(adapter.reviewerRuns, 0);
+  assert.equal(await gitStatus(workspace), '');
+});
+
+test('OrchestrationService cancels and awaits a running advisory reviewer', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-quality-review-cancel-');
+  const lowAssessment = singleQualityReviewAssessment('Write reviewed.ts.');
+  const adapter = new BlockingReviewerAdapter(lowAssessment);
+  const { jobStore, orchestrations } = createServices(adapter, 2, 1, 1, undefined, true);
+  const started = await orchestrations.start({ prompt: 'Write and review the target.', workspace });
+  await adapter.reviewerStarted;
+
+  await started.cancel();
+  const record = await started.completion;
+
+  assert.equal(record.status, 'cancelled');
+  assert.equal(record.qualityReview?.status, 'unavailable');
+  if (record.qualityReview?.status !== 'unavailable') assert.fail('review should be unavailable');
+  assert.equal(record.qualityReview.reason, 'parent-cancelled');
+  const reviewer = await jobStore.get(adapter.reviewerJobId!);
+  assert.equal(reviewer?.status, 'cancelled');
+  assert.equal(
+    record.events.findIndex((event) => event.type === 'orchestration.review.unavailable') <
+      record.events.findIndex((event) => event.type === 'orchestration.cancelled'),
+    true
+  );
+  assert.equal(await gitStatus(workspace), '');
 });
 
 test('OrchestrationService flags deterministic child artifact path overlaps', async () => {

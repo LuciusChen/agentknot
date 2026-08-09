@@ -11,7 +11,13 @@ import {
   assertTextLimit,
   limitErrorDetails,
   limitEventData,
+  utf8Bytes,
 } from './record-limits.js';
+import {
+  MAX_QUALITY_REVIEW_PATCH_BYTES,
+  buildQualityReviewPrompt,
+  parseQualityReview,
+} from './quality-review.js';
 import {
   buildPlannerPrompt,
   composeDelegationPlan,
@@ -28,6 +34,7 @@ import type {
   OrchestrationEventType,
   OrchestrationRecord,
   OrchestrationRequest,
+  OrchestrationQualityReview,
   OrchestrationStore,
   PlannedSubtask,
   StartOrchestrationResult,
@@ -202,6 +209,19 @@ export class OrchestrationService {
         if (job.error) child.error = structuredClone(job.error);
         else delete child.error;
       }
+      if (record.qualityReview?.status === 'pending') {
+        record.qualityReview = {
+          status: 'unavailable',
+          route: record.qualityReview.route,
+          childJobId: record.qualityReview.childJobId,
+          reviewerJobId: record.qualityReview.reviewerJobId,
+          reason: 'runtime-restart',
+        };
+        await this.#appendEvent(record, 'orchestration.review.unavailable', {
+          reviewerJobId: record.qualityReview.reviewerJobId,
+          reason: record.qualityReview.reason,
+        });
+      }
       await this.#appendEvent(
         record,
         'orchestration.failed',
@@ -309,6 +329,9 @@ export class OrchestrationService {
     throwIfAborted(signal);
 
     if (!plan.willDispatch || plan.subtasks.length === 0) {
+      if (record.policy.qualityReview !== undefined) {
+        await this.#skipQualityReview(record, 'not-delegated');
+      }
       record.status = 'succeeded';
       record.completedAt = this.#now().toISOString();
       record.result = {
@@ -337,10 +360,14 @@ export class OrchestrationService {
     await this.#dispatch(record, plan.subtasks, dispatchConcurrency, signal);
     throwIfAborted(signal);
 
+    const artifactReview = await this.#reviewChildArtifacts(record.children);
+    await this.#runQualityReview(record, signal);
+    throwIfAborted(signal);
+
     record.result = {
       action: 'delegated',
       children: structuredClone(record.children),
-      artifactReview: await this.#reviewChildArtifacts(record.children),
+      artifactReview,
     };
     const failedChildren = record.children.filter((child) => child.status !== 'succeeded');
     record.completedAt = this.#now().toISOString();
@@ -432,6 +459,224 @@ export class OrchestrationService {
       conflicts,
       unavailable,
     };
+  }
+
+  async #skipQualityReview(
+    record: OrchestrationRecord,
+    reason: Extract<OrchestrationQualityReview, { status: 'skipped' }>['reason']
+  ): Promise<void> {
+    const route = record.policy.qualityReview?.route;
+    if (route === undefined) return;
+    record.qualityReview = { status: 'skipped', route, reason };
+    await this.#appendEvent(record, 'orchestration.review.skipped', { route, reason });
+  }
+
+  async #unavailableQualityReview(
+    record: OrchestrationRecord,
+    value: Omit<Extract<OrchestrationQualityReview, { status: 'unavailable' }>, 'status'>
+  ): Promise<void> {
+    record.qualityReview = { status: 'unavailable', ...value };
+    await this.#appendEvent(record, 'orchestration.review.unavailable', {
+      route: value.route,
+      reason: value.reason,
+      ...(value.childJobId === undefined ? {} : { childJobId: value.childJobId }),
+      ...(value.reviewerJobId === undefined ? {} : { reviewerJobId: value.reviewerJobId }),
+      ...(value.error === undefined ? {} : { error: value.error }),
+    });
+  }
+
+  async #runQualityReview(record: OrchestrationRecord, signal: AbortSignal): Promise<void> {
+    const config = record.policy.qualityReview;
+    const plan = record.plan;
+    if (config === undefined || plan === undefined) return;
+    if (!config.complexities.includes(plan.assessment.complexity)) {
+      await this.#skipQualityReview(record, 'complexity-not-selected');
+      return;
+    }
+    if (record.children.length !== 1 || plan.subtasks.length !== 1) {
+      await this.#skipQualityReview(record, 'child-count-not-one');
+      return;
+    }
+    const child = record.children[0]!;
+    const subtask = plan.subtasks[0]!;
+    if (child.status !== 'succeeded') {
+      await this.#skipQualityReview(record, 'child-not-succeeded');
+      return;
+    }
+    const childJob = await this.#jobs.get(child.jobId);
+    if (!childJob || childJob.status !== 'succeeded' || !childJob.result) {
+      await this.#skipQualityReview(record, 'child-job-unavailable');
+      return;
+    }
+    const verification = await this.#jobs.verifyArtifacts(child.jobId);
+    if (!verification || verification.artifacts.length !== 1) {
+      await this.#skipQualityReview(record, 'artifact-count-not-one');
+      return;
+    }
+    const verified = verification.artifacts[0]!;
+    if (!verification.valid || !verified.valid) {
+      await this.#skipQualityReview(record, 'artifact-invalid');
+      return;
+    }
+    if (verified.artifact.size === 0) {
+      await this.#skipQualityReview(record, 'artifact-empty');
+      return;
+    }
+    if (verified.artifact.size > MAX_QUALITY_REVIEW_PATCH_BYTES) {
+      await this.#skipQualityReview(record, 'artifact-too-large');
+      return;
+    }
+    const preview = await this.#jobs.previewArtifact(child.jobId, verified.artifact.attempt);
+    if (!preview || !preview.verification.valid || preview.content === null) {
+      await this.#skipQualityReview(record, 'artifact-invalid');
+      return;
+    }
+    if (preview.truncated) {
+      await this.#skipQualityReview(record, 'artifact-truncated');
+      return;
+    }
+    if (preview.content.trim() === '') {
+      await this.#skipQualityReview(record, 'artifact-empty');
+      return;
+    }
+    const prompt = buildQualityReviewPrompt({
+      parentGoal: record.request.prompt,
+      subtask,
+      childJob,
+      preview,
+    });
+    if (utf8Bytes(prompt) > MAX_PROMPT_BYTES) {
+      await this.#skipQualityReview(record, 'handoff-too-large');
+      return;
+    }
+
+    let releaseSlot: () => void;
+    try {
+      releaseSlot = await this.#dispatchSlots.acquire(signal);
+    } catch (error) {
+      if (!signal.aborted) throw error;
+      await this.#unavailableQualityReview(record, {
+        route: config.route,
+        childJobId: child.jobId,
+        reason: 'parent-cancelled',
+      });
+      throwIfAborted(signal);
+      return;
+    }
+    let started: Awaited<ReturnType<Orchestrator['start']>>;
+    try {
+      started = await this.#jobs.start({
+        prompt,
+        workspace: record.request.workspace,
+        route: config.route,
+        ...(record.request.source === undefined ? {} : { source: record.request.source }),
+        metadata: {
+          ...(record.request.metadata ?? {}),
+          agentknotDelegation: {
+            orchestrationId: record.id,
+            role: 'reviewer',
+            depth: 1,
+            childJobId: child.jobId,
+            planHash: plan.planHash,
+            policyVersion: plan.policyVersion,
+          } satisfies AgentKnotDelegationMetadata,
+        },
+      });
+    } catch (error) {
+      releaseSlot();
+      if (error instanceof JobPersistenceError) throw error;
+      await this.#unavailableQualityReview(record, {
+        route: config.route,
+        childJobId: child.jobId,
+        reason: 'reviewer-start-failed',
+        error: errorDetails(error),
+      });
+      return;
+    }
+
+    record.qualityReview = {
+      status: 'pending',
+      route: config.route,
+      childJobId: child.jobId,
+      reviewerJobId: started.job.id,
+    };
+    try {
+      await this.#appendEvent(record, 'orchestration.review.started', {
+        route: config.route,
+        childJobId: child.jobId,
+        reviewerJobId: started.job.id,
+      });
+    } catch (error) {
+      delete record.qualityReview;
+      started.cancel();
+      await started.completion;
+      releaseSlot();
+      throw error;
+    }
+
+    let reviewerJob: JobRecord;
+    try {
+      reviewerJob = await this.#awaitJob(started, signal);
+    } finally {
+      releaseSlot();
+    }
+    if (signal.aborted) {
+      await this.#unavailableQualityReview(record, {
+        route: config.route,
+        childJobId: child.jobId,
+        reviewerJobId: reviewerJob.id,
+        reason: 'parent-cancelled',
+      });
+      throwIfAborted(signal);
+    }
+    if (reviewerJob.status !== 'succeeded' || !reviewerJob.result) {
+      await this.#unavailableQualityReview(record, {
+        route: config.route,
+        childJobId: child.jobId,
+        reviewerJobId: reviewerJob.id,
+        reason: 'reviewer-failed',
+        ...(reviewerJob.error === undefined
+          ? {}
+          : { error: { name: reviewerJob.error.name, message: reviewerJob.error.message } }),
+      });
+      return;
+    }
+    if (reviewerJob.result.outputTruncation !== undefined) {
+      await this.#unavailableQualityReview(record, {
+        route: config.route,
+        childJobId: child.jobId,
+        reviewerJobId: reviewerJob.id,
+        reason: 'reviewer-output-truncated',
+      });
+      return;
+    }
+    try {
+      const review = parseQualityReview(reviewerJob.result.output);
+      record.qualityReview = {
+        status: 'completed',
+        route: config.route,
+        childJobId: child.jobId,
+        reviewerJobId: reviewerJob.id,
+        verdict: review.verdict,
+        summary: review.summary,
+        findings: review.findings,
+      };
+      await this.#appendEvent(record, 'orchestration.review.completed', {
+        route: config.route,
+        childJobId: child.jobId,
+        reviewerJobId: reviewerJob.id,
+        verdict: review.verdict,
+        findingCount: review.findings.length,
+      });
+    } catch (error) {
+      await this.#unavailableQualityReview(record, {
+        route: config.route,
+        childJobId: child.jobId,
+        reviewerJobId: reviewerJob.id,
+        reason: 'reviewer-output-invalid',
+        error: errorDetails(error),
+      });
+    }
   }
 
   async #plan(record: OrchestrationRecord, signal: AbortSignal): Promise<DelegationPlan> {

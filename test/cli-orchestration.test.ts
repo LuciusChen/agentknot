@@ -95,14 +95,14 @@ async function createDelegatedFixture(): Promise<CliFixture> {
     recommendation: 'delegate',
     complexity: 'low',
     parallelizable: false,
-    taskKinds: ['test-gap-analysis'],
-    reasoning: 'One bounded test-gap audit is useful downstream.',
+    taskKinds: ['documentation'],
+    reasoning: 'One bounded repository deliverable is useful downstream.',
     subtasks: [
       {
-        title: 'Audit one test gap',
-        kind: 'test-gap-analysis',
-        prompt: 'Report the bounded test gap without editing files.',
-        acceptanceCriteria: ['The gap is reported'],
+        title: 'Write reviewed fixture',
+        kind: 'documentation',
+        prompt: 'Create reviewed.txt with the reviewed fixture text.',
+        acceptanceCriteria: ['reviewed.txt contains the reviewed fixture text'],
       },
     ],
   });
@@ -122,22 +122,31 @@ async function createDelegatedFixture(): Promise<CliFixture> {
             noSession: true,
             environment: {
               FAKE_PI_PLANNER_OUTPUT: plannerOutput,
-              FAKE_PI_COMPLETION_OUTPUT: 'Delegated audit found one bounded gap.',
+              FAKE_PI_COMPLETION_OUTPUT: 'Delegated worker created reviewed.txt.',
+              FAKE_PI_REVIEW_OUTPUT: JSON.stringify({
+                schemaVersion: 1,
+                verdict: 'accept',
+                summary: 'The patch matches the bounded acceptance criterion.',
+                findings: [],
+              }),
+              FAKE_PI_WRITE_REVIEWED_FILE: 'true',
             },
           },
         },
         routes: {
           planner: { worker: 'pi', provider: 'test', model: 'planner' },
           worker: { worker: 'pi', provider: 'test', model: 'worker' },
+          reviewer: { worker: 'pi', provider: 'test', model: 'reviewer', maxAttempts: 1 },
         },
         delegation: {
           mode: 'auto',
           planner: { route: 'planner' },
           dispatch: { defaultRoute: 'worker', maxChildren: 1, maxConcurrency: 1, maxDepth: 1 },
           policy: {
-            delegate: ['test-gap-analysis'],
+            delegate: ['documentation'],
             keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
           },
+          qualityReview: { route: 'reviewer', complexities: ['low'] },
         },
       },
       null,
@@ -274,7 +283,7 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
     fixture.configPath,
     'orchestrate',
     '--prompt',
-    'Audit one bounded test gap.',
+    'Create one bounded reviewed fixture.',
     '--workspace',
     fixture.workspace,
     '--source',
@@ -291,6 +300,7 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
       attempts: Array<{ attempt: number; size: number; valid: boolean; issues: string[] }>;
     }>;
     result: { action: string; artifactReview: { status: string } };
+    qualityReview: { status: string; route: string; verdict?: string; reviewerJobId?: string };
   };
 
   assert.equal(handoff.plan.decision, 'delegate');
@@ -298,16 +308,20 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
   assert.equal(handoff.plan.assessment.complexity, 'low');
   assert.equal(handoff.children.length, 1);
   assert.equal(handoff.children[0]?.status, 'succeeded');
-  assert.equal(handoff.children[0]?.output, 'Delegated audit found one bounded gap.');
+  assert.equal(handoff.children[0]?.output, 'Delegated worker created reviewed.txt.');
   assert.equal(handoff.artifacts.length, 1);
   assert.equal(handoff.artifacts[0]?.jobId, handoff.children[0]?.jobId);
   assert.equal(handoff.artifacts[0]?.status, 'verified');
   assert.equal(handoff.artifacts[0]?.valid, true);
   assert.equal(handoff.artifacts[0]?.attempts.length, 1);
   assert.equal(handoff.artifacts[0]?.attempts[0]?.attempt, 1);
-  assert.equal(handoff.artifacts[0]?.attempts[0]?.size, 0);
+  assert.equal(Number(handoff.artifacts[0]?.attempts[0]?.size) > 0, true);
   assert.equal(handoff.artifacts[0]?.attempts[0]?.valid, true);
   assert.deepEqual(handoff.artifacts[0]?.attempts[0]?.issues, []);
+  assert.equal(handoff.qualityReview.status, 'completed');
+  assert.equal(handoff.qualityReview.route, 'reviewer');
+  assert.equal(handoff.qualityReview.verdict, 'accept');
+  assert.equal(handoff.qualityReview.reviewerJobId?.startsWith('job_'), true);
   assert.equal(handoff.result.action, 'delegated');
   assert.equal(handoff.result.artifactReview.status, 'checked');
 });

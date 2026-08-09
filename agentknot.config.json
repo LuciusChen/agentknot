@@ -21,6 +21,16 @@
         "--no-skills"
       ],
       "noSession": true
+    },
+    "bounded-review": {
+      "adapter": "pi-rpc",
+      "command": "pi",
+      "commandArgs": [
+        "--no-skills",
+        "--no-tools",
+        "--no-context-files"
+      ],
+      "noSession": true
     }
   },
   "routes": {
@@ -40,6 +50,17 @@
         "OPENCODE_API_KEY"
       ],
       "maxAttempts": 2,
+      "timeoutMs": 3600000
+    },
+    "quality-review": {
+      "worker": "bounded-review",
+      "provider": "opencode-go",
+      "model": "gpt-5.6-luna",
+      "thinkingLevel": "max",
+      "requiredEnv": [
+        "OPENCODE_API_KEY"
+      ],
+      "maxAttempts": 1,
       "timeoutMs": 3600000
     },
     "deepseek-flash": {
@@ -90,6 +111,12 @@
         "artifact-integration",
         "commit",
         "push"
+      ]
+    },
+    "qualityReview": {
+      "route": "quality-review",
+      "complexities": [
+        "low"
       ]
     },
     "fallback": "upstream"

@@ -1,4 +1,12 @@
-import type { OrchestrationRecord, RouteSelectionEvidence } from './orchestration-types.js';
+import {
+  QUALITY_REVIEW_FINDING_SEVERITIES,
+  QUALITY_REVIEW_SKIPPED_REASONS,
+  QUALITY_REVIEW_UNAVAILABLE_REASONS,
+  QUALITY_REVIEW_VERDICTS,
+  type OrchestrationQualityReview,
+  type OrchestrationRecord,
+  type RouteSelectionEvidence,
+} from './orchestration-types.js';
 import type { JobRecord } from './types.js';
 
 export interface UsageTokenTotals {
@@ -75,6 +83,54 @@ export type RouteSelectionUsage =
       reason: 'no-classified-route-selections';
     });
 
+export interface QualityReviewReasonCount {
+  status: 'skipped' | 'unavailable';
+  reason: string;
+  count: number;
+}
+
+export interface QualityReviewRouteCount {
+  route: string;
+  count: number;
+}
+
+interface QualityReviewUsageBase {
+  configuredOrchestrations: number;
+  classifiedReviews: number;
+  unclassifiedReviews: number;
+  outcomes: {
+    completed: number;
+    skipped: number;
+    unavailable: number;
+  };
+  verdicts: {
+    accept: number;
+    changesRequested: number;
+    uncertain: number;
+  };
+  findingSeverities: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+  reviewerRoutes: QualityReviewRouteCount[];
+  reasons: QualityReviewReasonCount[];
+  controllerDisposition: {
+    status: 'unavailable';
+    reason: 'controller-review-disposition-not-persisted';
+  };
+}
+
+export type QualityReviewUsage =
+  | (QualityReviewUsageBase & {
+      status: 'available';
+      coverage: 'complete' | 'partial';
+    })
+  | (QualityReviewUsageBase & {
+      status: 'unavailable';
+      reason: 'no-configured-quality-reviews' | 'no-classified-quality-reviews';
+    });
+
 export interface UsageReport {
   schemaVersion: 1;
   scope: {
@@ -87,6 +143,7 @@ export interface UsageReport {
   };
   downstream: DownstreamUsage;
   routeSelection: RouteSelectionUsage;
+  qualityReview: QualityReviewUsage;
   upstream: {
     status: 'unavailable';
     reason: 'controller-usage-not-persisted';
@@ -358,12 +415,150 @@ function routeSelectionUsage(orchestrations: readonly OrchestrationRecord[]): {
   };
 }
 
+type ClassifiedQualityReview = Exclude<OrchestrationQualityReview, { status: 'pending' }>;
+
+function includesString(values: readonly string[], value: unknown): value is string {
+  return typeof value === 'string' && values.includes(value);
+}
+
+function parseQualityReview(record: OrchestrationRecord): ClassifiedQualityReview | undefined {
+  const route = record.policy.qualityReview?.route;
+  const value = record.qualityReview;
+  if (route === undefined || !isRecord(value) || value.route !== route) return undefined;
+  if (
+    value.status === 'skipped' &&
+    includesString(QUALITY_REVIEW_SKIPPED_REASONS, value.reason)
+  ) {
+    return { status: 'skipped', route, reason: value.reason } as ClassifiedQualityReview;
+  }
+  if (
+    value.status === 'unavailable' &&
+    includesString(QUALITY_REVIEW_UNAVAILABLE_REASONS, value.reason)
+  ) {
+    return { status: 'unavailable', route, reason: value.reason } as ClassifiedQualityReview;
+  }
+  if (
+    value.status !== 'completed' ||
+    !includesString(QUALITY_REVIEW_VERDICTS, value.verdict) ||
+    typeof value.childJobId !== 'string' ||
+    value.childJobId.length === 0 ||
+    typeof value.reviewerJobId !== 'string' ||
+    value.reviewerJobId.length === 0 ||
+    typeof value.summary !== 'string' ||
+    value.summary.length === 0 ||
+    !Array.isArray(value.findings) ||
+    value.findings.length > 10
+  ) {
+    return undefined;
+  }
+  const findings = value.findings.flatMap((finding) => {
+    if (
+      !isRecord(finding) ||
+      !includesString(QUALITY_REVIEW_FINDING_SEVERITIES, finding.severity) ||
+      typeof finding.message !== 'string' ||
+      finding.message.length === 0 ||
+      typeof finding.evidence !== 'string' ||
+      finding.evidence.length === 0
+    ) {
+      return [];
+    }
+    return [{ severity: finding.severity, message: finding.message, evidence: finding.evidence }];
+  });
+  if (findings.length !== value.findings.length) return undefined;
+  if (value.verdict === 'changes-requested' && findings.length === 0) return undefined;
+  return {
+    status: 'completed',
+    route,
+    childJobId: value.childJobId,
+    reviewerJobId: value.reviewerJobId,
+    verdict: value.verdict,
+    summary: value.summary,
+    findings,
+  } as ClassifiedQualityReview;
+}
+
+function qualityReviewUsage(orchestrations: readonly OrchestrationRecord[]): QualityReviewUsage {
+  const configured = orchestrations.filter(
+    (record) =>
+      ['succeeded', 'failed', 'cancelled'].includes(record.status) &&
+      record.policy.qualityReview !== undefined
+  );
+  const reviews = configured.flatMap((record) => {
+    const review = parseQualityReview(record);
+    return review === undefined ? [] : [review];
+  });
+  const completed = reviews.filter(
+    (review): review is Extract<ClassifiedQualityReview, { status: 'completed' }> =>
+      review.status === 'completed'
+  );
+  const routeCounts = new Map<string, number>();
+  const reasonCounts = new Map<string, QualityReviewReasonCount>();
+  for (const review of reviews) {
+    routeCounts.set(review.route, (routeCounts.get(review.route) ?? 0) + 1);
+    if (review.status === 'skipped' || review.status === 'unavailable') {
+      const key = `${review.status}\u0000${review.reason}`;
+      const existing = reasonCounts.get(key);
+      if (existing) existing.count += 1;
+      else reasonCounts.set(key, { status: review.status, reason: review.reason, count: 1 });
+    }
+  }
+  const unclassifiedReviews = configured.length - reviews.length;
+  const base: QualityReviewUsageBase = {
+    configuredOrchestrations: configured.length,
+    classifiedReviews: reviews.length,
+    unclassifiedReviews,
+    outcomes: {
+      completed: completed.length,
+      skipped: reviews.filter((review) => review.status === 'skipped').length,
+      unavailable: reviews.filter((review) => review.status === 'unavailable').length,
+    },
+    verdicts: {
+      accept: completed.filter((review) => review.verdict === 'accept').length,
+      changesRequested: completed.filter((review) => review.verdict === 'changes-requested').length,
+      uncertain: completed.filter((review) => review.verdict === 'uncertain').length,
+    },
+    findingSeverities: {
+      low: completed.flatMap((review) => review.findings).filter((finding) => finding.severity === 'low')
+        .length,
+      medium: completed
+        .flatMap((review) => review.findings)
+        .filter((finding) => finding.severity === 'medium').length,
+      high: completed
+        .flatMap((review) => review.findings)
+        .filter((finding) => finding.severity === 'high').length,
+    },
+    reviewerRoutes: [...routeCounts]
+      .map(([route, count]) => ({ route, count }))
+      .sort((left, right) => left.route.localeCompare(right.route)),
+    reasons: [...reasonCounts.values()].sort((left, right) => {
+      if (left.status !== right.status) return left.status.localeCompare(right.status);
+      return left.reason.localeCompare(right.reason);
+    }),
+    controllerDisposition: {
+      status: 'unavailable',
+      reason: 'controller-review-disposition-not-persisted',
+    },
+  };
+  if (configured.length === 0) {
+    return { ...base, status: 'unavailable', reason: 'no-configured-quality-reviews' };
+  }
+  if (reviews.length === 0) {
+    return { ...base, status: 'unavailable', reason: 'no-classified-quality-reviews' };
+  }
+  return {
+    ...base,
+    status: 'available',
+    coverage: unclassifiedReviews === 0 ? 'complete' : 'partial',
+  };
+}
+
 export function buildUsageReport(
   jobs: readonly JobRecord[],
   orchestrations: readonly OrchestrationRecord[]
 ): UsageReport {
   const downstream = downstreamUsage(jobs);
   const routeSelection = routeSelectionUsage(orchestrations);
+  const qualityReview = qualityReviewUsage(orchestrations);
   return {
     schemaVersion: 1,
     scope: {
@@ -376,6 +571,7 @@ export function buildUsageReport(
     },
     downstream: downstream.downstream,
     routeSelection: routeSelection.routeSelection,
+    qualityReview,
     upstream: { status: 'unavailable', reason: 'controller-usage-not-persisted' },
     proportions: { status: 'unavailable', reason: 'controller-usage-not-persisted' },
   };

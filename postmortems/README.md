@@ -147,3 +147,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0033](./0033-controller-timeout-phase-claim.md) | Incident / Experiment | Resolved | Remove the false pre-dispatch claim from hook failures |
 | [0034](./0034-persisted-usage-observability-boundary.md) | Decision | Accepted | Report exact persisted usage without inventing controller telemetry |
 | [0035](./0035-delegation-first-small-repository-deliverables.md) | Decision / Experiment | Accepted | Delegate small repository deliverables before the controller model |
+| [0036](./0036-bounded-advisory-quality-review.md) | Decision / Experiment | Accepted | Bound advisory quality review to supplied evidence |
