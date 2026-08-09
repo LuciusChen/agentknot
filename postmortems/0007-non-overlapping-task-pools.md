@@ -77,6 +77,10 @@ The repository later raised `maxConcurrency` from four to the existing supported
 
 Immediate validation challenged the assumption behind the preceding configuration change, but the first probe used concurrent direct Job calls that bypass the orchestration semaphore and therefore was not a valid scheduler-capacity test. The repository restored `maxConcurrency: 4` because it was the last proven orchestration value. Formal orchestration `orchestration_1f1f6b0d-8637-49b3-b04f-cc608e5e5f23` then started four Luna/max children within 27 ms and all four succeeded. [Incident 0018](./0018-pi-concurrency-startup-ceiling.md) records the probe error and the direct-Job admission boundary.
 
+### 2026-08-09: Re-raise only after exact-route formal soaks
+
+The same six-child read-only workload then succeeded through formal Pi/OpenCode Go/Luna/max orchestration at configured concurrency four, five, and six (`orchestration_b60edde1-22fb-4192-9823-9a5209fb2044`, `orchestration_6cc868ab-04d2-4be7-89a2-d43a79e291ed`, and `orchestration_3c726dc0-72ec-4b70-b628-9c829661b8cf`). At six, all children started within 44 ms and completed on their first attempt with empty artifacts and no retained Pi or managed-worktree residue. The repository dogfood setting is therefore six active slots again. Product defaults remain two, useful task count still bounds actual workers, non-parallel plans still run one child, and this local evidence is not a universal route-capacity guarantee.
+
 ### 2026-08-09: Persist actual child path-overlap evidence
 
 [Decision 0026](./0026-child-artifact-path-overlap-review.md) closes the deferred changed-path gate with additive parent-level review evidence. Exact repeated paths are potential integration conflicts only; semantic analysis, acceptance, and promotion remain outside the execution loop.

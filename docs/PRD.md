@@ -115,7 +115,7 @@ Version 0.0.1 currently implements:
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
 - strict planner assessments followed by deterministic task-kind policy;
 - immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
-- bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with four active slots backed by a current four-child Luna/max orchestration, and a configuration ceiling of six for each with concurrency never exceeding the child count;
+- bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with six active slots backed by current six-child Pi/OpenCode Go/Luna/max orchestration evidence, and a configuration ceiling of six for each with concurrency never exceeding the child count;
 - fail-without-resume startup reconciliation for stale jobs and orchestration records;
 - one execution-owning file runtime per canonical Job/Orchestration storage directory, with a second conforming writer refused before reconciliation or admission and read-only runtimes prevented from executing work;
 - catchable CLI and HTTP shutdown that cancels and awaits admitted work before releasing runtime ownership, plus a bounded process-attributed Stage 1 soak;
