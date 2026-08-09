@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { materializePersistedRecord } from './record-version.js';
+import { serializeBoundedRecord } from './record-limits.js';
 import type { OrchestrationRecord, OrchestrationStore } from './orchestration-types.js';
 
 function cloneRecord(record: OrchestrationRecord): OrchestrationRecord {
@@ -14,11 +15,13 @@ export class MemoryOrchestrationStore implements OrchestrationStore {
 
   async create(record: OrchestrationRecord): Promise<void> {
     if (this.#records.has(record.id)) throw new Error(`Orchestration ${record.id} already exists`);
+    serializeBoundedRecord('Orchestration', record);
     this.#records.set(record.id, cloneRecord(record));
   }
 
   async save(record: OrchestrationRecord): Promise<void> {
     if (!this.#records.has(record.id)) throw new Error(`Orchestration ${record.id} does not exist`);
+    serializeBoundedRecord('Orchestration', record);
     this.#records.set(record.id, cloneRecord(record));
   }
 
@@ -81,7 +84,7 @@ export class FileOrchestrationStore implements OrchestrationStore {
     const versioned = materializePersistedRecord<OrchestrationRecord>('Orchestration', record);
     const target = this.#path(versioned.id);
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(versioned, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await writeFile(temporary, serializeBoundedRecord('Orchestration', versioned), { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, target);
   }
 }

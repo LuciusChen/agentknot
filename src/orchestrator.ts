@@ -11,6 +11,19 @@ import {
 } from './completion-summary.js';
 import { assertJsonMetadata } from './metadata.js';
 import {
+  MAX_CALLBACK_BODY_BYTES,
+  MAX_METADATA_BYTES,
+  MAX_PROMPT_BYTES,
+  MAX_RESULT_OUTPUT_BYTES,
+  MAX_WORKER_EVENTS,
+  assertTextLimit,
+  limitErrorDetails,
+  limitEventData,
+  limitObjectData,
+  limitText,
+  utf8Bytes,
+} from './record-limits.js';
+import {
   WorkspaceIsolationManager,
   workspaceIsolationMode,
   type IsolatedWorkspace,
@@ -80,8 +93,7 @@ export interface OrchestratorOptions {
 }
 
 function errorDetails(error: unknown): { name: string; message: string } {
-  if (error instanceof Error) return { name: error.name, message: error.message };
-  return { name: 'Error', message: String(error) };
+  return limitErrorDetails(error);
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -97,6 +109,7 @@ function normalizeRequest(request: JobRequest): JobRequest {
   if (typeof request.workspace !== 'string' || request.workspace.trim() === '') {
     throw new Error('Job workspace must be a non-empty string');
   }
+  assertTextLimit('Job prompt', request.prompt, MAX_PROMPT_BYTES);
   if (request.callbackUrl !== undefined) {
     const callback = new URL(request.callbackUrl);
     if (callback.protocol !== 'http:' && callback.protocol !== 'https:') {
@@ -579,15 +592,21 @@ export class Orchestrator {
       }
 
       if (failure === undefined && result !== undefined) {
+        const boundedOutput = limitText(result.output, MAX_RESULT_OUTPUT_BYTES);
         job.status = 'succeeded';
         job.completedAt = this.#now().toISOString();
         job.result = {
-          output: result.output,
+          output: boundedOutput.value,
+          ...(boundedOutput.truncation === undefined
+            ? {}
+            : { outputTruncation: boundedOutput.truncation }),
           attempt,
           worker: job.route.worker,
           provider: job.route.provider,
           model: job.route.model,
-          ...(result.metadata === undefined ? {} : { metadata: result.metadata }),
+          ...(result.metadata === undefined
+            ? {}
+            : { metadata: limitObjectData(result.metadata, 'result.metadata', MAX_METADATA_BYTES) }),
         };
         delete job.error;
         job.completionSummary = this.#completionSummary(job, 'succeeded', true, result.completionReport);
@@ -617,6 +636,7 @@ export class Orchestrator {
 
   async #emit(job: JobRecord, type: JobEventType, data?: Record<string, unknown>): Promise<void> {
     const event = await this.#appendEvent(job, type, data);
+    if (!event) return;
     await this.#notifyObserver(job, event);
   }
 
@@ -638,32 +658,43 @@ export class Orchestrator {
     type: JobEventType,
     data?: Record<string, unknown>,
     at = this.#now().toISOString()
-  ): Promise<JobEvent> {
+  ): Promise<JobEvent | undefined> {
     let appended: JobEvent | undefined;
     const previous = this.#recordMutations.get(job.id) ?? Promise.resolve();
     const current = previous.then(async () => {
+      let appendedType = type;
+      let appendedData = data;
+      if (type.startsWith('worker.')) {
+        const workerEventCount = job.events.filter((event) => event.type.startsWith('worker.')).length;
+        if (workerEventCount >= MAX_WORKER_EVENTS) {
+          if (job.events.some((event) => event.type === 'job.worker.events.truncated')) return;
+          appendedType = 'job.worker.events.truncated';
+          appendedData = { maxEvents: MAX_WORKER_EVENTS, firstDroppedEventType: type };
+        }
+      }
       const previousUpdatedAt = job.updatedAt;
-      appended = {
+      const event: JobEvent = {
         sequence: job.events.length + 1,
         jobId: job.id,
         at,
-        type,
-        ...(data === undefined ? {} : { data }),
+        type: appendedType,
+        ...(appendedData === undefined ? {} : { data: limitEventData(appendedData) }),
       };
-      job.events.push(appended);
+      appended = event;
+      job.events.push(event);
       job.updatedAt = at;
       try {
         await this.#store.save(job);
       } catch (error) {
-        if (job.events.at(-1) === appended) job.events.pop();
+        if (job.events.at(-1) === event) job.events.pop();
         job.updatedAt = previousUpdatedAt;
         const phase: JobPersistencePhase =
-          type === 'job.artifact'
+          appendedType === 'job.artifact'
             ? 'artifact'
-            : type === 'job.succeeded' || type === 'job.failed' || type === 'job.cancelled'
+            : appendedType === 'job.succeeded' || appendedType === 'job.failed' || appendedType === 'job.cancelled'
               ? 'terminal'
               : 'event';
-        throw new JobPersistenceError(phase, type, error);
+        throw new JobPersistenceError(phase, appendedType, error);
       }
     });
     this.#recordMutations.set(job.id, current);
@@ -672,16 +703,27 @@ export class Orchestrator {
     } finally {
       if (this.#recordMutations.get(job.id) === current) this.#recordMutations.delete(job.id);
     }
-    return appended as JobEvent;
+    return appended;
   }
 
   async #deliverCallback(job: JobRecord): Promise<void> {
     if (!job.request.callbackUrl) return;
+    const body = JSON.stringify(job);
+    const bodyBytes = utf8Bytes(body);
+    if (bodyBytes > MAX_CALLBACK_BODY_BYTES) {
+      job.callback = {
+        delivered: false,
+        error: `Callback payload is ${bodyBytes} bytes; maximum is ${MAX_CALLBACK_BODY_BYTES} bytes`,
+      };
+      job.updatedAt = this.#now().toISOString();
+      await this.#store.save(job);
+      return;
+    }
     try {
       const response = await this.#fetch(job.request.callbackUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(job),
+        body,
         signal: AbortSignal.timeout(10_000),
       });
       job.callback = { delivered: response.ok, status: response.status };

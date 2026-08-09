@@ -7,6 +7,7 @@ export * from './orchestration.js';
 export * from './orchestration-store.js';
 export * from './orchestration-types.js';
 export * from './orchestrator.js';
+export * from './record-limits.js';
 export * from './runtime.js';
 export * from './runtime-ownership.js';
 export * from './store.js';

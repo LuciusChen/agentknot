@@ -175,6 +175,7 @@ The product remains on course when all of the following are true:
 - automatic delegation is isolated, depth-one, capped, non-recursive, and cannot select configured keep-upstream task kinds;
 - omitted route-selection configuration disables selection; `shadow` and `active` accept strict 1–20 ordered rules over existing routes, first-match/default evidence is plan-hash-covered, shadow never replaces `dispatch.defaultRoute`, and active dispatches the exact selected route while metadata carries task kind, parent complexity, and evidence;
 - every emitted job event is already present in the persisted record;
+- admitted prompts/metadata, persisted worker events/results/errors, complete Job/Orchestration snapshots, and callback bodies stay within the fixed documented UTF-8 budgets, with explicit truncation/replacement/refusal evidence rather than silent route changes;
 - every terminal job is inspectable after the invoking call returns;
 - every newly terminal succeeded, failed, or cancelled Job has a schemaVersion 1 completion summary before its terminal event is persisted or observed, and retries summarize only the terminal attempt;
 - completion summaries distinguish controller-captured artifact paths from worker-reported claims, never infer reports from prose/events/stderr/session statistics, and preserve explicit unavailable reasons; normal Pi runs use only the exact end-marked envelope, with absent or malformed envelopes unable to fail an otherwise successful job;
@@ -202,10 +203,10 @@ These are evidence requirements, not claims that the current MVP has already met
 ## Risks
 
 - Product language such as "durable", "queue", "timeout", "provider-neutral", or "isolation" can imply stronger guarantees than the implementation provides.
-- Raw worker events, prompts, output, and tool results can grow without bound and can contain sensitive content even when API keys are excluded intentionally.
+- Raw worker events, prompts, output, and tool results remain capable of containing sensitive content even though their admitted or persisted representations now have fixed byte/count budgets; size bounds are not redaction.
 - Worker completion reports are claims at the adapter boundary; accepting their strict shape does not verify changed paths, check outcomes, remaining risks, or notes.
 - A custom adapter may ignore cooperative cancellation unless the adapter contract and process supervision enforce termination.
-- Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete job record.
+- Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete bounded job record when its serialized body is no more than 8 MiB.
 - A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk. Shadow suggestions and active configured routing both inherit the limits of the parent complexity and task-kind classification; active mode therefore keeps a conservative Luna default and never adds fallback.
 - Shadow route evidence is not a measured model ranking; separate scorecards must compare routes on the same bounded workloads before any automatic selection is proposed.
 - Process-local task concurrency and file-runtime advisory ownership are not a distributed scheduler, lease, or hostile-writer security boundary.

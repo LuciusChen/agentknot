@@ -124,7 +124,7 @@ In `shadow` mode, `PlannedSubtask.route` remains `dispatch.defaultRoute`; eviden
 
 A `git-patch` artifact is controller-captured Git evidence from one isolated attempt. In addition to its attempt, managed path, size, SHA-256, and recorded base commit, it may expose `changedFiles`, a string array of repository-relative paths derived from Git. Newly captured git-worktree artifacts always include this field, including `[]` when the captured patch is empty. The paths describe repository changes relative to the recorded base; they are not worker claims, semantic verification, or a completion summary, and AgentKnot does not parse worker prose or tool events to populate them. Older persisted artifacts may omit `changedFiles` and remain valid.
 
-Leaf Job and Orchestration admission validate `metadata` recursively as a JSON-compatible object at both TypeScript and HTTP boundaries before persistence. Unsupported values fail before a Job or Orchestration record is admitted, so file and HTTP transports preserve one metadata contract.
+Leaf Job and Orchestration admission validate `metadata` recursively as a JSON-compatible object at both TypeScript and HTTP boundaries before persistence. Unsupported values, nesting beyond 20 levels, or compact JSON above 64 KiB fail before a record is admitted. Job and Orchestration prompts likewise fail admission above 64 KiB of UTF-8. File and HTTP transports therefore preserve one metadata and prompt contract; the HTTP request-body ceiling remains an independent transport limit.
 
 ### `JobCompletionSummary`
 
@@ -146,7 +146,7 @@ interface JobCompletionSummary {
 
 The captured branch copies only `changedFiles` from the artifact whose attempt equals the terminal attempt and carries that artifact's attempt, SHA-256, and base commit; it never calls those paths semantically verified. Direct workspace mode reports `workspace-isolation-disabled`, a missing terminal-attempt artifact reports `artifact-unavailable`, and an artifact without usable path evidence reports `artifact-paths-unavailable`. Earlier retry artifacts remain in `JobRecord.artifacts` and are not summarized as terminal evidence.
 
-`WorkerCompletionReport` is an optional adapter result, not a Job result field. A strict schemaVersion 1 report contains worker-claimed `changedFiles: string[]`, `checksRun` entries with a non-empty `command`, `outcome` of `passed`, `failed`, or `unknown`, and optional string `notes`, plus `remainingRisks: string[]` and `notes: string[]`. At the adapter boundary, `completionReport: undefined` means no report envelope was detected and `completionReport: null` means an envelope was detected but its JSON was malformed or unsupported; a valid value is copied only after strict validation. The orchestrator validates this runtime shape and maps an absent or malformed report to the stable `workerReported` unavailable branch without failing an otherwise successful job. Failed or cancelled Jobs without a retained normal result use `not-retained`. AgentKnot never derives this report from output prose, normalized worker events, stderr, or session statistics. Normal Pi runs can emit the report through the exact marked suffix described below; live probes and doctor do not. Deterministic coverage and a real Pi/OpenCode Go/Luna/max dogfood emission satisfy the Stage 1 evidence gate.
+`WorkerCompletionReport` is an optional adapter result, not a Job result field. A strict schemaVersion 1 report contains worker-claimed `changedFiles: string[]`, `checksRun` entries with a non-empty `command`, `outcome` of `passed`, `failed`, or `unknown`, and optional string `notes`, plus `remainingRisks: string[]` and `notes: string[]`. At the adapter boundary, `completionReport: undefined` means no report envelope was detected and `completionReport: null` means an envelope was detected but its JSON was malformed or unsupported; a valid value is copied only after strict validation and a 256 KiB compact-JSON ceiling. The orchestrator maps an absent, malformed, or oversized report to the stable unavailable branch without failing an otherwise successful job. Failed or cancelled Jobs without a retained normal result use `not-retained`. AgentKnot never derives this report from output prose, normalized worker events, stderr, or session statistics. Normal Pi runs can emit the report through the exact marked suffix described below; live probes and doctor do not. Deterministic coverage and a real Pi/OpenCode Go/Luna/max dogfood emission satisfy the Stage 1 evidence gate.
 
 ### `ResolvedRoute`
 
@@ -230,6 +230,8 @@ Leaf admission uses one `create` containing status `queued` and sequence-one `jo
 
 Every newly created leaf `JobRecord` has top-level `schemaVersion: 1`. When reading a file, `FileJobStore` treats an absent `schemaVersion` as legacy v1 and materializes `schemaVersion: 1` on the in-memory record returned by `get` or `list`; read-only access does not rewrite the snapshot. An explicit `schemaVersion` other than `1` fails with an unsupported-version error rather than defaulting to v1.
 
+Both Job stores enforce the same 16 MiB ceiling on the exact pretty-printed UTF-8 JSON snapshot they would retain. A rejected create leaves no record; a rejected save leaves the last successful snapshot authoritative. Legacy files remain readable above the current ceiling, but a later mutation must fit. This is a write bound, not compaction or retention.
+
 Current persistence does not provide:
 
 - `fsync` durability guarantees;
@@ -237,7 +239,7 @@ Current persistence does not provide:
 - multi-process locking or compare-and-swap updates;
 - schema migration;
 - restartable or resumable execution;
-- retention, compaction, or record-size limits.
+- retention or compaction.
 
 At execution-owning runtime startup, both storage locks are acquired before records are inspected. Therefore every prior `queued` or `running` Job belongs to an execution owner that no longer holds the storage and is marked failed exactly once with `ExecutionInterruptedError` and `reason: runtime_restart`; it is never replayed and observers/callbacks are not invoked. A nonterminal Orchestration is handled the same way without redispatching its persisted plan, after its embedded child outcomes are refreshed from authoritative leaf Job records. Recorded PID is audit evidence, not startup takeover authority, so PID reuse and namespace visibility do not suppress or authorize mutation in the supported path. Read-only runtimes skip reconciliation and cannot invoke execution/reconciliation methods. This is deterministic fail-without-resume reconciliation, not resumable execution; crash-left worker descendants and managed worktrees remain limitations.
 
@@ -246,6 +248,8 @@ At execution-owning runtime startup, both storage locks are acquired before reco
 `MemoryOrchestrationStore` and `FileOrchestrationStore` are separate from leaf job storage. The file store uses the same mode-`0600` unique-temporary-write-and-rename snapshot model. Every parent record captures the normalized request, immutable effective delegation policy, executor identity, strict assessment and plan, plan hash, exact child prompts and routes, route-selection evidence when configured, planner/child job IDs, ordered orchestration events, child outcomes, and terminal result or error. Every child record, child-start event, and child Job provenance carries the admitting plan hash and policy version.
 
 Every newly created parent `OrchestrationRecord` has top-level `schemaVersion: 1`. `FileOrchestrationStore` applies the same legacy-v1 materialization and read-only byte-stability rule, and explicitly unsupported schema versions fail clearly rather than being treated as v1.
+
+Memory and file Orchestration stores enforce the same 16 MiB exact-snapshot ceiling as the Job stores. Child output duplicated into parent provenance is therefore bounded by both the leaf output limit and the final parent snapshot limit.
 
 The stores assume one execution owner, enforced for conforming file runtimes at `createRuntime()` rather than inside each store call. They provide no compare-and-swap, journal, schema migration, resume, distributed concurrency, or parent/child transaction spanning multiple snapshot files.
 
@@ -303,6 +307,7 @@ When `callbackUrl` is supplied, AgentKnot currently:
 - makes one HTTP POST after terminal execution;
 - sends the complete job snapshot as JSON;
 - waits at most ten seconds for the request;
+- refuses to make the request when the compact JSON body exceeds 8 MiB and records the measured-size error as undelivered;
 - records delivery boolean, HTTP status, or error;
 - does not sign, authenticate, retry, deduplicate, or allowlist the request;
 - never converts a succeeded job to failed because callback delivery failed.
@@ -349,6 +354,7 @@ Current lifecycle event types are:
 - `job.cancelled`
 - `job.artifact`
 - `job.observer.failed`
+- `job.worker.events.truncated`
 
 Current normalized worker event types are:
 
@@ -362,13 +368,15 @@ Current normalized worker event types are:
 - `worker.raw`
 - `worker.stderr`
 
-Core consumers may depend on the normalized event name, job ID, sequence, timestamp, and JSON-compatible data. They must not depend on an undocumented Pi RPC payload hidden inside `worker.raw`.
+Core consumers may depend on the normalized event name, job ID, sequence, timestamp, and JSON-compatible data. They must not depend on an undocumented Pi RPC payload hidden inside `worker.raw`. Event `data` is limited to 16 KiB of stored JSON; an oversized or non-serializable object is replaced by `agentknotRecordLimit` evidence. Each Job retains at most 512 `worker.*` events. The first excess event is represented by one persisted `job.worker.events.truncated` carrying the cap and first dropped type; later worker events are neither persisted nor sent to the live observer. Lifecycle events are not counted, so terminal state can still be recorded after a worker-event flood.
 
 ### Pi normal-run record-volume boundary
 
 For normal `PiRpcWorkerAdapter.run` executions only, exactly four Pi lifecycle envelope types are recognized as known bookkeeping frames: `turn_start`, `turn_end`, `message_start`, and `message_end`. The adapter does not emit `worker.raw` for those frames, but every received Pi frame still increments `metadata.rawEventCount`, including the four known envelopes; unknown event types continue to emit `worker.raw`. Normalized text, tool, and retry events, final output, completion-report behavior, live-probe behavior, route/provider/model/thinking configuration, and the global event-type list are unchanged. This is a bounded record-volume filter, not a Pi-token-saving claim or general truncation; it adds no schema migration or plugin installation and does not change configuration or probes.
 
-`worker.raw`, text deltas, prompts, tool data, and result output are currently stored without a global size or retention policy. They may contain sensitive user or repository content. No document may imply automatic redaction until that feature exists and is verified.
+Terminal `result.output` retains at most a 1 MiB valid UTF-8 prefix. If shortened, `result.outputTruncation` records the original and maximum byte counts. Result metadata is limited to 64 KiB of stored object JSON and is replaced with structured evidence if oversized or non-serializable. Error names are limited to 256 bytes and messages to 16 KiB, with an inline original-byte notice when truncated. The supported Pi adapter retains the last 4,096 stderr characters before the global event-data and event-count limits apply.
+
+These record budgets do not limit worker compute, upstream provider token use, patch artifact bytes, or retention duration. Prompts, retained model output, stderr, tool data, metadata, and patches may contain sensitive user or repository content. No document may imply automatic redaction until that separate feature exists and is verified ([decision 0023](../postmortems/0023-fixed-durable-record-budgets.md)).
 
 Pi RPC is strict LF-delimited JSONL. Its adapter decodes streaming UTF-8 explicitly and does not assume that process chunks align with JSON messages or use Node `readline` behavior as its protocol definition. Each non-empty line must parse as a JSON object; malformed input reports line context. Process exit before `agent_settled` is an error, with `agent_end`-without-settlement distinguished from exit before `agent_end`.
 
@@ -432,8 +440,8 @@ There is no authentication, authorization, TLS termination, CORS policy, rate li
 - Prompts, model output, stderr, tool arguments/results, patches, and controller metadata may themselves contain secrets.
 - A worker has the operating-system permissions of its process.
 - Worktree isolation is not a filesystem, process, credential, or network sandbox.
-- Callback URLs can cause outbound requests from the AgentKnot host and receive the full job snapshot.
-- The current system has no retention or automatic redaction policy.
+- Callback URLs can cause outbound requests from the AgentKnot host and receive the complete job snapshot when its compact JSON is no more than 8 MiB.
+- The current system has fixed record-size budgets but no retention or automatic redaction policy.
 
 ## Capability evolution
 

@@ -6,6 +6,12 @@ import type { DelegationConfig } from './config.js';
 import { isExecutorProcessAlive } from './execution.js';
 import { assertJsonMetadata } from './metadata.js';
 import {
+  MAX_PROMPT_BYTES,
+  assertTextLimit,
+  limitErrorDetails,
+  limitEventData,
+} from './record-limits.js';
+import {
   buildPlannerPrompt,
   composeDelegationPlan,
   parseTaskAssessment,
@@ -96,8 +102,7 @@ class Semaphore {
 }
 
 function errorDetails(error: unknown): { name: string; message: string } {
-  if (error instanceof Error) return { name: error.name, message: error.message };
-  return { name: 'Error', message: String(error) };
+  return limitErrorDetails(error);
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -112,6 +117,7 @@ function normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
   if (typeof request.workspace !== 'string' || request.workspace.trim() === '') {
     throw new Error('Orchestration workspace must be a non-empty string');
   }
+  assertTextLimit('Orchestration prompt', request.prompt, MAX_PROMPT_BYTES);
   if (
     request.delegation !== undefined &&
     !['inherit', 'never', 'suggest', 'force'].includes(request.delegation)
@@ -557,14 +563,15 @@ export class OrchestrationService {
     let appended: OrchestrationEvent | undefined;
     const previous = this.#recordMutations.get(record.id) ?? Promise.resolve();
     const current = previous.then(async () => {
-      appended = {
+      const event: OrchestrationEvent = {
         sequence: record.events.length + 1,
         orchestrationId: record.id,
         at,
         type,
-        ...(data === undefined ? {} : { data }),
+        ...(data === undefined ? {} : { data: limitEventData(data) }),
       };
-      record.events.push(appended);
+      appended = event;
+      record.events.push(event);
       record.updatedAt = at;
       await this.#store.save(record);
     });

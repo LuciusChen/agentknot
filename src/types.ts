@@ -110,6 +110,11 @@ export interface ResolvedRoute {
 
 export interface JobResult {
   output: string;
+  /** Present when AgentKnot retained only the bounded UTF-8 prefix of worker output. */
+  outputTruncation?: {
+    originalBytes: number;
+    maxBytes: number;
+  };
   attempt: number;
   worker: string;
   provider: string;
@@ -133,6 +138,7 @@ export type JobEventType =
   | 'job.cancelled'
   | 'job.artifact'
   | 'job.observer.failed'
+  | 'job.worker.events.truncated'
   | 'worker.started'
   | 'worker.text.delta'
   | 'worker.tool.started'

@@ -679,7 +679,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
 
     const stderrTask = (async () => {
       for await (const chunk of child.stderr) {
-        stderr = `${stderr}${Buffer.from(chunk).toString('utf8')}`.slice(-16_384);
+        stderr = `${stderr}${Buffer.from(chunk).toString('utf8')}`.slice(-4_096);
       }
     })().catch((error: unknown) => {
       rejectSettled(error instanceof Error ? error : new Error(String(error)));
@@ -892,7 +892,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     const stderrTask = (async () => {
       for await (const chunk of child.stderr) {
         const text = Buffer.from(chunk).toString('utf8');
-        stderr = `${stderr}${text}`.slice(-16_384);
+        stderr = `${stderr}${text}`.slice(-4_096);
         await emit('worker.stderr', { text });
       }
     })().catch((error: unknown) => {

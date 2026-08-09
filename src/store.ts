@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { materializePersistedRecord } from './record-version.js';
+import { serializeBoundedRecord } from './record-limits.js';
 import type { JobRecord, JobStore } from './types.js';
 
 function cloneJob(job: JobRecord): JobRecord {
@@ -14,11 +15,13 @@ export class MemoryJobStore implements JobStore {
 
   async create(job: JobRecord): Promise<void> {
     if (this.#jobs.has(job.id)) throw new Error(`Job ${job.id} already exists`);
+    serializeBoundedRecord('Job', job);
     this.#jobs.set(job.id, cloneJob(job));
   }
 
   async save(job: JobRecord): Promise<void> {
     if (!this.#jobs.has(job.id)) throw new Error(`Job ${job.id} does not exist`);
+    serializeBoundedRecord('Job', job);
     this.#jobs.set(job.id, cloneJob(job));
   }
 
@@ -81,7 +84,7 @@ export class FileJobStore implements JobStore {
     const versioned = materializePersistedRecord<JobRecord>('Job', job);
     const target = this.#path(versioned.id);
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(versioned, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await writeFile(temporary, serializeBoundedRecord('Job', versioned), { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, target);
   }
 }

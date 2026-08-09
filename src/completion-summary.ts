@@ -5,6 +5,7 @@ import type {
   WorkerCompletionCheck,
   WorkerCompletionReport,
 } from './types.js';
+import { MAX_WORKER_COMPLETION_REPORT_BYTES, utf8Bytes } from './record-limits.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -83,13 +84,15 @@ export function validateWorkerCompletionReport(
     });
   }
 
-  return {
+  const report: WorkerCompletionReport = {
     schemaVersion: 1,
     changedFiles: [...value.changedFiles],
     checksRun,
     remainingRisks: [...value.remainingRisks],
     notes: [...value.notes],
   };
+  if (utf8Bytes(JSON.stringify(report)) > MAX_WORKER_COMPLETION_REPORT_BYTES) return undefined;
+  return report;
 }
 
 export function workerReportedSummary(

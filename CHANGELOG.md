@@ -24,6 +24,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Sanitized Pi `get_session_stats` metadata for successful normal jobs, including message/tool counts, token totals, cost, and optional context usage; unavailable statistics remain advisory.
 - Product requirements, technical specification, evidence-gated roadmap, and decision/postmortem records.
 - File-runtime single-writer ownership: execution-owning `createRuntime()` calls acquire non-blocking advisory locks on both canonical storage directories, reject a second owner before reconciliation or admission, and expose `RuntimeOwnershipError` plus explicit `AgentKnotRuntime.close()` lifecycle ([decision 0022](postmortems/0022-file-runtime-single-writer-ownership.md)).
+- Fixed controller-neutral durable-record budgets and public constants: 64 KiB prompts/metadata, depth-20 metadata, 16 KiB event data, 512 worker events, 1 MiB terminal output, 256 KiB worker reports, bounded errors, 16 MiB Job/Orchestration snapshots, and 8 MiB callback bodies. Oversized retained data carries explicit replacement/truncation/refusal evidence ([decision 0023](postmortems/0023-fixed-durable-record-budgets.md)).
 
 ### Changed
 
@@ -42,6 +43,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Shadow route-selection regression coverage now verifies that child-start events and reloaded child Jobs retain the actual default route, and that suggest mode retains shadow evidence without dispatching children.
 - Active route-selection coverage verifies that a human-configured match becomes the persisted plan route, child-start route, resolved Job route, and public metadata evidence; unmatched work remains on `dispatch.defaultRoute`.
 - `createRuntime({ reconcileOnStartup: false })` is now an enforced read-only runtime; execution and reconciliation methods refuse calls. After an execution owner acquires both storage locks, startup reconciliation fails every prior nonterminal snapshot once without consulting its PID, avoiding PID namespace and reuse ambiguity. One-shot CLI commands release ownership after completion, server crashes release kernel locks, and `runtime.close()` refuses while work is active.
+- Worker-event floods retain at most 512 normalized worker events per Job; one `job.worker.events.truncated` event records the first overflow and further worker events are not persisted or observed. Oversized event data and result metadata are replaced with structured limit evidence, terminal output is UTF-8-safely truncated with `outputTruncation`, and Pi retains a 4,096-character stderr tail before normalization.
 
 ### Fixed
 
