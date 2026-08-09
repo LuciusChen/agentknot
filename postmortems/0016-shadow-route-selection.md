@@ -115,3 +115,7 @@ The slice adds task kind, parent assessment complexity, route names, and policy 
 ### 2026-08-09: Explicit DeepSeek candidate
 
 [Experiment 0017](./0017-deepseek-flash-route-ab.md) later admitted DeepSeek V4 Flash/max as an explicit experimental leaf route after a live probe and one mixed same-task A/B. This does not supersede the shadow-only decision: Luna/max remains formal orchestration dispatch, no shadow rule selects DeepSeek, and automatic ranking, switching, and fallback remain deferred.
+
+### 2026-08-09: Human-authored active policy
+
+[Decision 0020](./0020-human-authored-active-route-selection.md) supersedes only the shadow-only execution boundary after an explicit user product decision. Shadow mode remains supported. A new active mode reuses the same bounded validated rules, but makes a human-configured match authoritative before child admission. It does not infer a model ranking, give the planner route authority, or add fallback.

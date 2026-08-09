@@ -75,7 +75,18 @@
       "defaultRoute": "luna",
       "maxChildren": 6,
       "maxDepth": 1,
-      "maxConcurrency": 4
+      "maxConcurrency": 4,
+      "routeSelection": {
+        "mode": "active",
+        "rules": [
+          {
+            "route": "deepseek-flash",
+            "complexities": [
+              "low"
+            ]
+          }
+        ]
+      }
     },
     "policy": {
       "delegate": [

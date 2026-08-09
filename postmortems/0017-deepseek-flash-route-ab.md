@@ -57,3 +57,9 @@ No scorecard service, persistence record, CLI command, ranking abstraction, or a
 ## Privacy and security review
 
 The record contains route names, Job IDs, aggregate statistics, artifact hashes, and a public repository commit only. Temporary configuration used separate `/tmp` storage, included no credentials, and configured no Grok route. No worker artifact was applied automatically.
+
+## Addendum
+
+### 2026-08-09: Explicit low-complexity dogfood policy
+
+[Decision 0020](./0020-human-authored-active-route-selection.md) promotes the configured DeepSeek route into one deliberately narrow repository dogfood rule after an explicit user product decision: parent complexity `low` selects DeepSeek Flash/max, while `medium`, `high`, and no match retain Luna/max. This is not evidence that DeepSeek is more intelligent or universally better. The original mixed A/B remains the performance evidence, no fallback is added, and every artifact still requires upstream verification and selection.

@@ -158,7 +158,7 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
   assert.equal(defaults.delegation?.dispatch.routeSelection, undefined);
 });
 
-test('parseConfig strictly validates optional shadow route selection rules', () => {
+test('parseConfig strictly validates optional shadow and active route selection rules', () => {
   const base = {
     version: 1,
     defaultRoute: 'mock',
@@ -184,6 +184,12 @@ test('parseConfig strictly validates optional shadow route selection rules', () 
       .delegation?.dispatch.routeSelection,
     valid
   );
+  const active = { ...valid, mode: 'active' };
+  assert.deepEqual(
+    parseConfig({ ...base, delegation: { mode: 'off', dispatch: { routeSelection: active } } })
+      .delegation?.dispatch.routeSelection,
+    active
+  );
 
   const invalidRouteSelections: unknown[] = [
     null,
@@ -192,6 +198,7 @@ test('parseConfig strictly validates optional shadow route selection rules', () 
     { mode: 'shadow', rules: null },
     { mode: 'shadow', rules: 'not-an-array' },
     { mode: 'auto', rules: [{ route: 'mock' }] },
+    { mode: 'enforce', rules: [{ route: 'mock' }] },
     { mode: 'unknown', rules: [{ route: 'mock' }] },
     { mode: 'shadow', rules: [] },
     { mode: 'shadow', rules: Array.from({ length: 21 }, () => ({ route: 'mock' })) },

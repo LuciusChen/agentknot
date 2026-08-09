@@ -144,6 +144,7 @@ test('composeDelegationPlan uses ordered shadow rules with AND predicates and ke
   assert.equal(
     catchAll.subtasks.every(
       (subtask) =>
+        subtask.routeSelection?.mode === 'shadow' &&
         subtask.routeSelection?.basis === 'rule' &&
         subtask.routeSelection.suggestedRoute === 'catch-all' &&
         subtask.routeSelection.ruleIndex === 0
@@ -189,6 +190,60 @@ test('composeDelegationPlan uses ordered shadow rules with AND predicates and ke
     },
   });
   assert.notEqual(plan.planHash, changedSuggestion.planHash);
+});
+
+test('composeDelegationPlan applies only human-configured active routes with a conservative default', () => {
+  const activeConfig: DelegationConfig = {
+    ...config,
+    dispatch: {
+      ...config.dispatch,
+      routeSelection: {
+        mode: 'active',
+        rules: [{ route: 'deepseek-flash', complexities: ['low'] }],
+      },
+    },
+  };
+
+  const low = composeDelegationPlan(request, { ...assessment, complexity: 'low' }, activeConfig);
+  assert.deepEqual(
+    low.subtasks.map((subtask) => ({ route: subtask.route, evidence: subtask.routeSelection })),
+    [
+      {
+        route: 'deepseek-flash',
+        evidence: {
+          mode: 'active',
+          selectedRoute: 'deepseek-flash',
+          basis: 'rule',
+          ruleIndex: 0,
+        },
+      },
+      {
+        route: 'deepseek-flash',
+        evidence: {
+          mode: 'active',
+          selectedRoute: 'deepseek-flash',
+          basis: 'rule',
+          ruleIndex: 0,
+        },
+      },
+    ]
+  );
+
+  const medium = composeDelegationPlan(request, assessment, activeConfig);
+  assert.deepEqual(
+    medium.subtasks.map((subtask) => ({ route: subtask.route, evidence: subtask.routeSelection })),
+    [
+      {
+        route: 'worker',
+        evidence: { mode: 'active', selectedRoute: 'worker', basis: 'default' },
+      },
+      {
+        route: 'worker',
+        evidence: { mode: 'active', selectedRoute: 'worker', basis: 'default' },
+      },
+    ]
+  );
+  assert.notEqual(low.planHash, medium.planHash);
 });
 
 test('composeDelegationPlan deterministically applies allowlists, keep-upstream rules, caps, and suggest mode', () => {

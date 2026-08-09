@@ -38,6 +38,17 @@ export type RouteSelectionEvidence =
       mode: 'shadow';
       suggestedRoute: string;
       basis: 'default';
+    }
+  | {
+      mode: 'active';
+      selectedRoute: string;
+      basis: 'rule';
+      ruleIndex: number;
+    }
+  | {
+      mode: 'active';
+      selectedRoute: string;
+      basis: 'default';
     };
 
 export interface AssessedSubtask {
@@ -61,7 +72,7 @@ export type DelegationDecision = 'upstream' | 'delegate' | 'split';
 
 export interface PlannedSubtask extends AssessedSubtask {
   id: string;
-  /** The actual execution route; shadow suggestions never replace this value. */
+  /** The actual execution route; only active configured selection can replace the default. */
   route: string;
   executionPrompt: string;
   routeSelection?: RouteSelectionEvidence;

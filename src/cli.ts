@@ -283,7 +283,7 @@ async function main(argv: string[]): Promise<void> {
     if (json) process.stdout.write(`${JSON.stringify(policy, null, 2)}\n`);
     else {
       process.stdout.write(
-        `${policy.mode}\tplanner=${policy.planner.route}\tworker=${policy.dispatch.defaultRoute}\tchildren<=${policy.dispatch.maxChildren}\tconcurrency<=${policy.dispatch.maxConcurrency}\n`
+        `${policy.mode}\tplanner=${policy.planner.route}\tworker-default=${policy.dispatch.defaultRoute}\troute-selection=${policy.dispatch.routeSelection?.mode ?? 'off'}\tchildren<=${policy.dispatch.maxChildren}\tconcurrency<=${policy.dispatch.maxConcurrency}\n`
       );
     }
     return;

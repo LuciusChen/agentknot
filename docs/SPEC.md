@@ -44,7 +44,7 @@ The controller, worker, provider, and model are separate concepts:
 | Concern | Owner | Must not leak into |
 | --- | --- | --- |
 | Prompt, workspace, caller identity | `JobRequest` | worker-specific request types |
-| Delegation mode, task-kind policy, child/depth/concurrency caps, and optional shadow route-selection evidence | orchestration service/configuration | controller-vendor branches or worker adapters |
+| Delegation mode, task-kind policy, child/depth/concurrency caps, and optional human-authored route-selection policy | orchestration service/configuration | controller-vendor branches or worker adapters |
 | Planner assessment parsing and deterministic plan composition | orchestration service | planner-model discretion at dispatch time |
 | Parent policy/plan/events/child provenance | `OrchestrationStore` | leaf `JobStore` semantics |
 | Route resolution | configuration/orchestrator | controller identity branches |
@@ -89,15 +89,15 @@ The canonical TypeScript definitions are in `src/types.ts` and `src/orchestratio
 
 `source` must never alter route selection or execution logic.
 
-### Optional shadow route selection
+### Optional human-authored route selection
 
-`delegation.dispatch.routeSelection` is an optional configuration object; omission disables route selection. Its only accepted mode is `shadow`, and `mode: "auto"` is invalid for this field even when global `delegation.mode` is `auto` (see [decision 0016](../postmortems/0016-shadow-route-selection.md)).
+`delegation.dispatch.routeSelection` is an optional configuration object; omission disables route selection. `mode: "shadow"` records deterministic evidence without changing execution. `mode: "active"` applies the same human-authored rules to the planned and actual child route. Global delegation `mode: "auto"` remains separate from route-selection mode (see [decisions 0016](../postmortems/0016-shadow-route-selection.md) and [0020](../postmortems/0020-human-authored-active-route-selection.md)).
 
 Its public shape is conceptually:
 
 ```ts
 interface RouteSelectionConfig {
-  mode: 'shadow';
+  mode: 'shadow' | 'active';
   rules: RouteSelectionRule[];
 }
 
@@ -109,14 +109,16 @@ interface RouteSelectionRule {
 
 type RouteSelectionEvidence =
   | { mode: 'shadow'; suggestedRoute: string; basis: 'rule'; ruleIndex: number }
-  | { mode: 'shadow'; suggestedRoute: string; basis: 'default' };
+  | { mode: 'shadow'; suggestedRoute: string; basis: 'default' }
+  | { mode: 'active'; selectedRoute: string; basis: 'rule'; ruleIndex: number }
+  | { mode: 'active'; selectedRoute: string; basis: 'default' };
 ```
 
-The rules array contains 1–20 ordered rules. Every rule references an existing configured route, and every candidate route is validated at config load even though shadow suggestions never become execution routes. If present, `taskKinds` and `complexities` must each be non-empty and contain unique values; complexities are limited to `low`, `medium`, and `high`. A rule with both predicates matches only when both predicates match the eligible subtask kind and parent assessment complexity, a rule with one predicate matches that predicate, and a rule with neither predicate is an explicit catch-all. The first matching rule wins.
+The rules array contains 1–20 ordered rules. Every rule references an existing configured route and is validated at config load. If present, `taskKinds` and `complexities` must each be non-empty and contain unique values; complexities are limited to `low`, `medium`, and `high`. A rule with both predicates matches only when both predicates match the eligible subtask kind and parent assessment complexity, a rule with one predicate matches that predicate, and a rule with neither predicate is an explicit catch-all. The first matching rule wins. Complexity is assessed once for the parent orchestration in this slice; AgentKnot does not ask the planner for a second per-child complexity or route judgment.
 
-For every eligible planned subtask under shadow mode, deterministic policy records `RouteSelectionEvidence` using the subtask's `kind` and parent assessment `complexity`. A rule match records `basis: 'rule'`, its suggested route, and a zero-based `ruleIndex`; when no rule matches, evidence suggests `dispatch.defaultRoute` with `basis: 'default'` and no `ruleIndex`. The evidence is part of the persisted plan and its `planHash`.
+For every eligible planned subtask, deterministic policy records `RouteSelectionEvidence` using the subtask's `kind` and parent assessment `complexity`. A rule match records `basis: 'rule'`, the configured route, and a zero-based `ruleIndex`; when no rule matches, evidence records `dispatch.defaultRoute` with `basis: 'default'` and no `ruleIndex`. The evidence is part of the persisted plan and its `planHash`.
 
-`PlannedSubtask.route` remains `dispatch.defaultRoute` for actual execution in both evidence branches. The child `agentknotDelegation` metadata carries `taskKind`, `parentComplexity`, and the same shadow evidence so later scorecards do not parse prompts. The ordinary child `Job.route` remains the actual authority, and route resolution, fallback, retry, provider, model, and thinking-level behavior are unchanged. The planner has no route-selection field and cannot name routes. This additive evidence does not change persisted record `schemaVersion`, formal repository Luna/max routing, or artifact handoff. A separately configured experimental DeepSeek route is an ordinary explicit route and is not selected by this slice.
+In `shadow` mode, `PlannedSubtask.route` remains `dispatch.defaultRoute`; evidence uses `suggestedRoute`. In `active` mode, `PlannedSubtask.route` becomes the matched `selectedRoute`, or the default route when no rule matches. Dispatch passes that exact route to the ordinary child Job API, whose resolved snapshot remains execution authority. Child `agentknotDelegation` metadata carries `taskKind`, `parentComplexity`, and the same evidence. The planner has no route-selection field and cannot name routes. Active selection does not add runtime ranking or fallback: retry remains inside the selected route, and route failure is surfaced without switching model/provider. The repository policy selects DeepSeek Flash/max only for `low`; Luna/max remains planner, default, and the route for `medium`, `high`, and no match. Artifact handoff remains unchanged.
 
 ### `JobArtifact`
 
@@ -161,7 +163,7 @@ A route snapshot contains:
 
 The resolved snapshot is stored with the job. Configuration changes after admission do not mutate it.
 
-The current provider/model fields describe how the selected worker should run. They do not prove that AgentKnot has a provider adapter, validates the provider catalog, or can move a live job between providers. A shadow `suggestedRoute` is evidence rather than a resolved route and cannot replace this snapshot.
+The current provider/model fields describe how the selected worker should run. They do not prove that AgentKnot has a provider adapter, validates the provider catalog, or can move a live job between providers. Shadow `suggestedRoute` is evidence rather than a resolved route; active `selectedRoute` is resolved through the ordinary Job route before execution, after which the immutable Job snapshot is authoritative.
 
 ### `WorkerAdapter`
 
@@ -317,7 +319,7 @@ The planner is a read-only model route and returns JSON only. AgentKnot rejects 
 
 When delegation dispatch limits are omitted, the product defaults to `maxChildren: 2` and `maxConcurrency: 2`; the configuration parser permits values from one through six, and `maxConcurrency` cannot exceed `maxChildren`. This repository's dogfood configuration uses `maxChildren: 6` and `maxConcurrency: 4`, so those settings are not product defaults. The parser's ceiling is not a worker/provider capacity claim: four has current successful Luna/max orchestration evidence, while higher settings have not passed the same path. Capacity never requires the planner to manufacture tasks, and fewer eligible independent subtasks use fewer workers.
 
-When route-selection shadow mode is configured, the deterministic composer evaluates ordered rules only after a subtask passes the ordinary delegation policy, records first-match/default evidence, keeps the planned execution route at `dispatch.defaultRoute`, and adds the task kind, parent assessment complexity, and evidence to child metadata. This is plan evidence, not planner-controlled routing or automatic model/provider selection; measured scorecards are required before any ranking can drive execution.
+When route selection is configured, the deterministic composer evaluates ordered rules only after a subtask passes the ordinary delegation policy and records first-match/default evidence. Shadow mode keeps the planned execution route at `dispatch.defaultRoute`; active mode writes the configured selection into the planned route. Both add task kind, parent assessment complexity, and evidence to child metadata. This is human-authored policy, not planner-controlled routing or automatic model/provider ranking.
 
 The parent plan and `orchestration.planned` event are persisted before the first child starts. `suggest` persists the same evidence without dispatch. With fallback `upstream`, planner failure returns a persisted upstream decision and error evidence; with fallback `fail`, planner failure makes the parent terminally failed before a dispatchable plan is persisted. A successful self-orchestration demonstrates only that run's normal planner-to-plan-to-child path; it is not, by itself, evidence for planner fail-fast behavior under failure, timeout, cancellation, or semaphore wait.
 
@@ -415,7 +417,7 @@ There is no authentication, authorization, TLS termination, CORS policy, rate li
 - Managed worktree cleanup targets an exact path created and owned by AgentKnot.
 - Git patch artifacts are never applied automatically.
 - Automatic delegation cannot be configured without Git worktree isolation, is depth-one, and never promotes child artifacts.
-- Shadow route-selection evidence never overrides `dispatch.defaultRoute` or the ordinary child `Job.route` and does not change fallback, retry, provider/model/thinking resolution.
+- Shadow route-selection evidence never overrides `dispatch.defaultRoute`. Active route selection can override it only through a validated configured rule; the resulting ordinary child `Job.route` remains authoritative, its configured thinking level is preserved, and no fallback or mid-attempt switch is added.
 
 ### Explicit limitations
 
@@ -444,14 +446,14 @@ This list is a design prompt, not a declaration that current workers support tho
 
 Runtime selection and provider fallback must be completed before a job starts. A started attempt must not silently switch runtime, worker, provider, or model unless a future explicit policy records a new attempt and the exact reason.
 
-Shadow route-selection evidence does not satisfy a model-ranking or provider-optimization gate. Any future automatic selection requires separate measured scorecards on comparable workloads, with route outcomes and costs recorded before a new policy can make suggestions authoritative.
+Human-authored active route selection does not satisfy or claim a model-ranking or provider-optimization gate. Any future learned or automatically optimized selection requires separate measured scorecards on comparable workloads, with route outcomes and costs recorded before such a policy can be proposed.
 
 ## Compatibility and schema rules
 
 - Public runtime input must be validated at its transport boundary.
 - Existing job snapshots must retain their resolved route and event meaning.
 - New optional fields may be added compatibly; changing state or event semantics requires a versioned contract and migration decision. `JobArtifact.changedFiles` is optional when reading persisted records, while newly captured git-worktree artifacts always emit an array.
-- `delegation.dispatch.routeSelection` is optional configuration, and its shadow evidence is additive plan/metadata evidence; omission remains disabled and does not change persisted Job or Orchestration `schemaVersion: 1`.
+- `delegation.dispatch.routeSelection` is optional configuration, and its shadow/active evidence is additive plan/metadata evidence; omission remains disabled and does not change persisted Job or Orchestration `schemaVersion: 1`.
 - `JobRecord.completionSummary` is optional for legacy v1 reads; existing records without it are not rewritten, while newly terminal records produced by this runtime include the additive summary.
 - `WorkerRunResult.completionReport` is optional at the adapter boundary: `undefined` is absent, `null` is a detected malformed or unsupported envelope, and a non-null value is strictly validated before it enters a summary; custom adapters that return only `output` remain valid.
 - One wire payload should have one canonical type/schema. HTTP, CLI, callbacks, and TypeScript APIs must not describe the same payload independently without a mechanical compatibility check.
@@ -479,7 +481,7 @@ At minimum, the conformance suite must eventually prove:
 - documented crash/restart behavior;
 - configuration-only doctor wording, successful and failed/unsupported live-probe outcomes, timeout/abort cleanup, CLI exit behavior, exact Pi propagation of route thinking level, and normal-run completion-report prompt injection, valid/missing/malformed/unsupported parsing, output preservation, strict end anchoring, summary propagation, and live-probe exclusion;
 - strict planner validation, deterministic policy filtering, persisted-before-dispatch plan evidence, parent/child provenance, global process-local concurrency, and orchestration cancellation;
-- strict route-selection configuration rejection, candidate-route validation at config load, first-match/default shadow behavior, zero-based match indexing, plan-hash coverage, default-route execution authority, and public child metadata carrying task kind, parent complexity, and evidence;
+- strict route-selection configuration rejection, candidate-route validation at config load, first-match/default behavior, zero-based match indexing, plan-hash coverage, shadow default-route authority, exact active-route dispatch, and public child metadata carrying task kind, parent complexity, and evidence;
 - supported concurrency and record-size limits once those claims exist.
 
 Passing a unit test for an internal helper is not sufficient when a public transport, worker process, Git lifecycle, or persistence boundary changed.

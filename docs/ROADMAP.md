@@ -64,7 +64,8 @@ Make leaf-job semantics and the bounded delegation slice reliable enough that a 
 - [x] Add a capability/status table that distinguishes current, experimental, proposed, and deferred behavior.
 - [x] Version persisted leaf Job and Orchestration records before incompatible schema evolution begins; new records use `schemaVersion: 1`, legacy file reads materialize missing versions without rewriting, and explicit unsupported versions fail.
 - [x] Validate controller metadata recursively as JSON-compatible values so TypeScript/HTTP admission and file storage preserve one contract.
-- [x] Add the optional vendor-neutral `delegation.dispatch.routeSelection` shadow slice: omission disables it, only `shadow` is valid, candidate routes validate at config load, ordered 1–20 rules use first-match/default evidence, and child metadata exposes the evidence without changing the actual default route ([decision 0016](../postmortems/0016-shadow-route-selection.md)).
+- [x] Add the initial optional vendor-neutral `delegation.dispatch.routeSelection` shadow slice: omission disables it, the initial mode was shadow-only, candidate routes validate at config load, ordered 1–20 rules use first-match/default evidence, and child metadata exposes the evidence without changing the actual default route ([decision 0016](../postmortems/0016-shadow-route-selection.md)).
+- [x] Add the explicitly requested human-authored `active` mode without a ranking engine: it reuses the bounded ordered rules, persists exact selected-route evidence, dispatches only the configured match or conservative default, and never falls back. Repository dogfood maps parent complexity `low` to DeepSeek Flash/max and leaves `medium`/`high`/default on Luna/max ([decision 0020](../postmortems/0020-human-authored-active-route-selection.md)).
 - [x] Define a structured completion summary: changed files, checks run, remaining risks, and worker-reported notes, without treating worker assertions as verified facts. The additive summary, deterministic normal-Pi emission slice, and real Pi/OpenCode Go/Luna/max dogfood evidence are complete.
   - [x] Add the additive schemaVersion 1 `JobRecord.completionSummary` with terminal outcome/attempt, terminal-attempt artifact provenance, and stable unavailable reasons.
   - [x] Validate optional custom-adapter and normal-Pi worker reports strictly, preserving absent/malformed/unretained states without inferring from prose, events, stderr, or session statistics.
@@ -94,17 +95,17 @@ Delivered in this slice:
 - deterministic allow/keep policy, depth exactly one, product defaults of two children and two concurrent executions when limits are omitted, the repository's evidence-backed six-task/four-slot dogfood setting, and a six-child/six-concurrency configuration syntax ceiling that does not claim route capacity; the delegation semaphore does not throttle concurrent direct leaf Job callers;
 - planner guidance that reserves parallel plans for independently verifiable, dependency-free subtasks with non-overlapping expected write scopes, plus a sliding dispatcher that refills bounded worker slots from the persisted task pool;
 - immutable effective policy, plan hash, exact prompts/routes, parent-child IDs, and persist-before-dispatch events;
-- optional shadow route-selection evidence keyed by eligible subtask kind and parent assessment complexity, with 1–20 ordered validated rules, first-match/default outcomes, plan-hash coverage, and structured child metadata while `PlannedSubtask.route` and the ordinary child `Job.route` remain `dispatch.defaultRoute`; rules use non-empty unique task-kind and/or `low`/`medium`/`high` complexity predicates, with both predicates conjunctive and predicate-free rules explicit catch-alls;
+- optional human-authored route selection keyed by eligible subtask kind and parent assessment complexity, with `shadow` and `active` modes, 1–20 ordered validated rules, first-match/default outcomes, plan-hash coverage, and structured child metadata; shadow leaves `PlannedSubtask.route` and the ordinary child `Job.route` on `dispatch.defaultRoute`, while active dispatches the exact configured selection; rules use non-empty unique task-kind and/or `low`/`medium`/`high` complexity predicates, with both predicates conjunctive and predicate-free rules explicit catch-alls;
 - child execution only through the ordinary isolated Job API;
 - cancellation propagation and fail-without-resume restart reconciliation;
 - AgentKnot self-use through the real Pi/Luna route as a required promotion check for this slice.
 
-The shadow slice is evidence-only and does not change actual dispatch, fallback, retry, provider/model/thinking resolution, or the formal repository Luna/max route; no artifact is applied automatically.
+Shadow remains evidence-only. Active selection changes only the pre-dispatch route according to validated human configuration; it does not add fallback, mid-attempt switching, ranking, planner-owned route names, or automatic artifact application. The repository keeps Luna/max as planner and conservative default and uses DeepSeek Flash/max only for configured low-complexity work.
 
 Still outside this slice:
 
 - recursive delegation, dynamic replanning, dependencies between children, or model-chosen route changes;
-- automatic model/provider ranking or route switching; the explicit experimental DeepSeek Flash/max leaf route remains outside dispatch and fallback, and repeated comparable trials are required before shadow evidence can support a future automatic-selection proposal;
+- automatic/learned model-provider ranking, silent optimization, fallback, or mid-attempt route switching; the human-authored active rule is not ranking evidence, and repeated comparable trials remain required before any optimizer proposal;
 - restart resume, a durable capacity queue, leases, multi-process writers, or distributed concurrency;
 - automatic patch selection, application, commit, push, merge, deployment, or pull-request creation;
 - implicit interception of native controller conversations. Controllers must call the orchestration API.
@@ -127,7 +128,7 @@ Next evidence gate:
 - The narrower `pi-lean-ctx@3.9.18` profile passed source and supply-chain review and produced selected passing artifacts in two same-task Luna/max pairs. Its 39.0% token reduction on a larger implementation reversed into 36.2% more tokens and 45.7% more elapsed time on an independent smaller test task, so it did not clear the repeatability gate; see [experiment 0014](../postmortems/0014-pi-lean-ctx-profile-ab.md).
 - [x] Apply the profile promotion gate: neither reviewed candidate is a general dogfood profile, the repository and global Pi state remain unpolluted, and the minimal route remains formal.
 - Reopen profile work only with a new bounded hypothesis and a reliable selection rule that can avoid workloads where the profile regresses; keep task-dependent automatic selection deferred until that rule has evidence.
-- The explicit DeepSeek V4 Flash/max route passed a live probe and one same-task test-only A/B. It used 38.4% fewer Pi tokens and lower provider-reported cost than Luna/max, but took 23.5% longer and produced a larger patch; Luna's smaller patch was selected. Keep the candidate explicit-only until repeated task-class trials establish a reliable rule ([experiment 0017](../postmortems/0017-deepseek-flash-route-ab.md)).
+- The DeepSeek V4 Flash/max route passed live probes and one same-task test-only A/B. It used 38.4% fewer Pi tokens and lower provider-reported cost than Luna/max, but took 23.5% longer and produced a larger patch; Luna's smaller patch was selected. It is now used only by the explicit human-authored `low` dogfood rule, without claiming a measured ranking; medium/high/default work remains Luna/max ([experiment 0017](../postmortems/0017-deepseek-flash-route-ab.md), [decision 0020](../postmortems/0020-human-authored-active-route-selection.md)).
 
 ### Runtime reconciliation correctness
 
@@ -168,7 +169,7 @@ Still outside this slice:
 - Every README capability is implemented and tested or visibly marked proposed/deferred.
 - Crash/restart behavior for every nonterminal state is deterministic and tested.
 - Every orchestration persists a valid plan before dispatch, never exceeds its child/depth/concurrency bounds, and leaves artifact integration upstream.
-- Shadow route-selection omission, strict invalid configuration, first-match/default behavior, plan-hash coverage, default-route execution authority, and public child metadata are covered at the configuration and orchestration boundaries.
+- Route-selection omission, strict invalid configuration, first-match/default behavior, plan-hash coverage, shadow default-route authority, exact active-route dispatch, and public child metadata are covered at the configuration and orchestration boundaries.
 - Every newly terminal Job has an additive completion summary before terminal observation, and the strict Pi report path has deterministic coverage plus real Pi/OpenCode Go/Luna/max emission evidence.
 - Observer and callback failures cannot change a correct execution result.
 - A supported adapter cannot leave a timed-out or cancelled job indefinitely active.
@@ -187,7 +188,7 @@ Still outside this slice:
 - channels, chat, reactions, or presence;
 - a dashboard;
 - an operating-system sandbox claim;
-- automatic model/provider ranking or route selection, which remains deferred until separate measured scorecards and an explicit roadmap gate exist.
+- automatic or learned model/provider ranking and silent optimization, which remain deferred; the current active mode executes only human-authored deterministic rules.
 
 ## Stage 2: Portable controller and worker contracts
 
@@ -279,7 +280,7 @@ This stage is not a commitment. It may begin only when real use demonstrates all
 - Relay-style channels, threads, DMs, reactions, feeds, presence, or social collaboration.
 - A generic multi-agent swarm DSL.
 - Automatic code acceptance, commit, merge, push, deployment, or pull-request creation.
-- Automatic model/provider ranking or silent model/provider optimization; shadow evidence remains non-authoritative until separate measured scorecards and an explicit roadmap gate establish a safe selection rule.
+- Automatic or learned model/provider ranking and silent model/provider optimization; human-authored active rules do not satisfy this gate, and a future optimizer still requires separate measured scorecards and an explicit roadmap change.
 - An AgentKnot-owned IDE or terminal emulator.
 - A proprietary model/provider SDK layer that duplicates worker capabilities.
 - Cloud hosting or a marketplace as a prerequisite for local use.

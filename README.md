@@ -9,7 +9,7 @@ controller → AgentKnot orchestration policy → persisted plan → bounded chi
                          └──────→ Job API → worker adapter → provider/model
 ```
 
-An optional orchestration route-selection policy can record vendor-neutral suggestions for later measurement, but this slice keeps actual child execution on `delegation.dispatch.defaultRoute`.
+An optional orchestration route-selection policy can either record vendor-neutral shadow suggestions or apply explicit human-authored rules. The planner assesses task complexity but cannot name a route; configured policy remains the execution authority.
 
 The first real worker adapter uses [Pi RPC](https://pi.dev/docs/latest/rpc), a strict JSONL protocol. It can run Pi with OpenCode Go and GPT-5.6 Luna without installing the OpenCode CLI.
 
@@ -22,15 +22,15 @@ The labels below are availability claims, not maturity ratings. **Current** mean
 | Status | Capability | Evidence or gate |
 | --- | --- | --- |
 | **Current** | Controller-neutral leaf jobs and bounded depth-one orchestration through CLI, HTTP, and TypeScript, with `off`, `suggest`, and `auto` delegation modes. | Implemented and covered by deterministic API, policy, lifecycle, and persistence tests; callers must invoke the Job or orchestration API rather than relying on native-chat interception. |
-| **Current** | Independent worker/provider/model routing with the mock and Pi RPC adapters. | Implemented and covered by routing and adapter tests; the formal planner and delegated-worker route remains Pi/OpenCode Go/Luna/max. |
-| **Current** | Optional vendor-neutral shadow route-selection evidence for eligible orchestration children. | `delegation.dispatch.routeSelection` is disabled by omission and accepts only `mode: "shadow"` with 1–20 ordered rules whose candidate routes validate at config load; first-match/default evidence is persisted in plans and child metadata, while actual `Job.route` remains `dispatch.defaultRoute`. Separate measured scorecards are required before model rankings can drive automatic selection; see [decision 0016](postmortems/0016-shadow-route-selection.md). |
+| **Current** | Independent worker/provider/model routing with the mock and Pi RPC adapters. | Implemented and covered by routing and adapter tests; the formal planner and conservative default worker remain Pi/OpenCode Go/Luna/max, with the configured low-complexity dogfood rule selecting DeepSeek Flash/max. |
+| **Current** | Optional human-authored route-selection rules for eligible orchestration children. | `delegation.dispatch.routeSelection` is disabled by omission and accepts `shadow` or `active`; both modes use 1–20 ordered, validated rules and persist first-match/default evidence, while only `active` changes the planned and actual child route. The repository maps parent complexity `low` to DeepSeek Flash/max and conservatively leaves `medium`, `high`, and no-match work on Luna/max. There is no learned ranking or fallback; see [decisions 0016](postmortems/0016-shadow-route-selection.md) and [0020](postmortems/0020-human-authored-active-route-selection.md). |
 | **Current** | Ordered job/orchestration snapshots and normalized events with retries, timeouts, cancellation, one-shot callbacks, and bounded exact-child Pi supervision. | Implemented and covered by deterministic lifecycle, persistence, callback, and Pi conformance tests; a callback-bookkeeping store failure is surfaced without rewriting the persisted terminal result or redelivering, Pi suppresses ambient resources and captures sanitized advisory session statistics, and custom adapters retain their own termination obligations. |
 | **Current** | Versioned persisted Job and Orchestration records. | New records carry top-level `schemaVersion: 1`; file reads materialize missing versions as legacy v1 in memory without rewriting bytes and reject explicit unsupported versions. |
 | **Current** | Additive terminal Job completion summaries and bounded Pi normal-run report emission. | Newly terminal success, failure, and cancellation records include terminal outcome/attempt, controller-captured terminal-artifact path evidence or a stable unavailable reason, and an explicit worker-reported reported/unavailable branch; custom adapters and normal Pi runs may provide a strict report, while missing or malformed Pi envelopes remain explicit unavailable evidence. Deterministic coverage and a real Pi/OpenCode Go/Luna/max dogfood emission satisfy the Stage 1 gate. |
 | **Current** | Git worktree attempt isolation, patch artifacts with controller-captured changed-file evidence, and read-only artifact listing, verification, and bounded preview. | Implemented and covered by worktree, changed-path, and artifact tests; newly captured artifacts include Git-derived repository-relative `changedFiles` (including `[]` for an empty patch), while artifacts remain handoff data and are never applied, committed, merged, or pushed automatically. |
 | **Current** | Configuration-only `doctor`, opt-in exact-route `doctor --live`, and HTTP process liveness. | Implemented and covered by diagnostic and HTTP contract tests; live probes are point-in-time evidence and are not run as normal-job preflights. |
 | **Experimental** | Reviewed Pi worker profiles/extensions; none is promoted. | Evaluation only: use an exact version or immutable path without global or repository installation, then run repeated same-task Luna/max A/B trials against the minimal profile; completion, artifact verification, and target tests must not regress and session-statistics, elapsed-time, retry, or upstream-intervention evidence must show a repeatable net benefit before promotion. `pi-readseek@0.9.10` regressed its first pair. `pi-lean-ctx@3.9.18` produced two selected, passing artifacts and saved 39.0% total Pi tokens on the larger task, but on an independent smaller task it used 36.2% more tokens and took 45.7% longer; the inconsistent profile is not promoted. See [experiments 0013](postmortems/0013-pi-readseek-profile-ab.md) and [0014](postmortems/0014-pi-lean-ctx-profile-ab.md). |
-| **Experimental** | Explicit Pi/OpenCode Go/DeepSeek V4 Flash route at `thinkingLevel=max`. | The route passed a live probe and one isolated same-task comparison, but is only an explicit leaf-job candidate. It is not used by orchestration dispatch, shadow rules, fallback, or automatic ranking; repeatable task-class evidence is still required. See [experiment 0017](postmortems/0017-deepseek-flash-route-ab.md). |
+| **Experimental** | Pi/OpenCode Go/DeepSeek V4 Flash at `thinkingLevel=max` for configured low-complexity dogfood work. | The route passed live probes and one isolated same-task comparison. It is now selected only by the repository's human-authored `low` rule; it is not a claimed intelligence ranking, fallback target, or replacement for Luna on medium/high work. Upstream artifact review remains required. See [experiment 0017](postmortems/0017-deepseek-flash-route-ab.md) and [decision 0020](postmortems/0020-human-authored-active-route-selection.md). |
 | **Proposed** | Additional native worker adapters, a worker conformance kit, and an independent provider-runtime interface. | Not available; requires a demonstrated lifecycle or observability benefit, or evidence that route data is insufficient, followed by the applicable Stage 2 contract and real-worker gates. |
 | **Proposed** | Authenticated local automation, signed callbacks, restart-aware queues/backpressure, approval/policy controls, and an OS-sandbox backend. | Not available; each capability requires its own threat model and the Stage 3 authentication, recovery, approval, and boundary tests. |
 | **Proposed** | An explicit artifact-promotion operation. | Not available; it may be considered only if dirty-target, base-mismatch, checksum, and explicit controller/human-approval checks are safe and tested. |
@@ -87,17 +87,17 @@ node dist/src/cli.js orchestrate \
   "Implement the approved feature and verify its public contract"
 ```
 
-The repository configuration dogfoods `mode: "auto"` with Luna as both planner and worker. The product defaults are `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; this repository keeps a six-task pool with four active execution slots. A current real orchestration started four Luna/max children within 27 ms and all four succeeded, so four remains the evidence-backed setting; values through six are syntactically valid but have not passed the same orchestration soak. The scheduler starts only the useful available tasks up to the cap and immediately refills a slot when a worker completes, so two tasks use two workers while six tasks flow through four slots. This delegation semaphore covers planners and orchestration children, not callers that invoke several direct leaf `Job` requests concurrently; direct bursts require caller-side admission control in v1. The planner only returns a strict assessment and is instructed to mark work parallel only when subtasks are independently verifiable, have no execution-order dependency, and have non-overlapping expected write scopes. The planner never names routes: deterministic policy filters task kinds, keeps each eligible child's actual route on `dispatch.defaultRoute`, optionally records shadow route-selection evidence, persists the effective policy, exact worker prompts, and plan hash, and only then starts child jobs. The plan hash covers the persisted route-selection evidence, and child metadata carries the task kind, parent assessment complexity, and evidence for later scorecards. A non-parallel assessment automatically reduces its parent to one active child. Product decisions, artifact integration, commits, and pushes remain with the upstream controller.
+The repository configuration dogfoods `mode: "auto"` with Luna/max as planner and conservative default worker, plus one human-authored active rule that sends parent complexity `low` to DeepSeek Flash/max. `medium`, `high`, and no-match work stay on Luna/max. The product defaults are `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; this repository keeps a six-task pool with four active execution slots. A current real orchestration started four Luna/max children within 27 ms and all four succeeded, so four remains the evidence-backed setting; values through six are syntactically valid but have not passed the same orchestration soak. The scheduler starts only the useful available tasks up to the cap and immediately refills a slot when a worker completes, so two tasks use two workers while six tasks flow through four slots. This delegation semaphore covers planners and orchestration children, not callers that invoke several direct leaf `Job` requests concurrently; direct bursts require caller-side admission control in v1. The planner only returns a strict assessment and is instructed to mark work parallel only when subtasks are independently verifiable, have no execution-order dependency, and have non-overlapping expected write scopes. The planner never names routes: deterministic policy filters task kinds, evaluates the configured rules, persists the effective policy, exact worker prompts, selected routes, evidence, and plan hash, and only then starts child jobs. Child metadata carries the task kind, parent assessment complexity, and selection evidence. A non-parallel assessment automatically reduces its parent to one active child. Product decisions, artifact integration, commits, and pushes remain with the upstream controller.
 
 The successful self-orchestration was evidence for one normal planner-to-plan-to-child run, not standalone evidence of planner fail-fast behavior. Planner failure, timeout, cancellation, and waiting for a shared dispatch slot have separate outcomes and must be established by their deterministic tests; with the default `upstream` fallback, malformed or failed planner output is recorded in a persisted upstream plan, while `fail` terminates the parent before dispatch.
 
 Per request, `--delegation never`, `--delegation suggest`, and `--delegation force` can narrow or request behavior. `force` does not bypass global `off`, the child limit, depth limit, or `keepUpstream` policy. Set global mode to `off` when a caller only wants the leaf Job API. `suggest` and `auto` require Git worktree isolation.
 
-### Shadow route-selection evidence
+### Human-authored route selection
 
-`delegation.dispatch.routeSelection` is optional and disabled when omitted. Its only accepted mode is `shadow`; `mode: "auto"` is invalid for this field even when the global `delegation.mode` is `auto`, because this slice never changes the route used for execution.
+`delegation.dispatch.routeSelection` is optional and disabled when omitted. `mode: "shadow"` records what a rule would choose while retaining `dispatch.defaultRoute`; `mode: "active"` makes the matching configured route authoritative for the planned child and ordinary Job. The global delegation mode remains a separate setting.
 
-Add the following optional object inside `delegation.dispatch` to observe deterministic suggestions; the repository configuration currently omits this object, so it remains disabled there:
+The repository dogfood policy is intentionally small:
 
 ```json
 {
@@ -107,11 +107,9 @@ Add the following optional object inside `delegation.dispatch` to observe determ
     "maxDepth": 1,
     "maxConcurrency": 4,
     "routeSelection": {
-      "mode": "shadow",
+      "mode": "active",
       "rules": [
-        { "route": "mock", "taskKinds": ["documentation"] },
-        { "route": "luna", "complexities": ["high"] },
-        { "route": "mock" }
+        { "route": "deepseek-flash", "complexities": ["low"] }
       ]
     }
   }
@@ -120,7 +118,7 @@ Add the following optional object inside `delegation.dispatch` to observe determ
 
 There must be 1–20 ordered rules, every `route` must name an existing configured route and every candidate is validated at config load, and a present `taskKinds` or `complexities` array must be non-empty and unique. Complexity values are only `low`, `medium`, and `high`; when both predicates are present they must both match, and a rule with neither predicate is an explicit catch-all, so the first matching rule wins.
 
-For each eligible planned subtask, AgentKnot evaluates the subtask kind and parent assessment complexity. A match persists evidence such as `{ "mode": "shadow", "suggestedRoute": "mock", "basis": "rule", "ruleIndex": 0 }`; with no match it persists `{ "mode": "shadow", "suggestedRoute": "luna", "basis": "default" }`, with no `ruleIndex`. `ruleIndex` is zero-based and appears only for a rule match.
+For each eligible planned subtask, AgentKnot evaluates the subtask kind and parent assessment complexity. An active match persists evidence such as `{ "mode": "active", "selectedRoute": "deepseek-flash", "basis": "rule", "ruleIndex": 0 }`; with no match it persists `{ "mode": "active", "selectedRoute": "luna", "basis": "default" }`, with no `ruleIndex`. `ruleIndex` is zero-based and appears only for a rule match. In this first slice complexity is assessed once for the parent orchestration, so all children share that complexity; there is no second per-child model judgment.
 
 The suggestion is observable in the persisted plan and in the child `agentknotDelegation` metadata, alongside `taskKind` and `parentComplexity`, so future scorecards do not need to parse prompts; a child metadata fragment is:
 
@@ -131,8 +129,8 @@ The suggestion is observable in the persisted plan and in the child `agentknotDe
     "taskKind": "documentation",
     "parentComplexity": "medium",
     "routeSelection": {
-      "mode": "shadow",
-      "suggestedRoute": "mock",
+      "mode": "active",
+      "selectedRoute": "deepseek-flash",
       "basis": "rule",
       "ruleIndex": 0
     }
@@ -140,9 +138,9 @@ The suggestion is observable in the persisted plan and in the child `agentknotDe
 }
 ```
 
-`PlannedSubtask.route` and the child Job's ordinary `Job.route` remain `luna` in this example, because `dispatch.defaultRoute` is the actual authority; fallback, retry, provider, model, and thinking-level resolution are unchanged.
+`PlannedSubtask.route` and the child Job's ordinary `Job.route` are `deepseek-flash` in this example. If no rule matches, both remain `luna`. Each selected route resolves its configured provider, model, `thinkingLevel`, timeout, and retry snapshot before execution. A route failure is reported on that route and never causes silent model fallback.
 
-Use `agentknot orchestrate` with the configured file, then inspect the orchestration record and each child Job record through the CLI JSON, `GET /v1/orchestrations/:id`, or `GET /v1/jobs/:id` to compare the shadow suggestion with the actual route and metadata. Shadow evidence is instrumentation rather than a performance ranking, and model rankings require repeated comparable trials before any automatic selection can be considered. The repository now contains an explicit experimental `deepseek-flash` leaf route, but shadow selection remains disabled and formal orchestration dispatch stays on Luna/max.
+Use `agentknot orchestrate` with the configured file, then inspect the orchestration record and each child Job record through CLI JSON, `GET /v1/orchestrations/:id`, or `GET /v1/jobs/:id`. `shadow` remains available for measurement without execution changes. `active` is deterministic human policy, not a performance ranking: AgentKnot does not learn model intelligence, choose from prices, or silently optimize/fallback.
 
 ## Pi + OpenCode Go + Luna
 
@@ -306,6 +304,15 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "requiredEnv": ["OPENCODE_API_KEY"],
       "maxAttempts": 2,
       "timeoutMs": 3600000
+    },
+    "deepseek-flash": {
+      "worker": "pi",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash",
+      "thinkingLevel": "max",
+      "requiredEnv": ["OPENCODE_API_KEY"],
+      "maxAttempts": 2,
+      "timeoutMs": 3600000
     }
   },
   "delegation": {
@@ -315,7 +322,13 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "defaultRoute": "luna",
       "maxChildren": 6,
       "maxDepth": 1,
-      "maxConcurrency": 4
+      "maxConcurrency": 4,
+      "routeSelection": {
+        "mode": "active",
+        "rules": [
+          { "route": "deepseek-flash", "complexities": ["low"] }
+        ]
+      }
     },
     "policy": {
       "delegate": ["architecture-review", "test-gap-analysis", "documentation", "independent-implementation"],

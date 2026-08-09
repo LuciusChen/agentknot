@@ -169,7 +169,7 @@ function executionPrompt(parentPrompt: string, subtask: AssessedSubtask): string
   ].join('\n');
 }
 
-function selectShadowRouteEvidence(
+function selectRouteEvidence(
   routeSelection: RouteSelectionConfig,
   subtask: AssessedSubtask,
   parentComplexity: TaskComplexity,
@@ -180,15 +180,14 @@ function selectShadowRouteEvidence(
     const complexityMatches =
       rule.complexities === undefined || rule.complexities.includes(parentComplexity);
     if (taskKindMatches && complexityMatches) {
-      return {
-        mode: 'shadow',
-        suggestedRoute: rule.route,
-        basis: 'rule',
-        ruleIndex,
-      };
+      return routeSelection.mode === 'active'
+        ? { mode: 'active', selectedRoute: rule.route, basis: 'rule', ruleIndex }
+        : { mode: 'shadow', suggestedRoute: rule.route, basis: 'rule', ruleIndex };
     }
   }
-  return { mode: 'shadow', suggestedRoute: defaultRoute, basis: 'default' };
+  return routeSelection.mode === 'active'
+    ? { mode: 'active', selectedRoute: defaultRoute, basis: 'default' }
+    : { mode: 'shadow', suggestedRoute: defaultRoute, basis: 'default' };
 }
 
 function withPlanHash(plan: Omit<DelegationPlan, 'planHash'>): DelegationPlan {
@@ -264,7 +263,7 @@ export function composeDelegationPlan(
       const selectionEvidence =
         config.dispatch.routeSelection === undefined
           ? undefined
-          : selectShadowRouteEvidence(
+          : selectRouteEvidence(
               config.dispatch.routeSelection,
               subtask,
               assessment.complexity,
@@ -273,7 +272,10 @@ export function composeDelegationPlan(
       return {
         ...subtask,
         id: `subtask_${index + 1}`,
-        route: config.dispatch.defaultRoute,
+        route:
+          selectionEvidence?.mode === 'active'
+            ? selectionEvidence.selectedRoute
+            : config.dispatch.defaultRoute,
         executionPrompt: executionPrompt(request.prompt, subtask),
         ...(selectionEvidence === undefined ? {} : { routeSelection: selectionEvidence }),
       };

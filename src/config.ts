@@ -57,7 +57,7 @@ export interface AgentKnotConfig {
 export const DELEGATION_MODES = ['off', 'suggest', 'auto'] as const;
 export type DelegationMode = (typeof DELEGATION_MODES)[number];
 
-export const ROUTE_SELECTION_MODES = ['shadow'] as const;
+export const ROUTE_SELECTION_MODES = ['shadow', 'active'] as const;
 export type RouteSelectionMode = (typeof ROUTE_SELECTION_MODES)[number];
 
 export const ROUTE_SELECTION_COMPLEXITIES = ['low', 'medium', 'high'] as const;
@@ -74,7 +74,12 @@ export interface ShadowRouteSelectionConfig {
   rules: RouteSelectionRule[];
 }
 
-export type RouteSelectionConfig = ShadowRouteSelectionConfig;
+export interface ActiveRouteSelectionConfig {
+  mode: 'active';
+  rules: RouteSelectionRule[];
+}
+
+export type RouteSelectionConfig = ShadowRouteSelectionConfig | ActiveRouteSelectionConfig;
 
 export const DELEGATION_FALLBACKS = ['upstream', 'fail'] as const;
 export type DelegationFallback = (typeof DELEGATION_FALLBACKS)[number];
@@ -91,7 +96,7 @@ export interface DelegationConfig {
     /** Automatic recursive delegation is intentionally unsupported in v1. */
     maxDepth: 1;
     maxConcurrency: number;
-    /** Omitted means no route-selection evidence is produced. */
+    /** Omitted means no route-selection evidence or execution override is produced. */
     routeSelection?: RouteSelectionConfig;
   };
   policy: {
@@ -283,8 +288,8 @@ function parseRouteSelection(
 ): RouteSelectionConfig {
   assertRecord(value, 'config.delegation.dispatch.routeSelection');
   assertKnownKeys(value, ['mode', 'rules'], 'config.delegation.dispatch.routeSelection');
-  if (value.mode !== 'shadow') {
-    throw new Error('config.delegation.dispatch.routeSelection.mode must be "shadow"');
+  if (!ROUTE_SELECTION_MODES.includes(value.mode as RouteSelectionMode)) {
+    throw new Error('config.delegation.dispatch.routeSelection.mode must be "shadow" or "active"');
   }
   if (!Array.isArray(value.rules) || value.rules.length < 1 || value.rules.length > 20) {
     throw new Error('config.delegation.dispatch.routeSelection.rules must contain 1-20 entries');
@@ -317,7 +322,7 @@ function parseRouteSelection(
     };
   });
 
-  return { mode: 'shadow', rules };
+  return value.mode === 'active' ? { mode: 'active', rules } : { mode: 'shadow', rules };
 }
 
 function parseDelegation(

@@ -238,6 +238,13 @@ function testConfig(maxConcurrency = 1, workerMaxAttempts = 1, maxChildren = 2):
         maxAttempts: workerMaxAttempts,
         timeoutMs: 30_000,
       },
+      alternate: {
+        worker: 'test',
+        provider: 'test',
+        model: 'alternate',
+        maxAttempts: workerMaxAttempts,
+        timeoutMs: 30_000,
+      },
     },
     delegation: {
       mode: 'auto',
@@ -380,6 +387,54 @@ test('OrchestrationService keeps shadow suggestions out of child route authority
     assert.equal(metadata.taskKind, matchedSubtask.kind);
     assert.equal(metadata.parentComplexity, 'medium');
     assert.deepEqual(metadata.routeSelection, matchedSubtask.routeSelection);
+  }
+});
+
+test('OrchestrationService dispatches the exact human-configured active route', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-active-route-');
+  const adapter = new PlannerAndWorkerAdapter(assessment);
+  const routeSelection: RouteSelectionConfig = {
+    mode: 'active',
+    rules: [{ route: 'alternate', complexities: ['medium'] }],
+  };
+  const { jobStore, orchestrations } = createServices(adapter, 2, 1, 2, routeSelection);
+
+  const record = await orchestrations.run({
+    prompt: 'Run the configured medium-complexity route.',
+    workspace,
+  });
+
+  assert.equal(record.status, 'succeeded');
+  assert.equal(record.plan?.subtasks.every((subtask) => subtask.route === 'alternate'), true);
+  assert.deepEqual(
+    record.plan?.subtasks.map((subtask) => subtask.routeSelection),
+    [
+      { mode: 'active', selectedRoute: 'alternate', basis: 'rule', ruleIndex: 0 },
+      { mode: 'active', selectedRoute: 'alternate', basis: 'rule', ruleIndex: 0 },
+    ]
+  );
+  assert.deepEqual(
+    record.events
+      .filter((event) => event.type === 'orchestration.child.started')
+      .map((event) => event.data?.route),
+    ['alternate', 'alternate']
+  );
+
+  const childJobs = (await jobStore.list()).filter(
+    (job) => (job.request.metadata?.agentknotDelegation as Record<string, unknown> | undefined)?.role === 'worker'
+  );
+  assert.equal(childJobs.length, 2);
+  for (const child of childJobs) {
+    assert.equal(child.request.route, 'alternate');
+    assert.equal(child.route.name, 'alternate');
+    assert.equal(child.route.model, 'alternate');
+    const metadata = child.request.metadata?.agentknotDelegation as Record<string, unknown>;
+    assert.deepEqual(metadata.routeSelection, {
+      mode: 'active',
+      selectedRoute: 'alternate',
+      basis: 'rule',
+      ruleIndex: 0,
+    });
   }
 });
 
