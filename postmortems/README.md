@@ -143,3 +143,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0029](./0029-controller-cli-and-single-child-delegation.md) | Incident / Decision | Accepted | Make the controller CLI prerequisite and single-child delegation explicit |
 | [0030](./0030-pre-model-controller-dispatch.md) | Incident / Decision | Accepted | Dispatch configured automatic work before the controller model |
 | [0031](./0031-bounded-pi-output-drain.md) | Incident / Experiment | Resolved | Bound Pi output draining when an event sink never settles |
+| [0032](./0032-pre-model-multi-child-evidence.md) | Experiment | Accepted | Prove pre-model multi-child dispatch without a direct baseline |

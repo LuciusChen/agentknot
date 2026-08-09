@@ -275,7 +275,18 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
   const admission = runtime.start({ prompt: 'owner remains held during work', workspace });
   await assert.rejects(runtime.close(), /Cannot release runtime storage ownership while work is active/);
   const ownedJob = await admission;
-  assert.equal((await ownedJob.completion).status, 'succeeded');
+  const terminalJob = await ownedJob.completion;
+  assert.equal(terminalJob.status, 'succeeded');
+  assert.equal(terminalJob.route.name, 'mock');
+  assert.equal(terminalJob.route.worker, 'mock');
+  const startedEvent = terminalJob.events.find((event) => event.type === 'job.started');
+  assert.ok(startedEvent);
+  assert.deepEqual(startedEvent.data, {
+    route: 'mock',
+    worker: 'mock',
+    provider: 'mock',
+    model: 'mock',
+  });
 
   const queuedAfterFirstRecovery = await runtime.get('job_stale_queued');
   await assert.rejects(

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -87,6 +87,24 @@ async function runHook(
     });
     child.stdin.end(JSON.stringify(payload));
   });
+}
+
+async function writeFakeAgentKnot(directory: string): Promise<string> {
+  const executable = path.join(directory, 'agentknot');
+  const callsFile = path.join(directory, 'calls.jsonl');
+  await writeFile(
+    executable,
+    `#!${process.execPath}\n` +
+      `import { appendFileSync } from 'node:fs';\n` +
+      `const args = process.argv.slice(2);\n` +
+      `appendFileSync(process.env.FAKE_AGENTKNOT_CALLS, JSON.stringify(args) + '\\n');\n` +
+      `if (args[0] === 'delegation') process.stdout.write('{"mode":"auto"}');\n` +
+      `else if (args[0] === 'orchestrate') process.stdout.write(process.env.FAKE_AGENTKNOT_HANDOFF);\n` +
+      `else if (args[0] === 'artifact-preview') process.stdout.write(process.env.FAKE_AGENTKNOT_PREVIEW);\n` +
+      `else process.exitCode = 1;\n`
+  );
+  await chmod(executable, 0o755);
+  return callsFile;
 }
 
 test('Codex and Claude plugins expose the same bounded AgentKnot delegation contract', async () => {
@@ -205,21 +223,8 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
 test('controller hook runs configured automatic delegation before the model and embeds valid preview evidence', async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-hook-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const executable = path.join(directory, 'agentknot');
-  const callsFile = path.join(directory, 'calls.jsonl');
+  const callsFile = await writeFakeAgentKnot(directory);
   const configPath = path.join(directory, 'agentknot.config.json');
-  await writeFile(
-    executable,
-    `#!${process.execPath}\n` +
-      `import { appendFileSync } from 'node:fs';\n` +
-      `const args = process.argv.slice(2);\n` +
-      `appendFileSync(process.env.FAKE_AGENTKNOT_CALLS, JSON.stringify(args) + '\\n');\n` +
-      `if (args[0] === 'delegation') process.stdout.write('{"mode":"auto"}');\n` +
-      `else if (args[0] === 'orchestrate') process.stdout.write(process.env.FAKE_AGENTKNOT_HANDOFF);\n` +
-      `else if (args[0] === 'artifact-preview') process.stdout.write(process.env.FAKE_AGENTKNOT_PREVIEW);\n` +
-      `else process.exitCode = 1;\n`
-  );
-  await chmod(executable, 0o755);
 
   const prompt = 'Audit the bounded controller handoff and report every mismatch.';
   const childOutput = `${'x'.repeat(4_000)}One mismatch found.`;
@@ -276,3 +281,95 @@ test('controller hook runs configured automatic delegation before the model and 
   assert.equal(explicit, '');
   assert.equal((await readFile(callsFile, 'utf8')).trim().split('\n').length, 3);
 });
+
+for (const [removed, survivor] of [
+  [integrations[0], integrations[1]],
+  [integrations[1], integrations[0]],
+] as const) {
+  test(
+    `temporary ${survivor.controller} install keeps its handoff after removing ${removed.controller}`,
+    async (t) => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-install-'));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+
+      await Promise.all(
+        integrations.map((integration) =>
+          cp(
+            path.join(repositoryRoot, 'integrations', integration.controller),
+            path.join(directory, integration.controller),
+            { recursive: true }
+          )
+        )
+      );
+      const removedPackagePath = path.join(directory, removed.controller);
+      await rm(removedPackagePath, { recursive: true, force: true });
+      await assert.rejects(
+        readFile(
+          path.join(removedPackagePath, 'agentknot', 'hooks', 'user-prompt-submit.mjs'),
+          'utf8'
+        ),
+        /ENOENT/
+      );
+
+      const survivorPackagePath = path.join(directory, survivor.controller, 'agentknot');
+      const hookPath = path.join(survivorPackagePath, 'hooks', 'user-prompt-submit.mjs');
+      const manifest = JSON.parse(
+        await readFile(
+          path.join(
+            directory,
+            survivor.controller,
+            path.relative(path.join('integrations', survivor.controller), survivor.manifest)
+          ),
+          'utf8'
+        )
+      ) as Record<string, unknown>;
+      const skillSource = await readFile(
+        path.join(survivorPackagePath, 'skills', 'agentknot-delegate', 'SKILL.md'),
+        'utf8'
+      );
+      assert.equal(manifest.name, 'agentknot');
+      assert.match(skillSource, /agentknot orchestrate/);
+      assert.match(skillSource, new RegExp(`--source ${survivor.controller}`));
+      assert.equal(hookPath.startsWith(`${removedPackagePath}${path.sep}`), false);
+
+      const callsFile = await writeFakeAgentKnot(directory);
+      const configPath = path.join(directory, 'agentknot.config.json');
+      const prompt = 'Audit the bounded controller handoff and report every mismatch.';
+      const environment = {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ''}`,
+        AGENTKNOT_CONFIG: configPath,
+        FAKE_AGENTKNOT_CALLS: callsFile,
+        FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
+          plan: { willDispatch: true },
+          children: [],
+          artifacts: [],
+        }),
+      };
+      const result = await runHook(hookPath, survivor.controller, environment, {
+        hook_event_name: 'UserPromptSubmit',
+        cwd: repositoryRoot,
+        prompt,
+      });
+      const output = JSON.parse(result) as {
+        hookSpecificOutput: { hookEventName: string; additionalContext: string };
+      };
+      assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+      assert.match(output.hookSpecificOutput.additionalContext, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
+
+      const calls = (await readFile(callsFile, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as string[]);
+      assert.deepEqual(calls[0], ['delegation', '--json', '--config', configPath]);
+      const orchestrate = calls[1];
+      assert.ok(orchestrate);
+      assert.equal(orchestrate[0], 'orchestrate');
+      assert.equal(orchestrate[orchestrate.indexOf('--source') + 1], survivor.controller);
+      assert.equal(orchestrate[orchestrate.indexOf('--delegation') + 1], 'inherit');
+      assert.equal(orchestrate[orchestrate.indexOf('--prompt') + 1], prompt);
+      assert.equal(orchestrate.includes(removedPackagePath), false);
+      assert.equal(calls.length, 2);
+    }
+  );
+}

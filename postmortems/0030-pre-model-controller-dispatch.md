@@ -58,7 +58,7 @@ Skill descriptions and developer-context reminders influence a controller model 
 
 Every non-explicit prompt submitted inside an `auto` repository is sent to the configured Luna planner before the controller model, including vague continuation, informational, requirements, and product-decision prompts that the planner later retains upstream. This consumes downstream quota, adds planner latency, and expands the prompt-data boundary. Users must select `off` or `suggest` when that tradeoff is unacceptable.
 
-Evidence now covers the initial read-only direct comparison and one non-empty controller-first/manual-delegation comparison. In the second run, pre-model dispatch returned a verified patch before Codex applied and validated it, but the baseline was not pure direct. Claude parity, multi-child work, failure/timeout behavior through a real controller, broader task distributions, and repeated savings remain Stage 2 promotion gates ([incident 0031](./0031-bounded-pi-output-drain.md)).
+Evidence now covers the initial read-only direct comparison and one non-empty controller-first/manual-delegation comparison. In the second run, pre-model dispatch returned a verified patch before Codex applied and validated it, but the baseline was not pure direct. A later no-baseline Codex run proved automatic two-child dispatch, disjoint verified artifacts, and upstream integration; it does not establish a multi-child savings ratio. Real Claude parity, failure/timeout behavior through a real controller, broader task distributions, and repeated savings remain Stage 2 promotion gates ([incident 0031](./0031-bounded-pi-output-drain.md), [experiment 0032](./0032-pre-model-multi-child-evidence.md)).
 
 ## Corrective actions and gates
 
@@ -68,8 +68,9 @@ Evidence now covers the initial read-only direct comparison and one non-empty co
 - [x] Preserve explicit Skill invocation without a duplicate automatic run.
 - [x] Record the first same-task upstream-token reduction without generalizing it.
 - [x] Record one non-empty controller-first versus pre-model implementation comparison without treating it as a pure-direct or universal result ([incident 0031](./0031-bounded-pi-output-drain.md)).
+- [x] Prove automatic pre-model dispatch of two non-overlapping children and controller-owned artifact integration ([experiment 0032](./0032-pre-model-multi-child-evidence.md)).
 - [ ] Prove the same terminal/artifact contract through a real Claude controller invocation.
-- [ ] Repeat Codex comparison on a multi-child task before promotion.
+- [ ] Compare the same multi-child task against an approved direct/controller-first baseline before making a savings claim.
 - [ ] Exercise real-controller planner failure, route timeout, and cleanup behavior.
 
 ## Privacy and security review
