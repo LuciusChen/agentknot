@@ -72,3 +72,7 @@ The decision changes scheduling and prompt policy only. It introduces no credent
 ### 2026-08-09: Raise dogfood active slots to six
 
 The repository later raised `maxConcurrency` from four to the existing supported ceiling of six while keeping `maxChildren: 6`. This is a configuration-only dogfood change: product defaults remain two, the scheduler still starts only available eligible tasks, non-parallel plans still run one child at a time, and the non-overlap/dependency rules remain unchanged. Raising the ceiling cannot reduce the latency of a plan containing only two or three useful subtasks.
+
+### 2026-08-09: Revert to the measured four-slot limit
+
+Immediate live validation disproved the assumption behind the preceding configuration change. Five and six simultaneous normal Pi jobs each failed as a complete cohort before `agent_settled`, while a subsequent single normal job succeeded and prior four-worker dogfood evidence remained valid. The repository therefore restored `maxConcurrency: 4`; [incident 0018](./0018-pi-concurrency-startup-ceiling.md) records the evidence and the missing capacity gate.

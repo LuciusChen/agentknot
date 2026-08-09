@@ -129,3 +129,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0015](./0015-terminal-completion-provenance-boundary.md) | Decision | Accepted | Keep terminal completion provenance explicit |
 | [0016](./0016-shadow-route-selection.md) | Decision | Accepted | Keep route selection shadow-only until measured scorecards |
 | [0017](./0017-deepseek-flash-route-ab.md) | Experiment | Inconclusive | Keep DeepSeek Flash as an explicit candidate after one mixed A/B |
+| [0018](./0018-pi-concurrency-startup-ceiling.md) | Incident | Resolved | Restore four slots after five- and six-way Pi startup failure |

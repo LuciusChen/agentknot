@@ -110,7 +110,7 @@ Version 0.0.1 currently implements:
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
 - strict planner assessments followed by deterministic task-kind policy;
 - immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
-- bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with up to six active slots, and a configuration ceiling of six for each with concurrency never exceeding the child count;
+- bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with four active slots based on live Pi capacity evidence, and a configuration ceiling of six for each with concurrency never exceeding the child count;
 - fail-without-resume startup reconciliation for stale jobs and orchestration records;
 - optional vendor-neutral shadow route-selection evidence under `delegation.dispatch`, disabled by omission and limited to 1–20 ordered rules whose candidate routes validate at config load, with first-match/default evidence in plans and child metadata while actual children remain on `dispatch.defaultRoute` ([decision 0016](../postmortems/0016-shadow-route-selection.md)).
 

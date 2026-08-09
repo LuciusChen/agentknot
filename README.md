@@ -87,7 +87,7 @@ node dist/src/cli.js orchestrate \
   "Implement the approved feature and verify its public contract"
 ```
 
-The repository configuration dogfoods `mode: "auto"` with Luna as both planner and worker. The product defaults are `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; this repository uses a six-task pool with up to six active execution slots, which is also the configuration ceiling. The scheduler starts only the useful available tasks up to the cap, so two tasks still use two workers while six independently safe tasks may start together. The planner only returns a strict assessment and is instructed to mark work parallel only when subtasks are independently verifiable, have no execution-order dependency, and have non-overlapping expected write scopes. The planner never names routes: deterministic policy filters task kinds, keeps each eligible child's actual route on `dispatch.defaultRoute`, optionally records shadow route-selection evidence, persists the effective policy, exact worker prompts, and plan hash, and only then starts child jobs. The plan hash covers the persisted route-selection evidence, and child metadata carries the task kind, parent assessment complexity, and evidence for later scorecards. A non-parallel assessment automatically reduces its parent to one active child. Product decisions, artifact integration, commits, and pushes remain with the upstream controller.
+The repository configuration dogfoods `mode: "auto"` with Luna as both planner and worker. The product defaults are `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; this repository keeps a six-task pool with four active execution slots. Although configuration accepts up to six, live Pi startup checks established four as the current operational limit: five or six simultaneous normal jobs exited before settlement. The scheduler starts only the useful available tasks up to the cap and immediately refills a slot when a worker completes, so two tasks use two workers while six tasks flow through four slots. The planner only returns a strict assessment and is instructed to mark work parallel only when subtasks are independently verifiable, have no execution-order dependency, and have non-overlapping expected write scopes. The planner never names routes: deterministic policy filters task kinds, keeps each eligible child's actual route on `dispatch.defaultRoute`, optionally records shadow route-selection evidence, persists the effective policy, exact worker prompts, and plan hash, and only then starts child jobs. The plan hash covers the persisted route-selection evidence, and child metadata carries the task kind, parent assessment complexity, and evidence for later scorecards. A non-parallel assessment automatically reduces its parent to one active child. Product decisions, artifact integration, commits, and pushes remain with the upstream controller.
 
 The successful self-orchestration was evidence for one normal planner-to-plan-to-child run, not standalone evidence of planner fail-fast behavior. Planner failure, timeout, cancellation, and waiting for a shared dispatch slot have separate outcomes and must be established by their deterministic tests; with the default `upstream` fallback, malformed or failed planner output is recorded in a persisted upstream plan, while `fail` terminates the parent before dispatch.
 
@@ -105,7 +105,7 @@ Add the following optional object inside `delegation.dispatch` to observe determ
     "defaultRoute": "luna",
     "maxChildren": 6,
     "maxDepth": 1,
-    "maxConcurrency": 6,
+    "maxConcurrency": 4,
     "routeSelection": {
       "mode": "shadow",
       "rules": [
@@ -315,7 +315,7 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "defaultRoute": "luna",
       "maxChildren": 6,
       "maxDepth": 1,
-      "maxConcurrency": 6
+      "maxConcurrency": 4
     },
     "policy": {
       "delegate": ["architecture-review", "test-gap-analysis", "documentation", "independent-implementation"],
