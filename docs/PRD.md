@@ -115,13 +115,14 @@ Version 0.0.1 currently implements:
 - bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with four active slots backed by a current four-child Luna/max orchestration, and a configuration ceiling of six for each with concurrency never exceeding the child count;
 - fail-without-resume startup reconciliation for stale jobs and orchestration records;
 - one execution-owning file runtime per canonical Job/Orchestration storage directory, with a second conforming writer refused before reconciliation or admission and read-only runtimes prevented from executing work;
+- catchable CLI and HTTP shutdown that cancels and awaits admitted work before releasing runtime ownership, plus a bounded process-attributed Stage 1 soak;
 - optional vendor-neutral route-selection policy under `delegation.dispatch`, disabled by omission and limited to 1–20 ordered rules whose candidate routes validate at config load, with `shadow` evidence-only and `active` human-authored execution modes ([decisions 0016](../postmortems/0016-shadow-route-selection.md) and [0020](../postmortems/0020-human-authored-active-route-selection.md));
 
 Rules may match non-empty unique `taskKinds` and/or non-empty unique parent `complexities` from `low`, `medium`, and `high`; both predicates must match when both are present, a rule with neither is an explicit catch-all, and a zero-based rule index is recorded only for a match. The repository's active dogfood rule maps `low` to DeepSeek Flash/max and leaves `medium`, `high`, and no match on the Luna/max default. This is explicit human policy, not an intelligence ranking, learned optimization, or fallback.
 
 Route diagnostics have two explicit modes. The default `doctor` command is a fast configuration, credential, and runtime check and must say that live inference was not checked. The opt-in `doctor --live` path performs one bounded real inference through the exact selected worker, provider, model, and thinking level; its 30-second control-plane timer triggers cooperative abort, and a supported adapter must settle after abort and clean up its resources. It reports provider errors with failure status and unsupported adapters honestly, does not fall back or select another route, does not create Job or artifact records, and does not add a probe before normal jobs or orchestrations.
 
-The current file stores provide persistent audit snapshots. Execution-owning runtimes deterministically mark stale nonterminal jobs or orchestrations failed on startup when their recorded process is absent; read-oriented CLI runtimes do not perform this recovery. The stores do not provide resumable execution, a restartable queue, journaling, multi-process coordination, PID-reuse protection, or automatic cleanup of worktrees left by a hard process crash.
+The current file stores provide persistent audit snapshots. After acquiring exclusive storage ownership, an execution-owning runtime deterministically marks every prior nonterminal Job or Orchestration failed once without replay; recorded PID liveness is audit evidence, not takeover authority. Read-oriented runtimes do not perform recovery. The stores do not provide resumable execution, a restartable queue, journaling, distributed coordination, or automatic cleanup of arbitrary descendants and worktrees left by an uncatchable hard process crash.
 
 Provider and model independence are currently routing properties implemented by the selected worker. AgentKnot does not yet expose an independent provider-runtime interface.
 
@@ -188,6 +189,8 @@ The product remains on course when all of the following are true:
 - controllers can verify and preview recorded artifacts without source mutation, while acceptance and promotion remain explicit upstream decisions;
 - delegated parent results compare terminal controller-captured paths deterministically, report repeated paths without calling them semantic conflicts, and mark missing evidence incomplete rather than clean;
 - retries start from the same recorded base rather than prior-attempt edits;
+- after admission, catchable CLI or HTTP shutdown cancels and awaits active work before ownership release; late events from a settled attempt cannot enter a retry or terminal record;
+- normal snapshot and artifact write failures remove only their exact temporary file, and the bounded Stage 1 soak leaves no attributed process or managed-worktree residue;
 - credentials are not intentionally copied into configuration, records, events, logs, callbacks, or artifact metadata;
 - local records and artifacts remain until deliberate exact operator deletion, with no automatic expiry, cascade deletion, or content-redaction claim;
 - current, proposed, experimental, and deferred capabilities are distinguishable in documentation;
@@ -214,6 +217,7 @@ These are evidence requirements, not claims that the current MVP has already met
 - Worker completion reports are claims at the adapter boundary; accepting their strict shape does not verify changed paths, check outcomes, remaining risks, or notes.
 - Exact child path overlap is conservative potential-conflict evidence: same-path patches can be compatible, disjoint paths can still be semantically coupled, and every selected artifact still requires integrity/base review.
 - A custom adapter may ignore cooperative cancellation unless the adapter contract and process supervision enforce termination.
+- Hard `SIGKILL`, host loss, or another uncatchable failure bypasses shutdown handlers; restart reconciliation repairs persisted nonterminal state but cannot universally prove ownership of leftover processes or worktrees.
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete bounded job record when its serialized body is no more than 8 MiB.
 - A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk. Shadow suggestions and active configured routing both inherit the limits of the parent complexity and task-kind classification; active mode therefore keeps a conservative Luna default and never adds fallback.
 - Shadow route evidence is not a measured model ranking; separate scorecards must compare routes on the same bounded workloads before any automatic selection is proposed.

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
@@ -10,6 +10,7 @@ import { OrchestrationService } from '../src/orchestration.js';
 import { FileOrchestrationStore } from '../src/orchestration-store.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { FileJobStore } from '../src/store.js';
+import type { JobRecord } from '../src/types.js';
 
 const config: AgentKnotConfig = {
   version: 1,
@@ -158,6 +159,31 @@ test('new Job and Orchestration records persist schemaVersion 1', async () => {
     ).schemaVersion,
     1
   );
+});
+
+test('file stores remove their exact temporary snapshot after rename failure', async () => {
+  const directory = await createTemporaryDirectory('agentknot-record-versioning-temp-cleanup-');
+  const cases = [
+    {
+      id: 'job_rename_failure',
+      directory: path.join(directory, 'jobs'),
+      store: new FileJobStore(path.join(directory, 'jobs')),
+      record: { ...legacyJob('job_rename_failure'), schemaVersion: 1 } as unknown as JobRecord,
+    },
+    {
+      id: 'orchestration_rename_failure',
+      directory: path.join(directory, 'orchestrations'),
+      store: new FileOrchestrationStore(path.join(directory, 'orchestrations')),
+      record: { ...legacyOrchestration('orchestration_rename_failure'), schemaVersion: 1 },
+    },
+  ];
+
+  for (const fixture of cases) {
+    await mkdir(fixture.directory, { recursive: true });
+    await mkdir(path.join(fixture.directory, `${fixture.id}.json`));
+    await assert.rejects(fixture.store.create(fixture.record as never));
+    assert.deepEqual(await readdir(fixture.directory), [`${fixture.id}.json`]);
+  }
 });
 
 test('FileJobStore materializes a legacy v1 record without rewriting read-only access', async () => {

@@ -329,10 +329,20 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
         });
       });
     },
-    close() {
-      return new Promise((resolve, reject) => {
+    async close() {
+      const serverClosed = new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
+      await serverClosed;
+      const active = [
+        ...[...activeOrchestrations.values()].map((item) => item.completion),
+        ...[...activeJobs.values()].map((item) => item.completion),
+      ];
+      await Promise.allSettled([
+        ...[...activeOrchestrations.values()].map((item) => item.cancel()),
+        ...[...activeJobs.values()].map(async (item) => item.cancel()),
+      ]);
+      await Promise.allSettled(active);
     },
   };
 }

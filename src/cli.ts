@@ -80,6 +80,26 @@ function printEvent(event: JobEvent, json: boolean, events: boolean): void {
   }
 }
 
+function cancelOnTermination(cancel: () => void | Promise<void>): () => void {
+  let requested = false;
+  const onSignal = () => {
+    if (requested) return;
+    requested = true;
+    process.exitCode = 1;
+    void Promise.resolve(cancel()).catch((error: unknown) => {
+      process.stderr.write(
+        `agentknot: termination cancellation failed: ${error instanceof Error ? error.message : String(error)}\n`
+      );
+    });
+  };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+  return () => {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+  };
+}
+
 async function main(argv: string[]): Promise<void> {
   const args = [...argv];
   const command = args.shift();
@@ -105,15 +125,23 @@ async function main(argv: string[]): Promise<void> {
       onEvent: (event) => printEvent(event, json, events),
       reconcileOnStartup: true,
     });
-    const job = await runtime
-      .run({
+    const started = await runtime
+      .start({
         prompt,
         workspace,
         source,
         ...(route === undefined ? {} : { route }),
         ...(callbackUrl === undefined ? {} : { callbackUrl }),
       })
-      .finally(() => runtime.close());
+      .catch(async (error: unknown) => {
+        await runtime.close();
+        throw error;
+      });
+    const stopCancellation = cancelOnTermination(started.cancel);
+    const job = await started.completion.finally(async () => {
+      stopCancellation();
+      await runtime.close();
+    });
     if (!json && !events) process.stdout.write('\n');
     if (json) process.stdout.write(`${JSON.stringify(job, null, 2)}\n`);
     if (events) process.stdout.write(`${JSON.stringify({ type: 'job.snapshot', job })}\n`);
@@ -142,8 +170,8 @@ async function main(argv: string[]): Promise<void> {
       onEvent: (event) => printEvent(event, json, false),
       reconcileOnStartup: true,
     });
-    const orchestration = await runtime
-      .orchestrate({
+    const started = await runtime
+      .startOrchestration({
         prompt,
         workspace,
         source,
@@ -151,7 +179,15 @@ async function main(argv: string[]): Promise<void> {
           ? {}
           : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),
       })
-      .finally(() => runtime.close());
+      .catch(async (error: unknown) => {
+        await runtime.close();
+        throw error;
+      });
+    const stopCancellation = cancelOnTermination(started.cancel);
+    const orchestration = await started.completion.finally(async () => {
+      stopCancellation();
+      await runtime.close();
+    });
     if (json) {
       process.stdout.write(`${JSON.stringify(orchestration, null, 2)}\n`);
     } else {
@@ -180,6 +216,13 @@ async function main(argv: string[]): Promise<void> {
     const address = await http.listen(port, host).catch(async (error: unknown) => {
       await runtime.close();
       throw error;
+    });
+    cancelOnTermination(async () => {
+      try {
+        await http.close();
+      } finally {
+        await runtime.close();
+      }
     });
     process.stdout.write(`AgentKnot listening on http://${address.host}:${address.port}\n`);
     return;

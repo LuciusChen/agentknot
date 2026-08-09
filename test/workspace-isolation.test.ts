@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import type { AgentKnotConfig } from '../src/config.js';
 import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { MemoryJobStore } from '../src/store.js';
-import { MAX_ARTIFACT_BYTES } from '../src/workspace-isolation.js';
+import { MAX_ARTIFACT_BYTES, WorkspaceIsolationManager } from '../src/workspace-isolation.js';
 import type {
   JobStore,
   ResolvedRoute,
@@ -544,4 +544,59 @@ test('failure and cancellation capture patches and clean their worktrees', async
   assert.match((await readFile(cancelled.artifacts?.[0]?.path ?? '')).toString(), /cancelled\.txt/);
   assert.deepEqual(await managedEntries(path.join(paths.worktreeDirectory, 'cancel')), []);
   assert.equal(await status(paths.root), '');
+});
+
+test('timeout captures its patch and leaves no worktree or source residue', async () => {
+  const paths = await repository();
+  const timingOut = new (class extends TestAdapter {
+    async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+      await writeFile(path.join(input.workspace, 'timed-out.txt'), 'timed out\n');
+      await new Promise<void>((resolve) => {
+        if (input.signal.aborted) resolve();
+        else input.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return { output: 'must not succeed after timeout' };
+    }
+  })();
+  const timeoutConfig = config(paths.storage, paths.worktreeDirectory);
+  timeoutConfig.routes.test!.timeoutMs = 20;
+  const orchestrator = new Orchestrator({
+    config: timeoutConfig,
+    store: new MemoryJobStore(),
+    adapters: new Map([['test', timingOut]]),
+  });
+
+  const job = await orchestrator.run({ prompt: 'timeout', workspace: paths.root });
+  const verification = await orchestrator.verifyArtifacts(job.id);
+  assert.equal(job.status, 'failed');
+  assert.match(job.error?.message ?? '', /timed out/);
+  assert.deepEqual(job.artifacts?.[0]?.changedFiles, ['timed-out.txt']);
+  assert.equal(verification?.valid, true);
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+  assert.equal(await status(paths.root), '');
+});
+
+test('patch rename failure removes its exact temporary artifact', async () => {
+  const paths = await repository();
+  const manager = new WorkspaceIsolationManager(config(paths.storage, paths.worktreeDirectory));
+  const jobId = 'job_patch_rename_failure';
+  const isolated = await manager.create(await manager.inspect(paths.root), jobId, 1);
+  const artifactDirectory = path.join(paths.storage, 'artifacts', jobId);
+  const conflictingTarget = path.join(artifactDirectory, 'attempt-1.patch');
+  try {
+    await writeFile(path.join(isolated.path, 'change.txt'), 'change\n');
+    await mkdir(conflictingTarget, { recursive: true });
+
+    await assert.rejects(manager.capturePatch(isolated, jobId, 1));
+
+    assert.deepEqual(await readdir(artifactDirectory), ['attempt-1.patch']);
+    assert.equal((await readdir(artifactDirectory)).some((name) => name.endsWith('.tmp')), false);
+  } finally {
+    await manager.cleanup(isolated);
+    await Promise.all(
+      [paths.root, paths.worktreeDirectory, paths.storage].map((directory) =>
+        rm(directory, { recursive: true, force: true })
+      )
+    );
+  }
 });

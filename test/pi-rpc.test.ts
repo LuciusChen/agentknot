@@ -139,7 +139,8 @@ function createFakePiOrchestrator(environment: Record<string, string>): Orchestr
 
 function createConformanceOrchestrator(
   environment: Record<string, string>,
-  timeoutMs: number
+  timeoutMs: number,
+  maxAttempts = 1
 ): Orchestrator {
   const config: AgentKnotConfig = {
     version: 1,
@@ -160,7 +161,7 @@ function createConformanceOrchestrator(
         provider: 'test-provider',
         model: 'test-model',
         requiredEnv: [],
-        maxAttempts: 1,
+        maxAttempts,
         timeoutMs,
       },
     },
@@ -891,6 +892,46 @@ test('PiRpcWorkerAdapter reports process exit before agent_settled', async () =>
     adapter.run(conformanceInput(new AbortController().signal), () => undefined),
     /exited before agent_settled.*code=17.*premature fixture exit/
   );
+});
+
+test('Orchestrator retries one exited Pi child and leaves both exact PIDs gone', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-exit-retry-'));
+  const marker = path.join(directory, 'first-attempt');
+  const pidLog = path.join(directory, 'children.pids');
+  const orchestrator = createConformanceOrchestrator(
+    {
+      FAKE_PI_MODE: 'exit-once-then-split',
+      FAKE_PI_ATTEMPT_MARKER: marker,
+      FAKE_PI_PID_LOG: pidLog,
+    },
+    10_000,
+    2
+  );
+  let pids: number[] = [];
+  try {
+    const job = await orchestrator.run({ prompt: 'retry exited Pi', workspace: directory });
+    pids = (await readFile(pidLog, 'utf8'))
+      .trim()
+      .split('\n')
+      .map(Number);
+
+    assert.equal(job.status, 'succeeded');
+    assert.equal(job.attempt, 2);
+    assert.equal(job.result?.attempt, 2);
+    assert.equal(job.events.filter((event) => event.type === 'job.retrying').length, 1);
+    assert.equal(pids.length, 2);
+    assert.equal(new Set(pids).size, 2);
+    for (const pid of pids) assertProcessGone(pid);
+  } finally {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // The adapter already reaped the exact child.
+      }
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('PiRpcWorkerAdapter distinguishes agent_end without agent_settled', async () => {

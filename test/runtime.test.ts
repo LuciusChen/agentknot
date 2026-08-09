@@ -161,6 +161,21 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
     },
   ];
   await orchestrationStore.create(staleParentRecord);
+  const staleQueuedParent = staleOrchestration(
+    'orchestration_stale_queued',
+    'queued',
+    workspace,
+    exitedPid
+  );
+  const stalePlanningParent = staleOrchestration(
+    'orchestration_stale_planning',
+    'planning',
+    workspace,
+    exitedPid
+  );
+  stalePlanningParent.cancelRequestedAt = '2026-08-08T01:00:02.000Z';
+  await orchestrationStore.create(staleQueuedParent);
+  await orchestrationStore.create(stalePlanningParent);
   const unchangedJobSnapshots = new Map(
     await Promise.all(
       ['job_stale_queued', 'job_stale_running', 'job_active_running', 'job_stale_child'].map(
@@ -168,19 +183,30 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
       )
     )
   );
-  const unchangedOrchestrationSnapshot = await readFile(
-    path.join(orchestrationStorageDirectory, `${staleParentRecord.id}.json`)
+  const unchangedOrchestrationSnapshots = new Map(
+    await Promise.all(
+      [staleParentRecord, staleQueuedParent, stalePlanningParent].map(
+        async (record) => [
+          record.id,
+          await readFile(path.join(orchestrationStorageDirectory, `${record.id}.json`)),
+        ] as const
+      )
+    )
   );
   const readOnlyRuntime = await createRuntime({ configPath, reconcileOnStartup: false });
   for (const [id, snapshot] of unchangedJobSnapshots) {
     assert.deepEqual(await readFile(path.join(storageDirectory, `${id}.json`)), snapshot);
   }
-  assert.deepEqual(
-    await readFile(path.join(orchestrationStorageDirectory, `${staleParentRecord.id}.json`)),
-    unchangedOrchestrationSnapshot
-  );
+  for (const [id, snapshot] of unchangedOrchestrationSnapshots) {
+    assert.deepEqual(
+      await readFile(path.join(orchestrationStorageDirectory, `${id}.json`)),
+      snapshot
+    );
+  }
   assert.equal((await readOnlyRuntime.get('job_stale_queued'))?.status, 'queued');
   assert.equal((await readOnlyRuntime.getOrchestration(staleParentRecord.id))?.status, 'dispatching');
+  assert.equal((await readOnlyRuntime.getOrchestration(staleQueuedParent.id))?.status, 'queued');
+  assert.equal((await readOnlyRuntime.getOrchestration(stalePlanningParent.id))?.status, 'planning');
   await assert.rejects(
     async () => readOnlyRuntime.run({ prompt: 'must remain read only', workspace }),
     /created for read-only access/
@@ -229,6 +255,22 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
   assert.equal(staleParent?.events.at(-1)?.data?.reason, 'runtime_restart');
   assert.equal(staleParent?.children[0]?.status, 'failed');
   assert.equal(staleParent?.children[0]?.error?.name, 'ExecutionInterruptedError');
+  for (const [id, previousStatus] of [
+    [staleQueuedParent.id, 'queued'],
+    [stalePlanningParent.id, 'planning'],
+  ] as const) {
+    const parent = await runtime.getOrchestration(id);
+    assert.equal(parent?.status, 'failed');
+    assert.equal(parent?.error?.name, 'ExecutionInterruptedError');
+    assert.equal(parent?.events.at(-1)?.type, 'orchestration.failed');
+    assert.equal(parent?.events.at(-1)?.data?.previousStatus, previousStatus);
+    assert.equal(parent?.events.at(-1)?.data?.reason, 'runtime_restart');
+  }
+  assert.equal(
+    (await runtime.getOrchestration(stalePlanningParent.id))?.cancelRequestedAt,
+    stalePlanningParent.cancelRequestedAt,
+    'runtime interruption remains the terminal outcome while preserving prior cancellation intent'
+  );
 
   const admission = runtime.start({ prompt: 'owner remains held during work', workspace });
   await assert.rejects(runtime.close(), /Cannot release runtime storage ownership while work is active/);
@@ -250,6 +292,12 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
       await secondRuntime.getOrchestration('orchestration_stale'),
       staleParent
     );
+    for (const id of [staleQueuedParent.id, stalePlanningParent.id]) {
+      assert.deepEqual(
+        await secondRuntime.getOrchestration(id),
+        await runtime.getOrchestration(id)
+      );
+    }
   } finally {
     await secondRuntime.close();
   }

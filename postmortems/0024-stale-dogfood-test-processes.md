@@ -1,7 +1,7 @@
 # 0024: Contain stale dogfood test processes
 
 - Type: Incident
-- Status: Contained
+- Status: Resolved
 - Date: 2026-08-09
 - Severity: Medium
 - Owners: AgentKnot maintainers
@@ -34,10 +34,20 @@ The observation proves that old dogfood tool invocations outlived their useful w
 
 - [x] Resolve exact host process ancestry and clean only obsolete groups.
 - [x] Verify no matching test/fake-Pi process remains after cleanup.
-- [ ] Add a bounded dogfood/soak runner or equivalent process-residue assertion that can attribute descendants to its own invocation.
-- [ ] Reproduce the interrupted-tool path before changing Pi supervision or claiming the incident resolved.
-- [ ] Include host process-residue evidence in the Stage 1 crash/soak exit audit.
+- [x] Add a bounded dogfood/soak runner or equivalent process-residue assertion that can attribute descendants to its own invocation.
+- [x] Reproduce the interrupted-tool path before changing Pi supervision or claiming the incident resolved.
+- [x] Include host process-residue evidence in the Stage 1 crash/soak exit audit.
 
 ## Privacy and security review
 
 Recorded evidence contains only process IDs, command names, elapsed times, public test paths, and one orchestration ID. It contains no credentials, environment values, prompts, model output, source content, or artifact bytes.
+
+## Addenda
+
+### 2026-08-09: interrupted-tool reproduction and resolution
+
+The first execution of the new signal/restart/worktree soak inside the development sandbox returned after its CLI signal fixture failed at the host-`flock` boundary, but its test-runner chain remained visible on the host. The exact ancestry was `1701361` (`node --test`) → `1701626` (`dist/test/pi-rpc.test.js`) → `1701777` (`fake-pi-conformance.mjs`), all in the sandbox invocation's process group. This directly reproduced the interrupted-tool residue shape without involving a live AgentKnot orchestration or provider request. The three exact PIDs were terminated leaf-first with `SIGTERM`; a host recheck found none. One unrelated old, clean detached worktree was separately identified by exact path, removed through `git worktree remove --force`, and the repository worktree list then contained only the source workspace.
+
+`scripts/stage1-soak.mjs` now starts its test matrix in a new uniquely attributable POSIX process group, enforces a 60-second bound, forwards catchable `SIGINT`/`SIGTERM`, escalates that exact group after two seconds, and treats any descendant remaining after the test runner exits as a failed soak before exact-group cleanup. The final host run passed 47/47 and both the runner's group check and an independent host scan found no matching test or fake-Pi process. The full deterministic suite passed 144/144.
+
+This resolves the Stage 1 development-runner invariant and requires no broad cleanup or Pi protocol change. It does not claim cleanup after hard `SIGKILL`, host loss, or failure outside the attributed group; those remain explicit operating-system boundaries.

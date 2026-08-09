@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -15,6 +15,7 @@ import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { AgentKnotRuntime } from '../src/runtime.js';
 import { MemoryJobStore } from '../src/store.js';
+import type { WorkerAdapter } from '../src/types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -148,6 +149,62 @@ test('HTTP API accepts work from a vendor-neutral controller and exposes the res
     assert.equal(status, 'succeeded');
   } finally {
     await http.close();
+  }
+});
+
+test('HTTP close cancels and awaits active jobs before returning', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-http-close-'));
+  const store = new MemoryJobStore();
+  let runStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    runStarted = resolve;
+  });
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'blocking adapter ready' };
+    },
+    async run(input) {
+      runStarted();
+      await new Promise<void>((resolve) => {
+        if (input.signal.aborted) resolve();
+        else input.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return { output: 'must not succeed after server close' };
+    },
+  };
+  const closeConfig: AgentKnotConfig = {
+    version: 1,
+    defaultRoute: 'mock',
+    storage: { directory: '.agentknot/jobs' },
+    workers: { mock: { adapter: 'mock' } },
+    routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock', timeoutMs: 30_000 } },
+  };
+  const orchestrator = new Orchestrator({
+    config: closeConfig,
+    store,
+    adapters: new Map([['mock', adapter]]),
+  });
+  const http = createAgentKnotHttpServer(orchestrator);
+  const address = await http.listen(0);
+  try {
+    const response = await fetch(`http://${address.host}:${address.port}/v1/jobs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'block until close', workspace }),
+    });
+    assert.equal(response.status, 202);
+    const body = (await response.json()) as { job: { id: string } };
+    await started;
+
+    await http.close();
+
+    const job = await store.get(body.job.id);
+    assert.equal(job?.status, 'cancelled');
+    assert.equal(job?.events.at(-1)?.type, 'job.cancelled');
+  } finally {
+    if (http.server.listening) await http.close();
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 

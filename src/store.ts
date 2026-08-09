@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { materializePersistedRecord } from './record-version.js';
@@ -84,7 +84,14 @@ export class FileJobStore implements JobStore {
     const versioned = materializePersistedRecord<JobRecord>('Job', job);
     const target = this.#path(versioned.id);
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, serializeBoundedRecord('Job', versioned), { encoding: 'utf8', mode: 0o600 });
-    await rename(temporary, target);
+    try {
+      await writeFile(temporary, serializeBoundedRecord('Job', versioned), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+      await rename(temporary, target);
+    } finally {
+      await rm(temporary, { force: true });
+    }
   }
 }

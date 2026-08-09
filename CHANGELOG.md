@@ -27,6 +27,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Fixed controller-neutral durable-record budgets and public constants: 64 KiB prompts/metadata, depth-20 metadata, 16 KiB event data, 512 worker events, 1 MiB terminal output, 256 KiB worker reports, bounded errors, 16 MiB Job/Orchestration snapshots, and 8 MiB callback bodies. Oversized retained data carries explicit replacement/truncation/refusal evidence ([decision 0023](postmortems/0023-fixed-durable-record-budgets.md)).
 - Fixed 16 MiB Git patch artifact capture and inspection bounds: oversized capture fails once without retained partial bytes or worker retry, and verify/preview reports but does not read an oversized managed file. Local snapshots and artifacts otherwise remain indefinitely until exact manual deletion; Stage 1 performs no automatic content redaction, expiry, compaction, garbage collection, cascade deletion, or purge operation ([decision 0025](postmortems/0025-local-retention-and-redaction-boundary.md)).
 - Additive delegated-parent `artifactReview` evidence on existing TypeScript, CLI, and HTTP full-record surfaces. It compares only controller-captured terminal child paths, groups exact multi-child overlaps deterministically as potential conflicts, and marks unavailable evidence incomplete; documented accept/reject remains an upstream review decision and promotion remains separate and explicit ([decision 0026](postmortems/0026-child-artifact-path-overlap-review.md)).
+- A bounded POSIX `test:stage1-soak` runner that attributes the lifecycle/Pi/restart/worktree matrix to one unique process group, enforces a 60-second deadline, forwards catchable signals, and fails after exact-group cleanup if descendants remain ([incident 0024](postmortems/0024-stale-dogfood-test-processes.md)).
 
 ### Changed
 
@@ -48,6 +49,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Worker-event floods retain at most 512 normalized worker events per Job; one `job.worker.events.truncated` event records the first overflow and further worker events are not persisted or observed. Oversized event data and result metadata are replaced with structured limit evidence, terminal output is UTF-8-safely truncated with `outputTruncation`, and Pi retains a 4 KiB UTF-8 stderr suffix before normalization.
 - Parent orchestration admission now atomically includes `orchestration.queued`; failed parent event saves roll back their in-memory event/timestamp, child `JobPersistenceError` remains a propagated control-plane failure, and cancellation-evidence persistence cannot prevent planner/child abort. Detached HTTP completion cleanup now handles both fulfillment and rejection without creating an unhandled rejected promise.
 - Event and result objects are JSON-normalized before their standalone value budget is measured, and Pi stderr is now stream-decoded with a valid UTF-8 suffix capped at 4 KiB.
+- Catchable CLI `SIGINT`/`SIGTERM` and HTTP server close now cancel and await admitted Jobs/orchestrations before runtime ownership is released; hard kills remain outside the catchable cleanup contract.
 
 ### Fixed
 
@@ -66,3 +68,5 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Worktree retries start from the same base commit and clean only AgentKnot-owned worktree registrations.
 - Terminal completion summaries are populated before terminal events are persisted or observed, summarize only the terminal retry attempt, and remain additive across TypeScript, CLI JSON, HTTP, and callback JobRecord surfaces.
 - Normal Pi RPC runs append and parse one exact end-anchored completion-report suffix, strip only a valid machine suffix from human output, and keep missing or malformed reports advisory; live probes and doctor remain unchanged. Deterministic coverage and a real Pi/OpenCode Go/Luna/max dogfood emission are complete.
+- Late worker events from a settled attempt are ignored instead of leaking into a retry or terminal record.
+- File Job/Orchestration snapshots and Git patch capture remove their exact temporary files on normal write/rename failure; timeout paths retain their terminal patch evidence while leaving the source and managed-worktree registry clean.

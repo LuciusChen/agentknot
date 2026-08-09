@@ -8,7 +8,7 @@ import { createAdapters } from '../src/adapters/index.js';
 import type { AgentKnotConfig } from '../src/config.js';
 import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { FileJobStore, MemoryJobStore } from '../src/store.js';
-import type { JobStore, WorkerAdapter } from '../src/types.js';
+import type { JobStore, WorkerAdapter, WorkerEventSink } from '../src/types.js';
 
 const config: AgentKnotConfig = {
   version: 1,
@@ -356,4 +356,43 @@ test('Orchestrator serializes concurrent worker events in the file store', async
   );
   assert.deepEqual(persisted, job);
   assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+});
+
+test('worker event sinks stop accepting events after their attempt settles', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-stale-event-sink-'));
+  const store = new MemoryJobStore();
+  const emits: WorkerEventSink[] = [];
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'stale-event adapter ready' };
+    },
+    async run(input, emit) {
+      emits.push(emit);
+      if (input.attempt === 1) throw new Error('retry once');
+      await emits[0]?.('worker.raw', { source: 'stale-attempt' });
+      await emit('worker.raw', { source: 'active-attempt' });
+      return { output: 'completed on attempt two' };
+    },
+  };
+  const retryConfig = structuredClone(config);
+  retryConfig.routes.mock!.maxAttempts = 2;
+  const orchestrator = new Orchestrator({
+    config: retryConfig,
+    store,
+    adapters: new Map([['mock', adapter]]),
+  });
+
+  const job = await orchestrator.run({ prompt: 'contain stale events', workspace });
+  const terminalEvents = structuredClone(job.events);
+  await Promise.all(emits.map((emit) => emit('worker.raw', { source: 'post-terminal' })));
+
+  assert.equal(job.status, 'succeeded');
+  assert.equal(job.attempt, 2);
+  assert.deepEqual(
+    job.events.filter((event) => event.type === 'worker.raw').map((event) => event.data?.source),
+    ['active-attempt']
+  );
+  assert.deepEqual((await store.get(job.id))?.events, terminalEvents);
+  assert.equal(job.events.at(-1)?.type, 'job.succeeded');
 });

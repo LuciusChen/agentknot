@@ -524,7 +524,9 @@ export class Orchestrator {
         () => attemptController.abort(new Error(`Worker timed out after ${job.route.timeoutMs}ms`)),
         job.route.timeoutMs
       );
-      const workerEmit: WorkerEventSink = (type, data) => this.#emit(job, type, data);
+      let attemptActive = true;
+      const workerEmit: WorkerEventSink = (type, data) =>
+        attemptActive ? this.#emit(job, type, data) : Promise.resolve();
       let isolated: IsolatedWorkspace | undefined;
       let result: Awaited<ReturnType<WorkerAdapter['run']>> | undefined;
       let failure: unknown;
@@ -555,6 +557,7 @@ export class Orchestrator {
       } catch (error) {
         failure = error;
       } finally {
+        attemptActive = false;
         clearTimeout(timeout);
         jobSignal.removeEventListener('abort', onJobAbort);
         if (isolated) {

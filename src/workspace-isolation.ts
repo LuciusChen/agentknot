@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, readFile, rmdir, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, rmdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -327,7 +327,19 @@ export class WorkspaceIsolationManager {
     const directory = path.resolve(this.#artifactDirectory, jobId);
     await mkdir(directory, { recursive: true });
     const artifactPath = path.join(directory, `attempt-${attempt}.patch`);
-    await writeFile(artifactPath, bytes, { mode: 0o600 });
+    const temporaryPath = `${artifactPath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporaryPath, bytes, { mode: 0o600 });
+      await rename(temporaryPath, artifactPath);
+    } catch (error) {
+      await rm(temporaryPath, { force: true });
+      await rmdir(directory).catch((cleanupError: NodeJS.ErrnoException) => {
+        if (cleanupError.code !== 'ENOENT' && cleanupError.code !== 'ENOTEMPTY') throw cleanupError;
+      });
+      throw error;
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
     return {
       kind: 'git-patch',
       attempt,

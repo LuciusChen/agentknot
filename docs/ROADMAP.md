@@ -54,6 +54,8 @@ Stage 0 proves the shape of the system. It does not establish production-grade d
 
 ## Stage 1: Dependable local job loop
 
+**Status: complete (2026-08-09).** The full deterministic suite and the bounded host soak pass with no attributed process, managed-worktree, source, or temporary-file residue. Real AgentKnot → Pi → OpenCode Go → Luna/max dogfood supplied the promoted-route evidence; deterministic public-boundary fixtures cover failure paths that should not consume provider capacity.
+
 ### Outcome
 
 Make leaf-job semantics and the bounded delegation slice reliable enough that a controller can submit, observe, diagnose, verify, and explicitly promote a result without relying on optimistic wording or manual archaeology.
@@ -137,11 +139,11 @@ Delivered:
 
 - Read-oriented CLI construction skips startup reconciliation, while `run`, `orchestrate`, and parameter-valid `serve` remain explicit execution owners; deterministic cross-process CLI tests prove reads and invalid commands leave persisted bytes unchanged.
 - Execution-owning file runtimes lock both canonical storage directories before reconciliation/admission, reject same-process and cross-process second owners, release after one-shot completion or process crash, and make `reconcileOnStartup: false` a read-only runtime capability. Once ownership is acquired, prior nonterminal records are interrupted without trusting PID visibility or reuse.
+- Parameterized restart coverage exercises `queued`/`running` Jobs and `queued`/`planning`/`dispatching` orchestrations, retains prior cancellation intent as evidence, makes restart interruption terminal without replay, and proves a second recovery is byte-stable.
+- Catchable CLI termination and HTTP close cancel and await admitted work before ownership release. Per-attempt event sinks stop accepting data when the attempt settles, failed snapshot/artifact writes remove their exact temporary files, and timeout capture leaves source/worktree state clean.
+- The POSIX `test:stage1-soak` runner bounds the signal/Pi/restart/worktree matrix to 60 seconds, attributes it to one unique process group, and fails after exact-group cleanup if descendants remain. The interrupted-tool path was reproduced, the exact residue was contained, and the final host run passed 47/47 with no matching process or worktree residue ([incident 0024](../postmortems/0024-stale-dogfood-test-processes.md)).
 
-Still open:
-
-- Extend crash/soak coverage across every nonterminal Job and Orchestration phase and verify crash-left resource reporting; ownership itself does not clean resources it cannot prove it owns.
-- Attribute and prevent development/dogfood test commands that outlive their tool invocation; exact stale groups were contained, but the interrupted-tool path is not yet reproduced ([incident 0024](../postmortems/0024-stale-dogfood-test-processes.md)).
+An uncatchable hard kill or host loss can still leave arbitrary descendants or a managed worktree. Startup reconciliation repairs persisted nonterminal state but does not claim universal ownership or cleanup of those external resources.
 
 ### Route-diagnostics slice admitted into Stage 1
 
@@ -170,19 +172,19 @@ Still outside this slice:
 
 ### Exit gates
 
-- Every README capability is implemented and tested or visibly marked proposed/deferred.
-- Crash/restart behavior for every nonterminal state is deterministic and tested.
-- Every orchestration persists a valid plan before dispatch, never exceeds its child/depth/concurrency bounds, and leaves artifact integration upstream.
-- Route-selection omission, strict invalid configuration, first-match/default behavior, plan-hash coverage, shadow default-route authority, exact active-route dispatch, and public child metadata are covered at the configuration and orchestration boundaries.
-- Every newly terminal Job has an additive completion summary before terminal observation, and the strict Pi report path has deterministic coverage plus real Pi/OpenCode Go/Luna/max emission evidence.
-- Observer and callback failures cannot change a correct execution result.
-- A supported adapter cannot leave a timed-out or cancelled job indefinitely active.
-- A read-only CLI or API inspection cannot reconcile or mutate an active Job or Orchestration record.
-- Configuration-only doctor output distinguishes runtime readiness from live inference; the opt-in probe is exact-route, bounded, honest about provider errors and unsupported adapters, and leaves no Job or artifact evidence.
-- Record and event sizes remain within documented limits under stress fixtures.
-- Every artifact is checksum-valid and applies against its recorded base in the supported Git matrix.
-- No source mutation, child-process leak, managed-worktree leak, duplicate/gapped event sequence, or cross-attempt state leak appears in the soak suite.
-- A controller can inspect and deliberately accept or reject an artifact using a documented workflow; inspection is read-only, while promotion remains an explicit upstream action.
+- [x] Every README capability is implemented and tested or visibly marked proposed/deferred.
+- [x] Crash/restart behavior for every nonterminal state is deterministic and tested.
+- [x] Every orchestration persists a valid plan before dispatch, never exceeds its child/depth/concurrency bounds, and leaves artifact integration upstream.
+- [x] Route-selection omission, strict invalid configuration, first-match/default behavior, plan-hash coverage, shadow default-route authority, exact active-route dispatch, and public child metadata are covered at the configuration and orchestration boundaries.
+- [x] Every newly terminal Job has an additive completion summary before terminal observation, and the strict Pi report path has deterministic coverage plus real Pi/OpenCode Go/Luna/max emission evidence.
+- [x] Observer and callback failures cannot change a correct execution result.
+- [x] A supported adapter cannot leave a timed-out or cancelled job indefinitely active.
+- [x] A read-only CLI or API inspection cannot reconcile or mutate an active Job or Orchestration record.
+- [x] Configuration-only doctor output distinguishes runtime readiness from live inference; the opt-in probe is exact-route, bounded, honest about provider errors and unsupported adapters, and leaves no Job or artifact evidence.
+- [x] Record and event sizes remain within documented limits under stress fixtures.
+- [x] Every artifact is checksum-valid and applies against its recorded base in the supported Git matrix.
+- [x] No source mutation, child-process leak, managed-worktree leak, duplicate/gapped event sequence, or cross-attempt state leak appears in the bounded soak suite.
+- [x] A controller can inspect and deliberately accept or reject an artifact using a documented workflow; inspection is read-only, while promotion remains an explicit upstream action.
 
 ### Explicitly not in Stage 1
 

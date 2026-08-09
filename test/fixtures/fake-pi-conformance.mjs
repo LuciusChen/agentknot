@@ -1,8 +1,19 @@
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 
-const mode = process.env.FAKE_PI_MODE ?? 'split';
+let mode = process.env.FAKE_PI_MODE ?? 'split';
+
+if (mode === 'exit-once-then-split') {
+  const marker = process.env.FAKE_PI_ATTEMPT_MARKER;
+  if (!marker) throw new Error('FAKE_PI_ATTEMPT_MARKER is required for exit-once-then-split');
+  if (existsSync(marker)) mode = 'split';
+  else {
+    writeFileSync(marker, 'first attempt\n');
+    mode = 'exit-before-settled';
+  }
+}
 
 if (process.env.FAKE_PI_PID_FILE) writeFileSync(process.env.FAKE_PI_PID_FILE, String(process.pid));
+if (process.env.FAKE_PI_PID_LOG) appendFileSync(process.env.FAKE_PI_PID_LOG, `${process.pid}\n`);
 
 if (mode === 'ignore-sigterm') {
   process.on('SIGTERM', () => {
