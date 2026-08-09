@@ -8,7 +8,7 @@ import { createAdapters } from '../src/adapters/index.js';
 import type { AgentKnotConfig } from '../src/config.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { FileJobStore, MemoryJobStore } from '../src/store.js';
-import type { WorkerAdapter } from '../src/types.js';
+import type { JobStore, WorkerAdapter } from '../src/types.js';
 
 const config: AgentKnotConfig = {
   version: 1,
@@ -70,6 +70,57 @@ test('Orchestrator sends the terminal job to an optional callback', async () => 
   assert.equal(requests.length, 1);
   assert.equal(requests[0]?.url, 'https://controller.invalid/jobs');
   assert.equal(JSON.parse(requests[0]?.body ?? '{}').status, 'succeeded');
+});
+
+test('callback bookkeeping persistence failure does not rewrite or redeliver a successful job', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-callback-store-failure-'));
+  const delegate = new MemoryJobStore();
+  let failedCallbackSave = false;
+  const store: JobStore = {
+    create: (job) => delegate.create(job),
+    save: async (job) => {
+      if (job.callback !== undefined && !failedCallbackSave) {
+        failedCallbackSave = true;
+        throw new Error('callback bookkeeping persistence unavailable');
+      }
+      await delegate.save(job);
+    },
+    get: (id) => delegate.get(id),
+    list: () => delegate.list(),
+  };
+  const requests: Array<{ url: string; body: string }> = [];
+  const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    requests.push({ url: String(input), body: String(init?.body) });
+    return new Response(null, { status: 204 });
+  };
+  const orchestrator = new Orchestrator({
+    config,
+    store,
+    adapters: createAdapters(config),
+    fetch: fakeFetch,
+  });
+
+  await assert.rejects(
+    orchestrator.run({
+      prompt: 'callback persistence test',
+      workspace,
+      source: 'codex',
+      callbackUrl: 'https://controller.invalid/jobs',
+    }),
+    /callback bookkeeping persistence unavailable/
+  );
+
+  const [persisted] = await delegate.list();
+  assert.equal(failedCallbackSave, true);
+  assert.equal(requests.length, 1);
+  assert.equal(JSON.parse(requests[0]?.body ?? '{}').status, 'succeeded');
+  assert.equal(persisted?.status, 'succeeded');
+  assert.equal(persisted?.callback, undefined);
+  assert.equal(persisted?.events.at(-1)?.type, 'job.succeeded');
+  assert.equal(
+    persisted?.events.filter((event) => event.type === 'worker.started').length,
+    1
+  );
 });
 
 test('Orchestrator records observer failures without retrying or failing worker execution', async () => {

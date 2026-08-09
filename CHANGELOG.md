@@ -42,6 +42,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 
 ### Fixed
 
+- Callback-bookkeeping persistence failures no longer enter the worker execution failure path: a terminal result already persisted remains authoritative, callback delivery is not repeated, and completion exposes the store error instead of rewriting success as failure ([incident 0019](postmortems/0019-callback-bookkeeping-persistence-boundary.md)).
 - Planner prompts now require every delegated subtask to provide separate `title`, `kind`, `prompt`, and non-empty string-array `acceptanceCriteria` fields instead of relying on criteria embedded only in prompt text.
 - Read-oriented CLI commands no longer perform startup reconciliation or mutate persisted Job and Orchestration records; only execution-owning `run`, `orchestrate`, and valid `serve` invocations retain recovery, and invalid `serve` arguments fail before runtime construction ([postmortem 0010](postmortems/0010-read-only-cli-runtime-reconciliation.md)).
 - Concurrent worker events are serialized per job and file snapshots use unique temporary names, preventing event gaps and temporary-file rename races ([postmortem 0005](postmortems/0005-concurrent-job-event-persistence.md)).

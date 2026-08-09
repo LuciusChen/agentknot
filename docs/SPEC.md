@@ -297,6 +297,8 @@ When `callbackUrl` is supplied, AgentKnot currently:
 - does not sign, authenticate, retry, deduplicate, or allowlist the request;
 - never converts a succeeded job to failed because callback delivery failed.
 
+Callback delivery and callback bookkeeping are outside the execution failure path. Delivery is attempted at most once. If the terminal Job is already persisted but saving its callback delivery state fails, the completion promise rejects with that store error; the persisted terminal execution result remains authoritative, and AgentKnot neither rewrites it as failed nor sends the callback again. Because the bookkeeping write failed, persisted state cannot claim whether delivery occurred.
+
 Callbacks are for trusted local controllers until a later security contract passes its roadmap gate.
 
 ## Orchestration lifecycle

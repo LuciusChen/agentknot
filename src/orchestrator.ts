@@ -424,12 +424,8 @@ export class Orchestrator {
     await this.#store.create(job);
     await this.#emit(job, 'job.queued', { source: normalized.source ?? 'unknown' });
 
-    const completion = this.#execute(job, adapter, controller.signal, inspection)
-      .then(async () => {
-        await this.#deliverCallback(job);
-        return structuredClone(job);
-      })
-      .catch(async (error: unknown) => {
+    const execution = this.#execute(job, adapter, controller.signal, inspection).catch(
+      async (error: unknown) => {
         if (job.status !== 'failed' && job.status !== 'cancelled') {
           const details = errorDetails(error);
           job.status = controller.signal.aborted ? 'cancelled' : 'failed';
@@ -443,9 +439,12 @@ export class Orchestrator {
           job.completionSummary = this.#completionSummary(job, outcome, false, undefined);
           await this.#emit(job, controller.signal.aborted ? 'job.cancelled' : 'job.failed', details);
         }
-        await this.#deliverCallback(job);
-        return structuredClone(job);
-      });
+      }
+    );
+    const completion = execution.then(async () => {
+      await this.#deliverCallback(job);
+      return structuredClone(job);
+    });
 
     return {
       job: structuredClone(job),

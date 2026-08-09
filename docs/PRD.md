@@ -99,7 +99,7 @@ Version 0.0.1 currently implements:
 - immediate execution with cooperative timeouts, retries, and cancellation, plus bounded exact-child supervision in the bundled Pi adapter;
 - reproducible Pi execution that disables ambient extension, skill, prompt-template, and theme discovery while preserving repository instructions and explicitly configured resources;
 - sanitized per-job Pi session statistics for measuring message/tool counts, token use, cost, and context use without retaining session paths, identifiers, or raw responses;
-- one-shot completion callbacks to trusted URLs;
+- one-shot completion callbacks to trusted URLs, with callback-bookkeeping persistence isolated from the terminal execution result and no automatic redelivery;
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
 - read-only artifact listing, integrity/base verification, and bounded patch preview through TypeScript, CLI, and HTTP;
