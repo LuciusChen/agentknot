@@ -38,6 +38,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 
 ### Fixed
 
+- Planner prompts now require every delegated subtask to provide separate `title`, `kind`, `prompt`, and non-empty string-array `acceptanceCriteria` fields instead of relying on criteria embedded only in prompt text.
 - Read-oriented CLI commands no longer perform startup reconciliation or mutate persisted Job and Orchestration records; only execution-owning `run`, `orchestrate`, and valid `serve` invocations retain recovery, and invalid `serve` arguments fail before runtime construction ([postmortem 0010](postmortems/0010-read-only-cli-runtime-reconciliation.md)).
 - Concurrent worker events are serialized per job and file snapshots use unique temporary names, preventing event gaps and temporary-file rename races ([postmortem 0005](postmortems/0005-concurrent-job-event-persistence.md)).
 - Planner jobs now share the same process-wide concurrency budget as delegated child jobs.

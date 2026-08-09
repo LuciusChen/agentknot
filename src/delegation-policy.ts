@@ -123,6 +123,8 @@ export function buildPlannerPrompt(request: OrchestrationRequest, config: Delega
     'Assess whether bounded independent subtasks can be sent to background coding workers.',
     'Optimize for useful parallelism, not the largest task count. Mark parallelizable true only when subtasks have no execution-order dependency and their expected write scopes do not overlap.',
     'Each parallel subtask prompt must name its bounded file or component scope, explicit non-goals, and acceptance criteria. If work must share a contract or edit the same files, keep it in one subtask or mark the plan non-parallel.',
+    'Every delegated subtask object must contain the four separate keys "title", "kind", "prompt", and "acceptanceCriteria".',
+    'The "acceptanceCriteria" key must be a separate non-empty JSON string array; do not put acceptance criteria only in the "prompt" text.',
     `Return at most ${config.dispatch.maxChildren} useful subtasks. Final product decisions, artifact integration, commits, and pushes must remain upstream.`,
     `Preferred delegatable kinds: ${config.policy.delegate.join(', ')}.`,
     `Kinds that must remain upstream: ${config.policy.keepUpstream.join(', ')}.`,

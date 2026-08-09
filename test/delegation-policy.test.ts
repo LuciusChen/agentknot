@@ -56,11 +56,31 @@ test('parseTaskAssessment accepts strict JSON and rejects fences or malformed pl
   );
 });
 
-test('planner instructions reserve parallelism for independent non-overlapping write scopes', () => {
+test('planner instructions reserve parallelism for independent non-overlapping write scopes and structured criteria', () => {
   const prompt = buildPlannerPrompt(request, config);
   assert.match(prompt, /expected write scopes do not overlap/);
   assert.match(prompt, /no execution-order dependency/);
   assert.match(prompt, /bounded file or component scope/);
+  assert.match(
+    prompt,
+    /Every delegated subtask object must contain the four separate keys "title", "kind", "prompt", and "acceptanceCriteria"\./
+  );
+  assert.match(prompt, /The "acceptanceCriteria" key must be a separate non-empty JSON string array/);
+  assert.match(prompt, /do not put acceptance criteria only in the "prompt" text/);
+});
+
+test('parseTaskAssessment strictly rejects a subtask that omits acceptanceCriteria', () => {
+  const withoutAcceptanceCriteria = {
+    ...assessment,
+    subtasks: assessment.subtasks.map((subtask) => {
+      const { acceptanceCriteria: _acceptanceCriteria, ...rest } = subtask;
+      return rest;
+    }),
+  };
+  assert.throws(
+    () => parseTaskAssessment(JSON.stringify(withoutAcceptanceCriteria)),
+    /missing: acceptanceCriteria/
+  );
 });
 
 test('composeDelegationPlan deterministically applies allowlists, keep-upstream rules, caps, and suggest mode', () => {
