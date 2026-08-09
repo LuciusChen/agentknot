@@ -970,6 +970,58 @@ test('PiRpcWorkerAdapter stream-decodes and byte-bounds a split UTF-8 stderr suf
   );
 });
 
+test('PiRpcWorkerAdapter bounds abort cleanup while an event sink never settles', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-blocked-sink-'));
+  const pidFile = path.join(directory, 'child.pid');
+  const adapter = createConformanceAdapter('split', { FAKE_PI_PID_FILE: pidFile });
+  const controller = new AbortController();
+  const abortReason = new Error('cancel blocked Pi event sink');
+  let resolveSinkEntered!: () => void;
+  const sinkEntered = new Promise<void>((resolve) => {
+    resolveSinkEntered = resolve;
+  });
+  const blockedSink = new Promise<void>(() => undefined);
+  const run = adapter.run(conformanceInput(controller.signal, 'job_pi_blocked_sink'), () => {
+    resolveSinkEntered();
+    return blockedSink;
+  });
+  void run.catch(() => undefined);
+  let pid: number | undefined;
+  let deadline: NodeJS.Timeout | undefined;
+  try {
+    pid = await waitForPid(pidFile);
+    await sinkEntered;
+    const startedAt = Date.now();
+    controller.abort(abortReason);
+
+    await assert.rejects(
+      Promise.race([
+        run,
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error('Pi abort cleanup exceeded 2.5 seconds')), 2_500);
+        }),
+      ]),
+      (error: unknown) => {
+        assert.equal(error, abortReason);
+        return true;
+      }
+    );
+    assert.ok(Date.now() - startedAt < 2_500);
+    assertProcessGone(pid);
+  } finally {
+    if (deadline !== undefined) clearTimeout(deadline);
+    controller.abort(abortReason);
+    if (pid !== undefined) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // The adapter or the test assertion already reaped the exact child.
+      }
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('Orchestrator bounds timeout cleanup when the owned Pi child ignores SIGTERM', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-timeout-'));
   const pidFile = path.join(directory, 'child.pid');

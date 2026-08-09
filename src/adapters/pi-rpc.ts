@@ -451,6 +451,7 @@ async function awaitChildOutput(
     // without attempting broad process cleanup.
     child.stdout.destroy();
     child.stderr.destroy();
+    return;
   }
   await output;
 }

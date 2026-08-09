@@ -142,3 +142,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0028](./0028-native-opencode-adapter-evidence-gate.md) | Decision | Accepted | Defer a native OpenCode adapter until it proves value over Pi |
 | [0029](./0029-controller-cli-and-single-child-delegation.md) | Incident / Decision | Accepted | Make the controller CLI prerequisite and single-child delegation explicit |
 | [0030](./0030-pre-model-controller-dispatch.md) | Incident / Decision | Accepted | Dispatch configured automatic work before the controller model |
+| [0031](./0031-bounded-pi-output-drain.md) | Incident / Experiment | Resolved | Bound Pi output draining when an event sink never settles |

@@ -100,7 +100,7 @@ Version 0.0.1 currently implements:
 - file-backed or in-memory job snapshots and ordered events;
 - atomic leaf admission containing the queued snapshot and first event, with later persistence failures isolated from worker retry and terminal-result fabrication;
 - top-level `schemaVersion: 1` on new leaf Job and Orchestration records, with schema-less legacy-v1 file reads materialized in memory without rewriting and unsupported explicit versions rejected;
-- immediate execution with cooperative timeouts, retries, and cancellation, plus bounded exact-child supervision in the bundled Pi adapter;
+- immediate execution with cooperative timeouts, retries, and cancellation, plus bounded exact-child and output-drain supervision in the bundled Pi adapter even when an external event sink does not settle;
 - reproducible Pi execution that disables ambient extension, skill, prompt-template, and theme discovery while preserving repository instructions and explicitly configured resources;
 - sanitized per-job Pi session statistics for measuring message/tool counts, token use, cost, and context use without retaining session paths, identifiers, or raw responses;
 - one-shot completion callbacks to trusted URLs, with callback-bookkeeping persistence isolated from the terminal execution result and no automatic redelivery;
