@@ -14,7 +14,19 @@ import type {
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 128 * 1024 * 1024;
 export const MAX_ARTIFACT_PREVIEW_BYTES = 1024 * 1024;
+export const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
 const MANAGED_WORKTREE_NAME = /^job-job_[A-Za-z0-9_-]+-attempt-[1-9][0-9]*-[0-9a-f-]+$/;
+
+export class ArtifactSizeLimitError extends Error {
+  readonly name = 'ArtifactSizeLimitError';
+
+  constructor(
+    readonly actualBytes: number,
+    readonly maxBytes = MAX_ARTIFACT_BYTES
+  ) {
+    super(`Git patch artifact is ${actualBytes} bytes; maximum is ${maxBytes} bytes`);
+  }
+}
 
 export interface WorkspaceInspection {
   sourceWorkspace: string;
@@ -170,6 +182,7 @@ export class WorkspaceIsolationManager {
     if (artifact.kind !== 'git-patch') issues.push('artifact-kind-unsupported');
 
     let bytes: Buffer | null = null;
+    let actualSize: number | null = null;
     let exists = false;
     if (managedPathMatches && artifact.kind === 'git-patch') {
       try {
@@ -177,8 +190,12 @@ export class WorkspaceIsolationManager {
         const artifactStat = await lstat(expectedPath);
         if (!artifactStat.isFile()) {
           issues.push('artifact-file-unreadable');
+        } else if (artifactStat.size > MAX_ARTIFACT_BYTES) {
+          actualSize = artifactStat.size;
+          issues.push('artifact-size-limit-exceeded');
         } else {
           bytes = await readFile(expectedPath);
+          actualSize = bytes.byteLength;
         }
       } catch (error) {
         exists = (error as NodeJS.ErrnoException).code !== 'ENOENT';
@@ -187,11 +204,10 @@ export class WorkspaceIsolationManager {
       }
     }
 
-    const actualSize = bytes?.byteLength ?? null;
     const actualSha256 = bytes === null ? null : createHash('sha256').update(bytes).digest('hex');
     const sizeMatches = actualSize !== null && actualSize === artifact.size;
     const sha256Matches = actualSha256 !== null && actualSha256 === artifact.sha256;
-    if (bytes !== null && !sizeMatches) issues.push('artifact-size-mismatch');
+    if (actualSize !== null && !sizeMatches) issues.push('artifact-size-mismatch');
     if (bytes !== null && !sha256Matches) issues.push('artifact-sha256-mismatch');
     if (!source.repositoryAvailable) issues.push('source-repository-unavailable');
     const headMatchesBase = source.actualHead !== null && source.actualHead === artifact.baseCommit;
@@ -305,6 +321,9 @@ export class WorkspaceIsolationManager {
       true
     )).stdout;
     const bytes = Buffer.isBuffer(patch) ? patch : Buffer.from(patch);
+    if (bytes.byteLength > MAX_ARTIFACT_BYTES) {
+      throw new ArtifactSizeLimitError(bytes.byteLength);
+    }
     const directory = path.resolve(this.#artifactDirectory, jobId);
     await mkdir(directory, { recursive: true });
     const artifactPath = path.join(directory, `attempt-${attempt}.patch`);

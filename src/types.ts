@@ -173,6 +173,7 @@ export const JOB_ARTIFACT_VERIFICATION_ISSUES = [
   'artifact-kind-unsupported',
   'artifact-file-missing',
   'artifact-file-unreadable',
+  'artifact-size-limit-exceeded',
   'artifact-size-mismatch',
   'artifact-sha256-mismatch',
   'source-repository-unavailable',

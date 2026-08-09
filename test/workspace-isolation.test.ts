@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import type { AgentKnotConfig } from '../src/config.js';
 import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { MemoryJobStore } from '../src/store.js';
+import { MAX_ARTIFACT_BYTES } from '../src/workspace-isolation.js';
 import type {
   JobStore,
   ResolvedRoute,
@@ -235,6 +236,43 @@ test('artifact inspection reports missing managed files without exposing preview
   assert.equal(linkedPreview?.content, null);
 });
 
+test('artifact inspection refuses managed files above the retained artifact limit', async () => {
+  const paths = await repository();
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory),
+    store: new MemoryJobStore(),
+    adapters: new Map([
+      [
+        'test',
+        new (class extends TestAdapter {
+          async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+            await writeFile(path.join(input.workspace, 'bounded.txt'), 'bounded\n');
+            return { output: 'ok' };
+          }
+        })(),
+      ],
+    ]),
+  });
+  const job = await orchestrator.run({ prompt: 'bounded inspection', workspace: paths.root });
+  const artifact = job.artifacts?.[0];
+  assert.ok(artifact);
+  await writeFile(artifact.path, Buffer.alloc(MAX_ARTIFACT_BYTES + 1, 0x78));
+
+  const verification = await orchestrator.verifyArtifacts(job.id);
+  const preview = await orchestrator.previewArtifact(job.id, 1);
+  assert.equal(verification?.valid, false);
+  assert.equal(verification?.artifacts[0]?.file.exists, true);
+  assert.equal(verification?.artifacts[0]?.file.actualSize, MAX_ARTIFACT_BYTES + 1);
+  assert.equal(verification?.artifacts[0]?.file.actualSha256, null);
+  assert.deepEqual(verification?.artifacts[0]?.issues, [
+    'artifact-size-limit-exceeded',
+    'artifact-size-mismatch',
+  ]);
+  assert.equal(preview?.content, null);
+  assert.equal(preview?.verification.file.actualSha256, null);
+  assert.equal(await status(paths.root), '');
+});
+
 test('patches include tracked files committed after the job base commit', async () => {
   const paths = await repository();
   const adapter = new (class extends TestAdapter {
@@ -364,6 +402,40 @@ test('artifact persistence failure is not retried and removes unrecorded patch e
   assert.equal(persisted?.artifacts, undefined);
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
   assert.deepEqual(await readdir(path.join(paths.storage, 'artifacts')), []);
+  assert.equal(await status(paths.root), '');
+});
+
+test('oversized patch artifacts fail without retry, retained bytes, or worktree leakage', async () => {
+  const paths = await repository();
+  let runs = 0;
+  const adapter = new (class extends TestAdapter {
+    async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+      runs += 1;
+      await writeFile(path.join(input.workspace, 'oversized.txt'), 'x'.repeat(MAX_ARTIFACT_BYTES));
+      return { output: 'worker completed' };
+    }
+  })();
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory, 2),
+    store: new MemoryJobStore(),
+    adapters: new Map([['test', adapter]]),
+  });
+
+  const job = await orchestrator.run({ prompt: 'oversized artifact', workspace: paths.root });
+
+  assert.equal(job.status, 'failed');
+  assert.equal(job.error?.name, 'ArtifactSizeLimitError');
+  assert.match(job.error?.message ?? '', /maximum is 16777216 bytes/);
+  assert.equal(runs, 1);
+  assert.equal(job.artifacts, undefined);
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+  assert.deepEqual(
+    await readdir(path.join(paths.storage, 'artifacts')).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    }),
+    []
+  );
   assert.equal(await status(paths.root), '');
 });
 

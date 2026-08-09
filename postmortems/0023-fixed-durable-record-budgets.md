@@ -73,8 +73,8 @@ Deferred. Deleting old records and redacting content have different user expecta
 - [x] Centralize and export fixed budgets and UTF-8-safe helpers.
 - [x] Enforce the same whole-record ceiling in memory and file stores.
 - [x] Add stress fixtures for admission, multi-byte output, event floods, reports, snapshots, errors, and callbacks.
-- [ ] Define artifact-byte retention independently — Stage 1 artifact/retention slice.
-- [ ] Define content retention and honest redaction limitations independently — Stage 1 lifecycle slice.
+- [x] Define artifact-byte retention independently — fixed at 16 MiB in [decision 0025](./0025-local-retention-and-redaction-boundary.md).
+- [x] Define content retention and honest redaction limitations independently — [decision 0025](./0025-local-retention-and-redaction-boundary.md).
 
 ## Deferred work
 
@@ -89,3 +89,7 @@ The tests use generated repeated characters and synthetic paths only. No real pr
 ### 2026-08-09: Luna/max post-commit audit
 
 Four read-only Luna/max jobs audited commit `658f9a6` through orchestration `orchestration_52171ea3-ae0e-485d-96f7-654019a6da36`; all artifacts were empty. The audit found that callback overflow can skip delivery yet still fail to save its bookkeeping under the independent 16 MiB snapshot ceiling, so current wording now says AgentKnot *attempts* that save. It also exposed parent-orchestration persistence gaps: queued admission is now atomic, failed event appends roll back, cancellation always propagates abort, and child Job persistence rejection is no longer synthesized as worker failure. Object evidence is JSON-normalized before its standalone budget is measured, and Pi stderr now uses streaming UTF-8 decoding with a 4 KiB byte suffix. Exact-boundary and rejected-save fixtures were expanded without making budgets configurable.
+
+### 2026-08-09: Artifact and local-retention policy completed
+
+[Decision 0025](./0025-local-retention-and-redaction-boundary.md) independently caps new patch artifacts at 16 MiB and defines indefinite local retention with exact manual deletion and no automatic content-redaction claim. The original deferred-work paragraph above records this decision's initial scope rather than current product status.

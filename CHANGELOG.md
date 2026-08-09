@@ -25,6 +25,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Product requirements, technical specification, evidence-gated roadmap, and decision/postmortem records.
 - File-runtime single-writer ownership: execution-owning `createRuntime()` calls acquire non-blocking advisory locks on both canonical storage directories, reject a second owner before reconciliation or admission, and expose `RuntimeOwnershipError` plus explicit `AgentKnotRuntime.close()` lifecycle ([decision 0022](postmortems/0022-file-runtime-single-writer-ownership.md)).
 - Fixed controller-neutral durable-record budgets and public constants: 64 KiB prompts/metadata, depth-20 metadata, 16 KiB event data, 512 worker events, 1 MiB terminal output, 256 KiB worker reports, bounded errors, 16 MiB Job/Orchestration snapshots, and 8 MiB callback bodies. Oversized retained data carries explicit replacement/truncation/refusal evidence ([decision 0023](postmortems/0023-fixed-durable-record-budgets.md)).
+- Fixed 16 MiB Git patch artifact capture and inspection bounds: oversized capture fails once without retained partial bytes or worker retry, and verify/preview reports but does not read an oversized managed file. Local snapshots and artifacts otherwise remain indefinitely until exact manual deletion; Stage 1 performs no automatic content redaction, expiry, compaction, garbage collection, cascade deletion, or purge operation ([decision 0025](postmortems/0025-local-retention-and-redaction-boundary.md)).
 
 ### Changed
 

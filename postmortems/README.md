@@ -136,3 +136,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0022](./0022-file-runtime-single-writer-ownership.md) | Decision | Accepted | Enforce one file-runtime writer before recovery |
 | [0023](./0023-fixed-durable-record-budgets.md) | Decision | Accepted | Use fixed budgets for durable records |
 | [0024](./0024-stale-dogfood-test-processes.md) | Incident | Contained | Contain stale dogfood test processes |
+| [0025](./0025-local-retention-and-redaction-boundary.md) | Decision | Accepted | Keep local retention explicit and redaction claims narrow |

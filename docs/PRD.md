@@ -176,6 +176,7 @@ The product remains on course when all of the following are true:
 - omitted route-selection configuration disables selection; `shadow` and `active` accept strict 1–20 ordered rules over existing routes, first-match/default evidence is plan-hash-covered, shadow never replaces `dispatch.defaultRoute`, and active dispatches the exact selected route while metadata carries task kind, parent complexity, and evidence;
 - every emitted job event is already present in the persisted record;
 - newly written admitted prompts/metadata, persisted worker events/results/errors, complete Job/Orchestration snapshots, and callback bodies stay within the fixed documented UTF-8 budgets, with explicit truncation/replacement/refusal evidence rather than silent route changes; legacy over-limit snapshots remain readable but must fit before a later mutation;
+- newly captured Git patch artifacts stay within 16 MiB; an oversized capture fails without retry or retained partial bytes, and inspection does not hash or preview an oversized managed file;
 - every terminal job is inspectable after the invoking call returns;
 - every newly terminal succeeded, failed, or cancelled Job has a schemaVersion 1 completion summary before its terminal event is persisted or observed, and retries summarize only the terminal attempt;
 - completion summaries distinguish controller-captured artifact paths from worker-reported claims, never infer reports from prose/events/stderr/session statistics, and preserve explicit unavailable reasons; normal Pi runs use only the exact end-marked envelope, with absent or malformed envelopes unable to fail an otherwise successful job;
@@ -184,6 +185,7 @@ The product remains on course when all of the following are true:
 - controllers can verify and preview recorded artifacts without source mutation, while acceptance and promotion remain explicit upstream decisions;
 - retries start from the same recorded base rather than prior-attempt edits;
 - credentials are not intentionally copied into configuration, records, events, logs, callbacks, or artifact metadata;
+- local records and artifacts remain until deliberate exact operator deletion, with no automatic expiry, cascade deletion, or content-redaction claim;
 - current, proposed, experimental, and deferred capabilities are distinguishable in documentation;
 - a feature that crosses a stable boundary has a spec change, tests, and an explicit roadmap gate.
 
@@ -204,6 +206,7 @@ These are evidence requirements, not claims that the current MVP has already met
 
 - Product language such as "durable", "queue", "timeout", "provider-neutral", or "isolation" can imply stronger guarantees than the implementation provides.
 - Raw worker events, prompts, output, and tool results remain capable of containing sensitive content even though their admitted or persisted representations now have fixed byte/count budgets; size bounds are not redaction.
+- Local snapshots and patch artifacts are retained indefinitely by default; operators must control filesystem access and deliberately delete exact inactive records because Stage 1 has no automatic retention service or purge API.
 - Worker completion reports are claims at the adapter boundary; accepting their strict shape does not verify changed paths, check outcomes, remaining risks, or notes.
 - A custom adapter may ignore cooperative cancellation unless the adapter contract and process supervision enforce termination.
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete bounded job record when its serialized body is no more than 8 MiB.

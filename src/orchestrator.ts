@@ -24,6 +24,7 @@ import {
   utf8Bytes,
 } from './record-limits.js';
 import {
+  ArtifactSizeLimitError,
   WorkspaceIsolationManager,
   workspaceIsolationMode,
   type IsolatedWorkspace,
@@ -617,7 +618,10 @@ export class Orchestrator {
       if (failure instanceof JobPersistenceError) throw failure;
 
       const details = errorDetails(failure ?? new Error('Worker returned no result'));
-      const retryable = !jobSignal.aborted && attempt < job.route.maxAttempts;
+      const retryable =
+        !(failure instanceof ArtifactSizeLimitError) &&
+        !jobSignal.aborted &&
+        attempt < job.route.maxAttempts;
       job.error = { ...details, attempt, retryable };
       if (!retryable) {
         const outcome = jobSignal.aborted ? 'cancelled' : 'failed';
