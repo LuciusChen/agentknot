@@ -1,0 +1,6 @@
+interface:
+  display_name: "AgentKnot Delegate"
+  short_description: "Delegate bounded repository work safely"
+  default_prompt: "Use $agentknot-delegate to delegate this bounded repository task through AgentKnot."
+policy:
+  allow_implicit_invocation: false

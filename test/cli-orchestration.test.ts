@@ -88,6 +88,65 @@ async function createArtifactFixture(): Promise<CliFixture> {
   return fixture;
 }
 
+async function createDelegatedFixture(): Promise<CliFixture> {
+  const fixture = await createArtifactFixture();
+  const plannerOutput = JSON.stringify({
+    schemaVersion: 1,
+    recommendation: 'delegate',
+    complexity: 'low',
+    parallelizable: false,
+    taskKinds: ['test-gap-analysis'],
+    reasoning: 'One bounded test-gap audit is useful downstream.',
+    subtasks: [
+      {
+        title: 'Audit one test gap',
+        kind: 'test-gap-analysis',
+        prompt: 'Report the bounded test gap without editing files.',
+        acceptanceCriteria: ['The gap is reported'],
+      },
+    ],
+  });
+  await writeFile(
+    fixture.configPath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        defaultRoute: 'worker',
+        storage: { directory: 'jobs', orchestrationDirectory: 'orchestrations' },
+        workspaceIsolation: { mode: 'git-worktree', directory: 'worktrees' },
+        workers: {
+          pi: {
+            adapter: 'pi-rpc',
+            command: process.execPath,
+            commandArgs: [path.resolve('test/fixtures/fake-pi.mjs')],
+            noSession: true,
+            environment: {
+              FAKE_PI_PLANNER_OUTPUT: plannerOutput,
+              FAKE_PI_COMPLETION_OUTPUT: 'Delegated audit found one bounded gap.',
+            },
+          },
+        },
+        routes: {
+          planner: { worker: 'pi', provider: 'test', model: 'planner' },
+          worker: { worker: 'pi', provider: 'test', model: 'worker' },
+        },
+        delegation: {
+          mode: 'auto',
+          planner: { route: 'planner' },
+          dispatch: { defaultRoute: 'worker', maxChildren: 1, maxConcurrency: 1, maxDepth: 1 },
+          policy: {
+            delegate: ['test-gap-analysis'],
+            keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
+          },
+        },
+      },
+      null,
+      2
+    )}\n`
+  );
+  return fixture;
+}
+
 test('CLI exposes one read-only artifact list, verification, and preview contract', async () => {
   const fixture = await createArtifactFixture();
   const beforeHead = (await git(fixture.workspace, 'rev-parse', 'HEAD')).trim();
@@ -207,4 +266,48 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
   const shown = await runCli(fixture.configPath, 'orchestration-show', record.id);
   const shownRecord = JSON.parse(shown.stdout) as OrchestrationRecord;
   assert.deepEqual(shownRecord, record);
+});
+
+test('CLI compact handoff projects delegated child and verified artifact evidence', async () => {
+  const fixture = await createDelegatedFixture();
+  const run = await runCli(
+    fixture.configPath,
+    'orchestrate',
+    '--prompt',
+    'Audit one bounded test gap.',
+    '--workspace',
+    fixture.workspace,
+    '--source',
+    'test',
+    '--handoff-json'
+  );
+  const handoff = JSON.parse(run.stdout) as {
+    plan: { decision: string; willDispatch: boolean; assessment: { complexity: string } };
+    children: Array<{ status: string; output?: string; jobId: string }>;
+    artifacts: Array<{
+      jobId: string;
+      status: string;
+      valid: boolean;
+      attempts: Array<{ attempt: number; size: number; valid: boolean; issues: string[] }>;
+    }>;
+    result: { action: string; artifactReview: { status: string } };
+  };
+
+  assert.equal(handoff.plan.decision, 'delegate');
+  assert.equal(handoff.plan.willDispatch, true);
+  assert.equal(handoff.plan.assessment.complexity, 'low');
+  assert.equal(handoff.children.length, 1);
+  assert.equal(handoff.children[0]?.status, 'succeeded');
+  assert.equal(handoff.children[0]?.output, 'Delegated audit found one bounded gap.');
+  assert.equal(handoff.artifacts.length, 1);
+  assert.equal(handoff.artifacts[0]?.jobId, handoff.children[0]?.jobId);
+  assert.equal(handoff.artifacts[0]?.status, 'verified');
+  assert.equal(handoff.artifacts[0]?.valid, true);
+  assert.equal(handoff.artifacts[0]?.attempts.length, 1);
+  assert.equal(handoff.artifacts[0]?.attempts[0]?.attempt, 1);
+  assert.equal(handoff.artifacts[0]?.attempts[0]?.size, 0);
+  assert.equal(handoff.artifacts[0]?.attempts[0]?.valid, true);
+  assert.deepEqual(handoff.artifacts[0]?.attempts[0]?.issues, []);
+  assert.equal(handoff.result.action, 'delegated');
+  assert.equal(handoff.result.artifactReview.status, 'checked');
 });

@@ -57,3 +57,9 @@ Both final repository marketplaces installed successfully into isolated Codex an
 ## Privacy and security review
 
 Plugin Skills pass the user's task text to the local AgentKnot CLI and can cause the configured worker to receive it. They do not add a new network endpoint or credential store. Existing local record retention, worker process permissions, provider credentials, and artifact-content risks still apply. The install smoke used isolated temporary controller homes and no controller-model inference.
+
+## Addenda
+
+### 2026-08-09: Measured evidence superseded the non-dispatching hook choice
+
+Decision [0030](./0030-pre-model-controller-dispatch.md) supersedes this record's deferral of a prompt-reading, blocking hook after two substantive host-model-selected paths used more upstream input than direct execution. The replacement remains thin: only resolved `auto` repositories run the existing CLI before the controller model, while semantic classification, routes, and artifact policy stay in AgentKnot core. The no-MCP, no-wrapper, and controller-neutral core boundaries remain accepted.

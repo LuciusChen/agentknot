@@ -45,3 +45,11 @@ The first hook-triggered probe successfully reached orchestration `orchestration
 ## Consequences
 
 The hook adds one short developer-context instruction to every submitted prompt after native trust approval because `UserPromptSubmit` has no category matcher. This bounded overhead is explicit and does not guarantee that a controller model will comply. The change also does not claim learned model intelligence, automatic fallback, or upstream-token savings until controller end-to-end runs provide measured evidence.
+
+## Addenda
+
+### 2026-08-09: Host-model selection did not reduce upstream use
+
+The open gate above was run on one fixed five-file read-only audit. Direct Codex used 155,851 input tokens. Hook-triggered implicit Skill loading used 178,071, and replacing the Skill-loading round with a compact static workflow still used 249,154 because Codex repeated the delegated repository reads. Both automatic variants found the same specification mismatch and deterministic-test gap, but neither reduced upstream work.
+
+Decision [0030](./0030-pre-model-controller-dispatch.md) supersedes only this record's static non-dispatching-hook boundary. The CLI prerequisite, single-child delegation rule, compact handoff, artifact restrictions, and configured Luna/DeepSeek routing decisions remain accepted.

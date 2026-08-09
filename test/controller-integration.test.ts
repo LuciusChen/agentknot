@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -13,6 +15,7 @@ const integrations = [
     marketplace: '.agents/plugins/marketplace.json',
     marketplaceSource: './integrations/codex/agentknot',
     skill: 'integrations/codex/agentknot/skills/agentknot-delegate/SKILL.md',
+    agentMetadata: 'integrations/codex/agentknot/skills/agentknot-delegate/agents/openai.yaml',
     hook: 'integrations/codex/agentknot/hooks/hooks.json',
     hookScript: 'integrations/codex/agentknot/hooks/user-prompt-submit.mjs',
     explicitInvocation: '$agentknot-delegate',
@@ -23,6 +26,7 @@ const integrations = [
     marketplace: '.claude-plugin/marketplace.json',
     marketplaceSource: './integrations/claude/agentknot',
     skill: 'integrations/claude/agentknot/skills/agentknot-delegate/SKILL.md',
+    agentMetadata: undefined,
     hook: 'integrations/claude/agentknot/hooks/hooks.json',
     hookScript: 'integrations/claude/agentknot/hooks/user-prompt-submit.mjs',
     explicitInvocation: '/agentknot:agentknot-delegate',
@@ -56,6 +60,33 @@ function normalizeControllerDifferences(value: string): string {
     .replaceAll('/agentknot:agentknot-delegate', '<explicit-invocation>')
     .replace(/--source (?:codex|claude)/g, '--source <controller>')
     .replace(/(?:Codex|Claude) audit source/g, '<controller> audit source');
+}
+
+async function runHook(
+  hookPath: string,
+  controller: string,
+  environment: NodeJS.ProcessEnv,
+  payload: object
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [hookPath, controller], {
+      cwd: repositoryRoot,
+      env: environment,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => (stdout += chunk));
+    child.stderr.on('data', (chunk: string) => (stderr += chunk));
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`Hook exited ${String(code)}: ${stderr}`));
+    });
+    child.stdin.end(JSON.stringify(payload));
+  });
 }
 
 test('Codex and Claude plugins expose the same bounded AgentKnot delegation contract', async () => {
@@ -140,14 +171,23 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     assert.equal(handlers?.[0]?.hooks?.length, 1);
     assert.deepEqual(handlers?.[0]?.hooks?.[0], {
       type: 'command',
-      command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs"',
-      timeout: 3,
-      additionalContextLimit: 100,
+      command: `node "\${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs" ${integration.controller}`,
+      timeout: 3660,
+      statusMessage: 'Running AgentKnot automatic delegation',
+      additionalContextLimit: 18000,
     });
     const hookScript = await readFile(path.join(repositoryRoot, integration.hookScript), 'utf8');
-    assert.match(hookScript, /matches the agentknot-delegate Skill description/);
-    assert.match(hookScript, /Otherwise continue normally/);
-    assert.doesNotMatch(hookScript, /JSON\.parse|process\.stdin/);
+    assert.match(hookScript, /process\.stdin/);
+    assert.match(hookScript, /policy\.mode !== 'auto'/);
+    assert.match(hookScript, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
+    assert.match(hookScript, /artifact-preview/);
+    assert.match(hookScript, /'inherit'/);
+    assert.doesNotMatch(hookScript, /git\s+(?:apply|am|commit|push|merge)\b/);
+    if (integration.agentMetadata !== undefined) {
+      const agentMetadata = await readFile(path.join(repositoryRoot, integration.agentMetadata), 'utf8');
+      assert.match(agentMetadata, /allow_implicit_invocation: false/);
+      assert.match(agentMetadata, /display_name: "AgentKnot Delegate"/);
+    }
     skills.push({ description, body, hook, hookScript });
   }
 
@@ -159,6 +199,80 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     normalizeControllerDifferences(skills[0]?.body ?? ''),
     normalizeControllerDifferences(skills[1]?.body ?? '')
   );
-  assert.deepEqual(skills[0]?.hook, skills[1]?.hook);
   assert.equal(skills[0]?.hookScript, skills[1]?.hookScript);
+});
+
+test('controller hook runs configured automatic delegation before the model and embeds valid preview evidence', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-hook-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const executable = path.join(directory, 'agentknot');
+  const callsFile = path.join(directory, 'calls.jsonl');
+  const configPath = path.join(directory, 'agentknot.config.json');
+  await writeFile(
+    executable,
+    `#!${process.execPath}\n` +
+      `import { appendFileSync } from 'node:fs';\n` +
+      `const args = process.argv.slice(2);\n` +
+      `appendFileSync(process.env.FAKE_AGENTKNOT_CALLS, JSON.stringify(args) + '\\n');\n` +
+      `if (args[0] === 'delegation') process.stdout.write('{"mode":"auto"}');\n` +
+      `else if (args[0] === 'orchestrate') process.stdout.write(process.env.FAKE_AGENTKNOT_HANDOFF);\n` +
+      `else if (args[0] === 'artifact-preview') process.stdout.write(process.env.FAKE_AGENTKNOT_PREVIEW);\n` +
+      `else process.exitCode = 1;\n`
+  );
+  await chmod(executable, 0o755);
+
+  const prompt = 'Audit the bounded controller handoff and report every mismatch.';
+  const childOutput = `${'x'.repeat(4_000)}One mismatch found.`;
+  const handoff = {
+    schemaVersion: 1,
+    id: 'orchestration_test',
+    status: 'succeeded',
+    plan: { decision: 'delegate', willDispatch: true, reasoning: 'Bounded audit.' },
+    children: [{ jobId: 'job_test', status: 'succeeded', output: childOutput }],
+    artifacts: [
+      { jobId: 'job_test', status: 'verified', valid: true, attempts: [{ attempt: 1, size: 24, valid: true }] },
+    ],
+    result: { action: 'delegated' },
+  };
+  const hookPath = path.join(repositoryRoot, integrations[0].hookScript);
+  const environment = {
+    ...process.env,
+    PATH: `${directory}:${process.env.PATH ?? ''}`,
+    AGENTKNOT_CONFIG: configPath,
+    FAKE_AGENTKNOT_CALLS: callsFile,
+    FAKE_AGENTKNOT_HANDOFF: JSON.stringify(handoff),
+    FAKE_AGENTKNOT_PREVIEW: JSON.stringify({ content: 'diff --git a/a b/a\n+fixed\n', truncated: false }),
+  };
+  const result = await runHook(hookPath, 'codex', environment, {
+    hook_event_name: 'UserPromptSubmit',
+    cwd: repositoryRoot,
+    prompt,
+  });
+  const output = JSON.parse(result) as {
+    hookSpecificOutput: { hookEventName: string; additionalContext: string };
+  };
+  assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+  assert.match(output.hookSpecificOutput.additionalContext, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
+  assert.match(output.hookSpecificOutput.additionalContext, /One mismatch found/);
+  assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /truncated by controller hook/);
+  assert.match(output.hookSpecificOutput.additionalContext, /diff --git a\/a b\/a/);
+
+  const calls = (await readFile(callsFile, 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as string[]);
+  assert.deepEqual(calls[0], ['delegation', '--json', '--config', configPath]);
+  assert.equal(calls[1]?.[0], 'orchestrate');
+  assert.equal(calls[1]?.[calls[1].indexOf('--source') + 1], 'codex');
+  assert.equal(calls[1]?.[calls[1].indexOf('--delegation') + 1], 'inherit');
+  assert.equal(calls[1]?.[calls[1].indexOf('--prompt') + 1], prompt);
+  assert.deepEqual(calls[2]?.slice(0, 4), ['artifact-preview', 'job_test', '1', '--json']);
+
+  const explicit = await runHook(hookPath, 'codex', environment, {
+    hook_event_name: 'UserPromptSubmit',
+    cwd: repositoryRoot,
+    prompt: '$agentknot-delegate run this explicitly',
+  });
+  assert.equal(explicit, '');
+  assert.equal((await readFile(callsFile, 'utf8')).trim().split('\n').length, 3);
 });

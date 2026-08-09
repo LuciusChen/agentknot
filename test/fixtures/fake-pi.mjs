@@ -21,7 +21,13 @@ function send(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
-function completionOutput() {
+function completionOutput(message) {
+  if (
+    process.env.FAKE_PI_PLANNER_OUTPUT !== undefined &&
+    message.startsWith("You are AgentKnot's read-only task classifier.")
+  ) {
+    return process.env.FAKE_PI_PLANNER_OUTPUT;
+  }
   if (process.env.FAKE_PI_COMPLETION_OUTPUT !== undefined) return process.env.FAKE_PI_COMPLETION_OUTPUT;
   const humanOutput = process.env.FAKE_PI_HUMAN_OUTPUT ?? 'fake result';
   const validReport = {
@@ -130,7 +136,7 @@ function handle(command) {
   if (process.env.FAKE_PI_PROMPT_FILE) {
     writeFileSync(process.env.FAKE_PI_PROMPT_FILE, command.message);
   }
-  const output = completionOutput();
+  const output = completionOutput(command.message);
   const splitAt = Math.min(5, output.length);
 
   send({ id: command.id, type: 'response', command: 'prompt', success: true });
