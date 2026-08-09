@@ -160,11 +160,13 @@ export class OrchestrationService {
     return this.#store.list();
   }
 
-  async reconcileInterruptedOrchestrations(): Promise<OrchestrationRecord[]> {
+  async reconcileInterruptedOrchestrations(
+    options: { exclusiveOwner?: boolean } = {}
+  ): Promise<OrchestrationRecord[]> {
     const reconciled: OrchestrationRecord[] = [];
     for (const record of await this.#store.list()) {
       if (!['queued', 'planning', 'dispatching'].includes(record.status)) continue;
-      if (isExecutorProcessAlive(record.execution)) continue;
+      if (!options.exclusiveOwner && isExecutorProcessAlive(record.execution)) continue;
 
       const previousStatus = record.status;
       const message =

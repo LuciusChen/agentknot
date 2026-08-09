@@ -113,6 +113,7 @@ Version 0.0.1 currently implements:
 - immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
 - bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with four active slots backed by a current four-child Luna/max orchestration, and a configuration ceiling of six for each with concurrency never exceeding the child count;
 - fail-without-resume startup reconciliation for stale jobs and orchestration records;
+- one execution-owning file runtime per canonical Job/Orchestration storage directory, with a second conforming writer refused before reconciliation or admission and read-only runtimes prevented from executing work;
 - optional vendor-neutral route-selection policy under `delegation.dispatch`, disabled by omission and limited to 1–20 ordered rules whose candidate routes validate at config load, with `shadow` evidence-only and `active` human-authored execution modes ([decisions 0016](../postmortems/0016-shadow-route-selection.md) and [0020](../postmortems/0020-human-authored-active-route-selection.md));
 
 Rules may match non-empty unique `taskKinds` and/or non-empty unique parent `complexities` from `low`, `medium`, and `high`; both predicates must match when both are present, a rule with neither is an explicit catch-all, and a zero-based rule index is recorded only for a match. The repository's active dogfood rule maps `low` to DeepSeek Flash/max and leaves `medium`, `high`, and no match on the Luna/max default. This is explicit human policy, not an intelligence ranking, learned optimization, or fallback.
@@ -158,6 +159,8 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 If event, artifact-recording, or terminal persistence fails after admission, the leaf completion rejects as a control-plane persistence failure. It does not retry the worker, invent a failed terminal result, or deliver a terminal callback; the last successfully persisted snapshot remains authoritative and unrecorded patch evidence is removed.
 
 The current `queued` state is an admission event immediately followed by execution; it does not imply a capacity-aware scheduler.
+
+The supported file-backed runtime is single-writer. Execution-owning construction first claims both canonical storage directories; it never uses a recorded PID to override a live or ambiguous owner. A new owner can reconcile prior nonterminal records only after the previous kernel-held ownership has ended. Read-only controllers may inspect the same snapshots concurrently but cannot execute or reconcile through that runtime. This is local ownership, not a lease, distributed lock, resumable queue, or hostile-process sandbox.
 
 ## Product acceptance criteria
 
@@ -205,8 +208,8 @@ These are evidence requirements, not claims that the current MVP has already met
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete job record.
 - A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk. Shadow suggestions and active configured routing both inherit the limits of the parent complexity and task-kind classification; active mode therefore keeps a conservative Luna default and never adds fallback.
 - Shadow route evidence is not a measured model ranking; separate scorecards must compare routes on the same bounded workloads before any automatic selection is proposed.
-- Process-local concurrency and PID liveness checks are not a distributed scheduler, lease, or reliable defense against PID reuse and multiple AgentKnot writers.
-- Multiple execution-owning runtimes can still race whole-snapshot writes, and PID liveness observed from one namespace is not authoritative across namespaces. Read-oriented CLI commands no longer invoke that reconciliation path, resolving the immediate mutation in [incident 0010](../postmortems/0010-read-only-cli-runtime-reconciliation.md), but leases or compare-and-set storage remain absent.
+- Process-local task concurrency and file-runtime advisory ownership are not a distributed scheduler, lease, or hostile-writer security boundary.
+- A conforming second execution owner is refused before whole-snapshot mutation, including across PID namespaces that share the locked filesystem. A custom process can ignore advisory locks or mutate files directly; compare-and-set storage and distributed coordination remain absent ([decision 0022](../postmortems/0022-file-runtime-single-writer-ownership.md)).
 - Depth one constrains AgentKnot's own parent/child engine; the unauthenticated local API cannot prevent a host-capable worker from independently submitting another top-level orchestration.
 - Adding integrations before an adapter conformance contract exists can move provider-specific policy into the core.
 - Copying collaboration or fleet features from adjacent projects would dilute the local execution-handoff problem AgentKnot exists to solve.

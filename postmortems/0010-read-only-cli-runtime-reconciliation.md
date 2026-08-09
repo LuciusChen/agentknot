@@ -95,3 +95,7 @@ Restartable execution, durable leases, multi-process scheduling, remote workers,
 ## Privacy and security review
 
 This record retains IDs, timestamps, route identity, commit IDs, and artifact hash. It omits credential values, auth-file contents, raw model reasoning, prompt bodies, and repository artifact content. The incident involved state authority rather than secret disclosure.
+
+## Addenda
+
+2026-08-09: [Decision 0022](./0022-file-runtime-single-writer-ownership.md) completed the PID-namespace and cross-process single-writer follow-ups through pre-reconciliation advisory ownership. A new owner no longer uses PID liveness as takeover authority, and a conforming prior owner cannot keep writing after the new owner acquires both locks. The unchecked items above are preserved as the historical state of this incident record.

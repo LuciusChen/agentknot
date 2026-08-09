@@ -94,7 +94,7 @@ function staleOrchestration(
   };
 }
 
-test('createRuntime deterministically fails stale nonterminal jobs once without replaying them live', async () => {
+test('exclusive createRuntime fails every prior nonterminal record once without replay', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-runtime-'));
   const storageDirectory = path.join(directory, 'jobs');
   const orchestrationStorageDirectory = path.join(directory, 'orchestrations');
@@ -181,6 +181,10 @@ test('createRuntime deterministically fails stale nonterminal jobs once without 
   );
   assert.equal((await readOnlyRuntime.get('job_stale_queued'))?.status, 'queued');
   assert.equal((await readOnlyRuntime.getOrchestration(staleParentRecord.id))?.status, 'dispatching');
+  await assert.rejects(
+    async () => readOnlyRuntime.run({ prompt: 'must remain read only', workspace }),
+    /created for read-only access/
+  );
 
   const observed: string[] = [];
 
@@ -194,6 +198,8 @@ test('createRuntime deterministically fails stale nonterminal jobs once without 
   for (const [id, previousStatus, expectedSequence] of [
     ['job_stale_queued', 'queued', 2],
     ['job_stale_running', 'running', 3],
+    ['job_active_running', 'running', 3],
+    ['job_stale_child', 'running', 3],
   ] as const) {
     const job = await runtime.get(id);
     assert.equal(job?.status, 'failed');
@@ -216,7 +222,6 @@ test('createRuntime deterministically fails stale nonterminal jobs once without 
     });
   }
   assert.deepEqual(observed, []);
-  assert.equal((await runtime.get('job_active_running'))?.status, 'running');
   const staleParent = await runtime.getOrchestration('orchestration_stale');
   assert.equal(staleParent?.status, 'failed');
   assert.equal(staleParent?.error?.name, 'ExecutionInterruptedError');
@@ -225,13 +230,27 @@ test('createRuntime deterministically fails stale nonterminal jobs once without 
   assert.equal(staleParent?.children[0]?.status, 'failed');
   assert.equal(staleParent?.children[0]?.error?.name, 'ExecutionInterruptedError');
 
+  const admission = runtime.start({ prompt: 'owner remains held during work', workspace });
+  await assert.rejects(runtime.close(), /Cannot release runtime storage ownership while work is active/);
+  const ownedJob = await admission;
+  assert.equal((await ownedJob.completion).status, 'succeeded');
+
   const queuedAfterFirstRecovery = await runtime.get('job_stale_queued');
-  const secondRuntime = await createRuntime({ configPath });
-  const queuedAfterSecondRecovery = await secondRuntime.get('job_stale_queued');
-  assert.deepEqual(queuedAfterSecondRecovery, queuedAfterFirstRecovery);
-  assert.equal((await secondRuntime.get('job_active_running'))?.status, 'running');
-  assert.deepEqual(
-    await secondRuntime.getOrchestration('orchestration_stale'),
-    staleParent
+  await assert.rejects(
+    createRuntime({ configPath }),
+    /Another execution-owning AgentKnot runtime already owns storage directory/
   );
+  await runtime.close();
+  const secondRuntime = await createRuntime({ configPath });
+  try {
+    const queuedAfterSecondRecovery = await secondRuntime.get('job_stale_queued');
+    assert.deepEqual(queuedAfterSecondRecovery, queuedAfterFirstRecovery);
+    assert.equal((await secondRuntime.get('job_active_running'))?.status, 'failed');
+    assert.deepEqual(
+      await secondRuntime.getOrchestration('orchestration_stale'),
+      staleParent
+    );
+  } finally {
+    await secondRuntime.close();
+  }
 });

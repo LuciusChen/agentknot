@@ -23,6 +23,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Deterministic Pi RPC conformance fixtures for split JSONL/UTF-8 input, malformed frames, premature exit, missing settlement, timeout, and cancellation.
 - Sanitized Pi `get_session_stats` metadata for successful normal jobs, including message/tool counts, token totals, cost, and optional context usage; unavailable statistics remain advisory.
 - Product requirements, technical specification, evidence-gated roadmap, and decision/postmortem records.
+- File-runtime single-writer ownership: execution-owning `createRuntime()` calls acquire non-blocking advisory locks on both canonical storage directories, reject a second owner before reconciliation or admission, and expose `RuntimeOwnershipError` plus explicit `AgentKnotRuntime.close()` lifecycle ([decision 0022](postmortems/0022-file-runtime-single-writer-ownership.md)).
 
 ### Changed
 
@@ -40,6 +41,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Two isolated `pi-lean-ctx@3.9.18` Luna/max A/B pairs produced selected artifacts that passed upstream verification, but the profile remains unpromoted: a 39.0% token reduction on the larger task reversed into 36.2% more tokens and 45.7% more elapsed time on an independent smaller task ([experiment 0014](postmortems/0014-pi-lean-ctx-profile-ab.md)).
 - Shadow route-selection regression coverage now verifies that child-start events and reloaded child Jobs retain the actual default route, and that suggest mode retains shadow evidence without dispatching children.
 - Active route-selection coverage verifies that a human-configured match becomes the persisted plan route, child-start route, resolved Job route, and public metadata evidence; unmatched work remains on `dispatch.defaultRoute`.
+- `createRuntime({ reconcileOnStartup: false })` is now an enforced read-only runtime; execution and reconciliation methods refuse calls. After an execution owner acquires both storage locks, startup reconciliation fails every prior nonterminal snapshot once without consulting its PID, avoiding PID namespace and reuse ambiguity. One-shot CLI commands release ownership after completion, server crashes release kernel locks, and `runtime.close()` refuses while work is active.
 
 ### Fixed
 

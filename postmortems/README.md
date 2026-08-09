@@ -133,3 +133,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0019](./0019-callback-bookkeeping-persistence-boundary.md) | Incident | Resolved | Keep callback bookkeeping outside execution failure handling |
 | [0020](./0020-human-authored-active-route-selection.md) | Decision | Accepted | Apply only human-authored active route selection |
 | [0021](./0021-job-persistence-failure-boundaries.md) | Incident | Resolved | Keep Job persistence failures out of worker retry |
+| [0022](./0022-file-runtime-single-writer-ownership.md) | Decision | Accepted | Enforce one file-runtime writer before recovery |

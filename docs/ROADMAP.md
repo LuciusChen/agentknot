@@ -78,8 +78,8 @@ Make leaf-job semantics and the bounded delegation slice reliable enough that a 
 - Define and test persistence-failure behavior at admission, event append, terminal transition, artifact recording, and callback bookkeeping.
   - [x] Keep callback-bookkeeping persistence outside the execution failure path: attempt delivery once, preserve the already-persisted terminal result, never redeliver, and reject completion with the store error when its delivery state cannot be saved ([incident 0019](../postmortems/0019-callback-bookkeeping-persistence-boundary.md)).
   - [x] Atomically admit `queued` with `job.queued`; classify event, artifact-recording, and terminal-transition save failures as control-plane persistence errors without worker retry, substitute terminal state, or callback delivery; remove unrecorded patches and retain the last good snapshot for restart reconciliation ([incident 0021](../postmortems/0021-job-persistence-failure-boundaries.md)).
-- On startup, detect stale nonterminal records and deterministically mark or reconcile them; resumable execution is not required in this stage.
-- Define the supported single-process concurrency model and reject unsupported multi-process writers clearly.
+- [x] On startup, after exclusive storage ownership is established, fail every prior nonterminal Job/Orchestration once without replay or PID-based takeover; resumable execution remains outside this stage.
+- [x] Enforce the supported single-writer file runtime with non-blocking advisory locks on both canonical storage directories, clear second-owner refusal, read-only runtime capability checks, active-work close refusal, and crash-release/restart coverage; no lease, heartbeat, database, or dependency package is added ([decision 0022](../postmortems/0022-file-runtime-single-writer-ownership.md)).
 - Bound event, raw worker data, stderr, result, callback payload, and record growth.
 - Add an explicit retention and redaction policy, including the limits of redacting prompts, patches, and model output.
 
@@ -135,11 +135,11 @@ Next evidence gate:
 Delivered:
 
 - Read-oriented CLI construction skips startup reconciliation, while `run`, `orchestrate`, and parameter-valid `serve` remain explicit execution owners; deterministic cross-process CLI tests prove reads and invalid commands leave persisted bytes unchanged.
+- Execution-owning file runtimes lock both canonical storage directories before reconciliation/admission, reject same-process and cross-process second owners, release after one-shot completion or process crash, and make `reconcileOnStartup: false` a read-only runtime capability. Once ownership is acquired, prior nonterminal records are interrupted without trusting PID visibility or reuse.
 
 Still open:
 
-- Define and test the PID-namespace and concurrent-writer boundary before relying on PID liveness to fail nonterminal records.
-- Preserve single-writer evidence: a stale-recovery write must not race an active runtime and then disappear under a later whole-snapshot save.
+- Extend crash/soak coverage across every nonterminal Job and Orchestration phase and verify crash-left resource reporting; ownership itself does not clean resources it cannot prove it owns.
 
 ### Route-diagnostics slice admitted into Stage 1
 

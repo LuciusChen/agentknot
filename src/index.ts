@@ -8,6 +8,7 @@ export * from './orchestration-store.js';
 export * from './orchestration-types.js';
 export * from './orchestrator.js';
 export * from './runtime.js';
+export * from './runtime-ownership.js';
 export * from './store.js';
 export * from './types.js';
 export * from './workspace-isolation.js';

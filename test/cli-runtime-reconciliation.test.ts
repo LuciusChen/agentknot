@@ -370,3 +370,29 @@ test('execution-owning CLI commands keep startup reconciliation enabled', async 
     await rm(fixture.directory, { recursive: true, force: true });
   }
 });
+
+test('CLI serve refuses a second storage owner and permits restart after owner crash', async () => {
+  const fixture = await createFixture('mock');
+  let first: ReturnType<typeof spawn> | undefined;
+  let restarted: ReturnType<typeof spawn> | undefined;
+  try {
+    first = await startServer(fixture.configPath);
+    const refused = await runCli(fixture.configPath, 'serve', '--host', '127.0.0.1', '--port', '0');
+    assert.equal(refused.code, 1);
+    assert.match(
+      refused.stderr,
+      /Another execution-owning AgentKnot runtime already owns storage directory/
+    );
+    assert.equal(first.exitCode, null);
+
+    const crashed = once(first, 'exit');
+    first.kill('SIGKILL');
+    await crashed;
+    first = undefined;
+    restarted = await startServer(fixture.configPath);
+  } finally {
+    if (first !== undefined) await stopServer(first);
+    if (restarted !== undefined) await stopServer(restarted);
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});

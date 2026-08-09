@@ -60,29 +60,32 @@ test('AgentKnotRuntime and createRuntime expose compatible mode-off public behav
 
   const constructed = directRuntime(modeOffConfig());
   const created = await createRuntime({ configPath });
+  try {
+    assert.ok(created instanceof AgentKnotRuntime);
+    assert.deepEqual(created.routes(), constructed.routes());
+    assert.deepEqual(created.delegationPolicy(), constructed.delegationPolicy());
+    assert.deepEqual(await created.doctor(), await constructed.doctor());
+    assert.deepEqual(await created.list(), await constructed.list());
+    assert.deepEqual(await created.listOrchestrations(), await constructed.listOrchestrations());
 
-  assert.ok(created instanceof AgentKnotRuntime);
-  assert.deepEqual(created.routes(), constructed.routes());
-  assert.deepEqual(created.delegationPolicy(), constructed.delegationPolicy());
-  assert.deepEqual(await created.doctor(), await constructed.doctor());
-  assert.deepEqual(await created.list(), await constructed.list());
-  assert.deepEqual(await created.listOrchestrations(), await constructed.listOrchestrations());
+    const request = { prompt: 'Use the upstream path.', workspace, source: 'test' };
+    const constructedRecord = await constructed.orchestrate(request);
+    const createdRecord = await created.orchestrate(request);
 
-  const request = { prompt: 'Use the upstream path.', workspace, source: 'test' };
-  const constructedRecord = await constructed.orchestrate(request);
-  const createdRecord = await created.orchestrate(request);
-
-  for (const record of [constructedRecord, createdRecord]) {
-    assert.equal(record.status, 'succeeded');
-    assert.equal(record.request.workspace, workspace);
-    assert.equal(record.request.source, 'test');
-    assert.equal(record.plan?.mode, 'off');
-    assert.equal(record.plan?.willDispatch, false);
-    assert.equal(record.result?.action, 'upstream');
-    assert.deepEqual(record.children, []);
+    for (const record of [constructedRecord, createdRecord]) {
+      assert.equal(record.status, 'succeeded');
+      assert.equal(record.request.workspace, workspace);
+      assert.equal(record.request.source, 'test');
+      assert.equal(record.plan?.mode, 'off');
+      assert.equal(record.plan?.willDispatch, false);
+      assert.equal(record.result?.action, 'upstream');
+      assert.deepEqual(record.children, []);
+    }
+    assert.deepEqual(
+      createdRecord.events.map((event) => event.type),
+      constructedRecord.events.map((event) => event.type)
+    );
+  } finally {
+    await created.close();
   }
-  assert.deepEqual(
-    createdRecord.events.map((event) => event.type),
-    constructedRecord.events.map((event) => event.type)
-  );
 });

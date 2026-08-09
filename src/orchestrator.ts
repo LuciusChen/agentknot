@@ -369,11 +369,11 @@ export class Orchestrator {
     };
   }
 
-  async reconcileInterruptedJobs(): Promise<JobRecord[]> {
+  async reconcileInterruptedJobs(options: { exclusiveOwner?: boolean } = {}): Promise<JobRecord[]> {
     const reconciled: JobRecord[] = [];
     for (const job of await this.#store.list()) {
       if (job.status !== 'queued' && job.status !== 'running') continue;
-      if (isExecutorProcessAlive(job.execution)) continue;
+      if (!options.exclusiveOwner && isExecutorProcessAlive(job.execution)) continue;
 
       const previousStatus = job.status;
       const message =

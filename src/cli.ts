@@ -105,13 +105,15 @@ async function main(argv: string[]): Promise<void> {
       onEvent: (event) => printEvent(event, json, events),
       reconcileOnStartup: true,
     });
-    const job = await runtime.run({
-      prompt,
-      workspace,
-      source,
-      ...(route === undefined ? {} : { route }),
-      ...(callbackUrl === undefined ? {} : { callbackUrl }),
-    });
+    const job = await runtime
+      .run({
+        prompt,
+        workspace,
+        source,
+        ...(route === undefined ? {} : { route }),
+        ...(callbackUrl === undefined ? {} : { callbackUrl }),
+      })
+      .finally(() => runtime.close());
     if (!json && !events) process.stdout.write('\n');
     if (json) process.stdout.write(`${JSON.stringify(job, null, 2)}\n`);
     if (events) process.stdout.write(`${JSON.stringify({ type: 'job.snapshot', job })}\n`);
@@ -140,14 +142,16 @@ async function main(argv: string[]): Promise<void> {
       onEvent: (event) => printEvent(event, json, false),
       reconcileOnStartup: true,
     });
-    const orchestration = await runtime.orchestrate({
-      prompt,
-      workspace,
-      source,
-      ...(delegation === undefined
-        ? {}
-        : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),
-    });
+    const orchestration = await runtime
+      .orchestrate({
+        prompt,
+        workspace,
+        source,
+        ...(delegation === undefined
+          ? {}
+          : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),
+      })
+      .finally(() => runtime.close());
     if (json) {
       process.stdout.write(`${JSON.stringify(orchestration, null, 2)}\n`);
     } else {
@@ -173,7 +177,10 @@ async function main(argv: string[]): Promise<void> {
       reconcileOnStartup: true,
     });
     const http = createAgentKnotHttpServer(runtime);
-    const address = await http.listen(port, host);
+    const address = await http.listen(port, host).catch(async (error: unknown) => {
+      await runtime.close();
+      throw error;
+    });
     process.stdout.write(`AgentKnot listening on http://${address.host}:${address.port}\n`);
     return;
   }
