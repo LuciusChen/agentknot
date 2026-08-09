@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -159,6 +159,27 @@ test('createRuntime deterministically fails stale nonterminal jobs once without 
     },
   ];
   await orchestrationStore.create(staleParentRecord);
+  const unchangedJobSnapshots = new Map(
+    await Promise.all(
+      ['job_stale_queued', 'job_stale_running', 'job_active_running', 'job_stale_child'].map(
+        async (id) => [id, await readFile(path.join(storageDirectory, `${id}.json`))] as const
+      )
+    )
+  );
+  const unchangedOrchestrationSnapshot = await readFile(
+    path.join(orchestrationStorageDirectory, `${staleParentRecord.id}.json`)
+  );
+  const readOnlyRuntime = await createRuntime({ configPath, reconcileOnStartup: false });
+  for (const [id, snapshot] of unchangedJobSnapshots) {
+    assert.deepEqual(await readFile(path.join(storageDirectory, `${id}.json`)), snapshot);
+  }
+  assert.deepEqual(
+    await readFile(path.join(orchestrationStorageDirectory, `${staleParentRecord.id}.json`)),
+    unchangedOrchestrationSnapshot
+  );
+  assert.equal((await readOnlyRuntime.get('job_stale_queued'))?.status, 'queued');
+  assert.equal((await readOnlyRuntime.getOrchestration(staleParentRecord.id))?.status, 'dispatching');
+
   const observed: string[] = [];
 
   const runtime = await createRuntime({

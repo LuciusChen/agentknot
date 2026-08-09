@@ -103,6 +103,7 @@ async function main(argv: string[]): Promise<void> {
     const runtime = await createRuntime({
       ...(configPath === undefined ? {} : { configPath }),
       onEvent: (event) => printEvent(event, json, events),
+      reconcileOnStartup: true,
     });
     const job = await runtime.run({
       prompt,
@@ -137,6 +138,7 @@ async function main(argv: string[]): Promise<void> {
     const runtime = await createRuntime({
       ...(configPath === undefined ? {} : { configPath }),
       onEvent: (event) => printEvent(event, json, false),
+      reconcileOnStartup: true,
     });
     const orchestration = await runtime.orchestrate({
       prompt,
@@ -160,19 +162,26 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  const runtime = await createRuntime(configPath === undefined ? {} : { configPath });
-
   if (command === 'serve') {
     const host = takeOption(args, '--host') ?? '127.0.0.1';
     const portValue = takeOption(args, '--port') ?? '7391';
     const port = Number(portValue);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('--port must be 0-65535');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
+    const runtime = await createRuntime({
+      ...(configPath === undefined ? {} : { configPath }),
+      reconcileOnStartup: true,
+    });
     const http = createAgentKnotHttpServer(runtime);
     const address = await http.listen(port, host);
     process.stdout.write(`AgentKnot listening on http://${address.host}:${address.port}\n`);
     return;
   }
+
+  const runtime = await createRuntime({
+    ...(configPath === undefined ? {} : { configPath }),
+    reconcileOnStartup: false,
+  });
 
   if (command === 'doctor') {
     const route = takeOption(args, '--route');

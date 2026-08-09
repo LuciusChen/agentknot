@@ -110,9 +110,14 @@ Still open:
 
 - Distinguish HTTP liveness from route readiness in naming and documentation.
 
-### Runtime reconciliation correctness blocker
+### Runtime reconciliation correctness
 
-- Split read-only runtime construction from startup reconciliation so `show`, list, artifact inspection, route/delegation inspection, and doctor cannot mutate persisted execution state.
+Delivered:
+
+- Read-oriented CLI construction skips startup reconciliation, while `run`, `orchestrate`, and parameter-valid `serve` remain explicit execution owners; deterministic cross-process CLI tests prove reads and invalid commands leave persisted bytes unchanged.
+
+Still open:
+
 - Define and test the PID-namespace and concurrent-writer boundary before relying on PID liveness to fail nonterminal records.
 - Preserve single-writer evidence: a stale-recovery write must not race an active runtime and then disappear under a later whole-snapshot save.
 

@@ -29,6 +29,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 
 ### Fixed
 
+- Read-oriented CLI commands no longer perform startup reconciliation or mutate persisted Job and Orchestration records; only execution-owning `run`, `orchestrate`, and valid `serve` invocations retain recovery, and invalid `serve` arguments fail before runtime construction ([postmortem 0010](postmortems/0010-read-only-cli-runtime-reconciliation.md)).
 - Concurrent worker events are serialized per job and file snapshots use unique temporary names, preventing event gaps and temporary-file rename races ([postmortem 0005](postmortems/0005-concurrent-job-event-persistence.md)).
 - Planner jobs now share the same process-wide concurrency budget as delegated child jobs.
 - Planner or child jobs admitted immediately before a parent persistence failure are cancelled and awaited instead of continuing as orphan executions.

@@ -110,7 +110,7 @@ Version 0.0.1 currently implements:
 
 Route diagnostics have two explicit modes. The default `doctor` command is a fast configuration, credential, and runtime check and must say that live inference was not checked. The opt-in `doctor --live` path performs one bounded real inference through the exact selected worker, provider, model, and thinking level; its 30-second control-plane timer triggers cooperative abort, and a supported adapter must settle after abort and clean up its resources. It reports provider errors with failure status and unsupported adapters honestly, does not fall back or select another route, does not create Job or artifact records, and does not add a probe before normal jobs or orchestrations.
 
-The current file stores provide persistent audit snapshots and deterministically mark stale nonterminal jobs or orchestrations failed on startup when their recorded process is absent. They do not provide resumable execution, a restartable queue, journaling, multi-process coordination, PID-reuse protection, or automatic cleanup of worktrees left by a hard process crash.
+The current file stores provide persistent audit snapshots. Execution-owning runtimes deterministically mark stale nonterminal jobs or orchestrations failed on startup when their recorded process is absent; read-oriented CLI runtimes do not perform this recovery. The stores do not provide resumable execution, a restartable queue, journaling, multi-process coordination, PID-reuse protection, or automatic cleanup of worktrees left by a hard process crash.
 
 Provider and model independence are currently routing properties implemented by the selected worker. AgentKnot does not yet expose an independent provider-runtime interface.
 
@@ -186,7 +186,7 @@ These are evidence requirements, not claims that the current MVP has already met
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete job record.
 - A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk.
 - Process-local concurrency and PID liveness checks are not a distributed scheduler, lease, or reliable defense against PID reuse and multiple AgentKnot writers.
-- Read-oriented CLI commands currently construct a full runtime and may run startup reconciliation; a second CLI process in another PID namespace can misclassify an active execution and mutate its persisted state ([incident 0010](../postmortems/0010-read-only-cli-runtime-reconciliation.md)).
+- Multiple execution-owning runtimes can still race whole-snapshot writes, and PID liveness observed from one namespace is not authoritative across namespaces. Read-oriented CLI commands no longer invoke that reconciliation path, resolving the immediate mutation in [incident 0010](../postmortems/0010-read-only-cli-runtime-reconciliation.md), but leases or compare-and-set storage remain absent.
 - Depth one constrains AgentKnot's own parent/child engine; the unauthenticated local API cannot prevent a host-capable worker from independently submitting another top-level orchestration.
 - Adding integrations before an adapter conformance contract exists can move provider-specific policy into the core.
 - Copying collaboration or fleet features from adjacent projects would dilute the local execution-handoff problem AgentKnot exists to solve.

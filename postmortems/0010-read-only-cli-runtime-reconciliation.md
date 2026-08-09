@@ -1,11 +1,11 @@
 # 0010: Prevent read-only CLI runtime reconciliation from mutating active jobs
 
 - Type: Incident
-- Status: Draft
+- Status: Resolved
 - Severity: High
 - Date: 2026-08-09
 - Owners: AgentKnot maintainers
-- Affected versions/commits: AgentKnot 0.0.1 through `beaeeca`
+- Affected versions/commits: AgentKnot 0.0.1 through `3e3fb30`
 - Related: [PRD](../docs/PRD.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md), [README](../README.md)
 
 ## Summary
@@ -14,11 +14,11 @@ While an AgentKnot orchestration was running in one process namespace, a second 
 
 ## Context
 
-Stage 1 marks genuinely interrupted nonterminal records failed instead of pretending to resume them. The implementation stores a runtime ID and PID, then calls `process.kill(pid, 0)` from every newly constructed runtime to decide whether the recorded executor is alive. The CLI constructs a full runtime before dispatching read-oriented commands such as `show`, list, artifact inspection, routes, delegation inspection, and doctor.
+Stage 1 marks genuinely interrupted nonterminal records failed instead of pretending to resume them. The affected implementation stored a runtime ID and PID, then called `process.kill(pid, 0)` from every newly constructed runtime to decide whether the recorded executor was alive. The CLI constructed a full runtime before dispatching read-oriented commands such as `show`, list, artifact inspection, routes, delegation inspection, and doctor.
 
 ## Expected invariant
 
-A read-only status or artifact inspection must not change Job or Orchestration state. Startup recovery must not classify an active execution as interrupted merely because another runtime cannot see its PID, and concurrent writers must not silently overwrite each other's terminal evidence.
+A read-only status or artifact inspection must not change Job or Orchestration state. This incident is resolved when those paths have no recovery authority. Before AgentKnot can support multiple execution-owning runtimes, startup recovery must also avoid treating namespace-local PID absence as globally authoritative and concurrent writers must not silently overwrite each other's terminal evidence.
 
 ## Severity, impact, and terminal state
 
@@ -30,7 +30,13 @@ A read-only status or artifact inspection must not change Job or Orchestration s
 
 ## Immediate containment
 
-No further secondary CLI status commands were run while the orchestration was active. The original orchestration session was allowed to settle, after which the child and parent both reported succeeded. Artifact listing and verification were performed only after terminal completion. Current documentation warns operators to inspect active records through their existing serving HTTP runtime instead of constructing a second CLI runtime.
+No further secondary CLI status commands were run while the orchestration was active. The original orchestration session was allowed to settle, after which the child and parent both reported succeeded. Artifact listing and verification were performed only after terminal completion. Documentation temporarily warned operators to inspect active records through their existing serving HTTP runtime instead of constructing a second CLI runtime.
+
+## Resolution
+
+On 2026-08-09, runtime construction gained a `reconcileOnStartup` option. It defaults to `true` for TypeScript compatibility, while every read-oriented CLI path passes `false`. CLI `run`, `orchestrate`, and a parameter-valid `serve` remain execution owners and pass `true`; invalid `serve` arguments fail before runtime construction.
+
+The regression suite launches separate CLI processes against stale Job and Orchestration fixtures and verifies byte-for-byte stability after `show`, lists, artifact inspection, route/delegation inspection, both doctor modes, and invalid commands. It separately proves that `run`, `orchestrate`, and a short-lived real server on an ephemeral port retain startup recovery. The full suite passes 78/78. This closes the read-side mutation path without claiming safe concurrent execution owners, namespace-independent PID identity, leases, compare-and-set storage, or restart resume.
 
 ## Evidence and timeline
 
@@ -57,12 +63,12 @@ Deferred as a complete solution. Host PID identity, namespaces, PID reuse, start
 
 ### Separate read-only construction from explicit recovery
 
-Preferred next slice. Read-oriented CLI commands do not need startup mutation. Execution-owning entry points can retain explicit fail-without-resume behavior while recovery identity and single-writer rules are hardened independently.
+Adopted. Read-oriented CLI commands do not need startup mutation. Execution-owning entry points retain explicit fail-without-resume behavior while recovery identity and single-writer rules remain separate follow-up work.
 
 ## Consequences
 
-- Read-only CLI commands cannot currently be described as record-read-only even when their business operation only reads data.
-- Active Job and Orchestration inspection should use the already-running HTTP process until the blocker is fixed.
+- Read-oriented CLI commands now open stores without reconciliation and can inspect active records without acquiring recovery authority.
+- Execution-owning CLI commands retain deterministic fail-without-resume startup behavior.
 - PID liveness remains useful evidence only within its documented namespace and single-writer assumptions.
 - The environment-alignment artifact from this run remained verifiable and was reviewed independently; this incident does not invalidate its content.
 
@@ -76,15 +82,15 @@ A status check assumed to be read-only invoked state-changing startup behavior. 
 
 ## Corrective actions and gates
 
-- [ ] Split runtime construction so read-oriented CLI commands never run reconciliation — deterministic cross-process CLI test — Stage 1 blocker.
-- [ ] Make recovery an explicit execution-owner action and document which entry points may invoke it — CLI/HTTP/TypeScript contract tests.
+- [x] Split runtime construction so read-oriented CLI commands never run reconciliation — deterministic cross-process CLI test — Stage 1 blocker.
+- [x] Make recovery an explicit execution-owner action and document which entry points may invoke it — CLI/HTTP/TypeScript contract tests.
 - [ ] Add a PID-namespace simulation or injectable liveness boundary that proves an unobservable PID is not sufficient authority for read-side mutation.
 - [ ] Add cross-process single-writer protection or an equivalent compare-and-set/lease contract before claiming safe concurrent file-store mutation.
 - [ ] Verify that conflicting terminal transitions cannot be silently removed by a later snapshot save.
 
 ## Deferred work
 
-Restartable execution, durable leases, multi-process scheduling, remote workers, and distributed consensus remain outside Stage 1. The immediate correction should narrow read-only behavior without claiming those capabilities.
+Restartable execution, durable leases, multi-process scheduling, remote workers, and distributed consensus remain outside Stage 1. The resolution narrows read-only behavior without claiming those capabilities.
 
 ## Privacy and security review
 

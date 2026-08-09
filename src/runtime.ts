@@ -26,6 +26,8 @@ import type {
 export interface CreateRuntimeOptions {
   configPath?: string;
   onEvent?: JobEventListener;
+  /** Defaults to true. Read-only callers must disable startup reconciliation explicitly. */
+  reconcileOnStartup?: boolean;
 }
 
 export class AgentKnotRuntime {
@@ -108,12 +110,16 @@ export async function createRuntime(options: CreateRuntimeOptions = {}): Promise
     adapters: createAdapters(loaded.config),
     ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
   });
-  await jobs.reconcileInterruptedJobs();
+  if (options.reconcileOnStartup !== false) {
+    await jobs.reconcileInterruptedJobs();
+  }
   const orchestrations = new OrchestrationService({
     config: resolveDelegationConfig(loaded.config),
     jobs,
     store: new FileOrchestrationStore(loaded.orchestrationStorageDirectory),
   });
-  await orchestrations.reconcileInterruptedOrchestrations();
+  if (options.reconcileOnStartup !== false) {
+    await orchestrations.reconcileInterruptedOrchestrations();
+  }
   return new AgentKnotRuntime(jobs, orchestrations);
 }

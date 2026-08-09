@@ -173,7 +173,7 @@ Current persistence does not provide:
 - restartable or resumable execution;
 - retention, compaction, or record-size limits.
 
-At runtime startup, a `queued` or `running` job whose recorded executor PID is absent is marked failed exactly once with `ExecutionInterruptedError` and `reason: runtime_restart`; it is never replayed and observers/callbacks are not invoked. A nonterminal orchestration is handled the same way without redispatching its persisted plan, after its embedded child outcomes are refreshed from authoritative leaf Job records. A live PID is left untouched. This is deterministic fail-without-resume reconciliation, not a lease: PID reuse, multiple concurrent writers, crash-left processes, and crash-left managed worktrees remain limitations.
+At execution-owning runtime startup, a `queued` or `running` job whose recorded executor PID is absent is marked failed exactly once with `ExecutionInterruptedError` and `reason: runtime_restart`; it is never replayed and observers/callbacks are not invoked. A nonterminal orchestration is handled the same way without redispatching its persisted plan, after its embedded child outcomes are refreshed from authoritative leaf Job records. A live PID is left untouched. Read-oriented CLI runtimes skip this procedure. This is deterministic fail-without-resume reconciliation, not a lease: PID reuse, multiple concurrent writers, crash-left processes, and crash-left managed worktrees remain limitations.
 
 ### Orchestration store
 
@@ -326,7 +326,7 @@ GET  /health
 
 Cancellation uses process-local active-job and active-orchestration maps. After a server restart, a persisted nonterminal record is reconciled as failed and is not an active cancellable execution.
 
-`createRuntime()` currently performs this reconciliation unconditionally. Consequently, CLI commands that are otherwise read-oriented (`show`, list, artifact inspection, routes, delegation inspection, and configuration-only doctor) can mutate Job or Orchestration records during construction. PID liveness is evaluated from the new process's namespace; a live executor hidden by a different PID namespace can be misclassified as exited. Until [incident 0010](../postmortems/0010-read-only-cli-runtime-reconciliation.md) is resolved, active records must be inspected through their existing serving runtime rather than a second CLI runtime.
+`createRuntime()` accepts `reconcileOnStartup`, which defaults to `true` for TypeScript compatibility. Passing `false` opens the configured stores without stale-execution recovery. CLI `run`, `orchestrate`, and a parameter-valid `serve` pass `true`; read-oriented and invalid CLI commands pass `false`, and invalid `serve` arguments are rejected before runtime construction. Therefore `show`, lists, artifact inspection, routes, delegation inspection, and both doctor modes cannot mutate Job or Orchestration records through startup reconciliation. PID liveness is still evaluated from an execution owner's namespace, so concurrent execution-owning runtimes, PID reuse, and cross-namespace liveness remain unsupported; the file stores have no lease or compare-and-set protection. See resolved [incident 0010](../postmortems/0010-read-only-cli-runtime-reconciliation.md).
 
 `GET /health` is currently a liveness response for the HTTP process. It does not validate storage, routes, credentials, workers, or provider availability. Route diagnostics, including the opt-in live probe, are exposed by the CLI `doctor` command; they are not currently an HTTP endpoint.
 
