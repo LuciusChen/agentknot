@@ -52,17 +52,6 @@
       ],
       "maxAttempts": 2,
       "timeoutMs": 3600000
-    },
-    "grok": {
-      "worker": "pi",
-      "provider": "xai",
-      "model": "grok-code-fast-1",
-      "thinkingLevel": "high",
-      "requiredEnv": [
-        "XAI_API_KEY"
-      ],
-      "maxAttempts": 2,
-      "timeoutMs": 3600000
     }
   },
   "delegation": {

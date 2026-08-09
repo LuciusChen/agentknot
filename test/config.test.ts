@@ -87,13 +87,13 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
     workers: { pi: { adapter: 'pi-rpc' } },
     routes: {
       luna: { worker: 'pi', provider: 'opencode-go', model: 'gpt-5.6-luna' },
-      grok: { worker: 'pi', provider: 'xai', model: 'grok-code-fast-1' },
+      secondary: { worker: 'pi', provider: 'secondary-provider', model: 'secondary-model' },
     },
     delegation: {
       mode: 'auto',
       planner: { strategy: 'hybrid', route: 'luna' },
       dispatch: {
-        defaultRoute: 'grok',
+        defaultRoute: 'secondary',
         maxChildren: 3,
         maxDepth: 1,
         maxConcurrency: 2,
@@ -101,7 +101,7 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
           mode: 'shadow',
           rules: [
             { route: 'luna', taskKinds: ['documentation'], complexities: ['low', 'medium'] },
-            { route: 'grok' },
+            { route: 'secondary' },
           ],
         },
       },
@@ -121,7 +121,7 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
     mode: 'auto',
     planner: { strategy: 'hybrid', route: 'luna' },
     dispatch: {
-      defaultRoute: 'grok',
+      defaultRoute: 'secondary',
       maxChildren: 3,
       maxDepth: 1,
       maxConcurrency: 2,
@@ -129,7 +129,7 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
         mode: 'shadow',
         rules: [
           { route: 'luna', taskKinds: ['documentation'], complexities: ['low', 'medium'] },
-          { route: 'grok' },
+          { route: 'secondary' },
         ],
       },
     },

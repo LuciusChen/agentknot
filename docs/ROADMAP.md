@@ -37,7 +37,7 @@ Prove that a controller-neutral job can be routed through a real worker/model pa
 - CLI, HTTP, and TypeScript Job API entry points.
 - Independent worker/provider/model route fields.
 - Deterministic mock worker and real Pi RPC worker.
-- OpenCode Go/Luna and xAI/Grok route configuration through Pi.
+- OpenCode Go/Luna and OpenCode Go/DeepSeek V4 Flash route configuration through Pi.
 - File and memory job stores with ordered snapshot events.
 - Cooperative timeout, retry, cancellation, and one-shot callback behavior.
 - Git worktree attempt isolation, patch capture, hashing, and cleanup.
@@ -225,6 +225,12 @@ Prove that controllers and worker runtimes can change independently without core
 - Added deterministic parity coverage, native manifest/Skill validation, and isolated marketplace install smoke tests for both installed packages. No controller model was invoked for the install smoke, so actual explicit and implicit controller-to-AgentKnot end-to-end runs remain open exit evidence.
 - Added no core branch, hook, MCP server, wrapper, daemon, or duplicate request builder. The pre-slice repository had no prior controller plugin/example implementation to retain or delete; the oversized first artifact test was reduced before integration so the stable contract is covered without coupling tests to every sentence.
 - Recorded the thin-adapter decision and Relay reference boundary in [decision 0027](../postmortems/0027-controller-native-integration-boundary.md).
+
+### Worker portability evidence
+
+- The route-neutral unit kit now runs against Mock and Pi RPC. Production references to Pi outside its adapter are limited to its configuration variant and built-in registry; existing mock-only runtime paths remain functional without selecting Pi.
+- A checksum-verified, temporary OpenCode CLI `v1.18.15` probe confirmed the documented JSON/ACP and exact model/variant command surfaces without installation or inference. It did not demonstrate a material benefit over Pi, and the environment has no independent OpenCode credential, so a native adapter remains deferred under [decision 0028](../postmortems/0028-native-opencode-adapter-evidence-gate.md).
+- The unused xAI/Grok repository route and current-product examples were removed. Historical decision evidence remains unchanged; formal dogfood candidates are Luna/max and the human-authored low-complexity DeepSeek Flash/max route, with no fallback.
 
 ### Exit gates
 

@@ -139,3 +139,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0025](./0025-local-retention-and-redaction-boundary.md) | Decision | Accepted | Keep local retention explicit and redaction claims narrow |
 | [0026](./0026-child-artifact-path-overlap-review.md) | Decision | Accepted | Persist child artifact path-overlap review evidence |
 | [0027](./0027-controller-native-integration-boundary.md) | Decision | Accepted | Keep controller-native integrations thin and policy-neutral |
+| [0028](./0028-native-opencode-adapter-evidence-gate.md) | Decision | Accepted | Defer a native OpenCode adapter until it proves value over Pi |

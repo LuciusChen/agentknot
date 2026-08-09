@@ -227,6 +227,8 @@ The reusable route-neutral `WorkerAdapter` unit kit runs against Mock and Pi RPC
 
 The JSON configuration boundary exposes the built-in `mock` and `pi-rpc` adapter kinds only; `createRuntime()` loads that configuration and registers those built-ins. A custom `WorkerAdapter` is a TypeScript construction path: callers provide an `AgentKnotConfig`, `JobStore`, and adapter map to `Orchestrator`, and construct `OrchestrationService` separately when they need orchestration. A custom adapter cannot be selected by adding an arbitrary adapter name to JSON, and adapter-specific behavior must remain at the worker boundary.
 
+OpenCode CLI is not a supported adapter. A pinned `v1.18.15` no-inference probe confirmed `run --format json`, explicit `provider/model` plus `--variant max`, `--pure`, working-directory selection, and ACP nd-JSON, but did not prove stronger lifecycle behavior than Pi. OpenCode configuration layers merge, its JSON run stream has no AgentKnot completion-report contract, and a separate OpenCode credential was unavailable; an adapter must not translate Pi auth into another store. Implementation stays deferred until same-route evidence clears [decision 0028](../postmortems/0028-native-opencode-adapter-evidence-gate.md).
+
 ### Route diagnostics
 
 Route diagnostics are a controller-neutral runtime operation separate from the Job API. The default CLI `doctor [--route NAME]` resolves a route and performs only the adapter's configuration, credential, and runtime health check. Its result must explicitly state that live inference was not checked; an `ok` result is not evidence that the provider accepted an inference request from the current network path.

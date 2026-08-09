@@ -21,7 +21,7 @@ controller ---------------------------> Job API -> worker -> provider/model
 
 ## Problem
 
-Coding-agent workflows are often coupled at several layers at once: the controller, coding harness, model provider, model, workspace mutation policy, and result transport. Replacing Codex with Claude, Pi with another worker, or OpenCode Go with xAI can then require redesigning the entire workflow.
+Coding-agent workflows are often coupled at several layers at once: the controller, coding harness, model provider, model, workspace mutation policy, and result transport. Replacing Codex with Claude, Pi with another worker, or one provider with another can then require redesigning the entire workflow.
 
 Directly invoking a worker also leaves recurring control-plane concerns to every caller: route configuration, job state, cancellation, retries, event normalization, workspace protection, artifact capture, and audit history.
 
@@ -95,7 +95,7 @@ Version 0.0.1 currently implements:
 - immutable resolved route snapshots with worker, provider, and model dimensions;
 - deterministic mock and Pi RPC worker adapters;
 - a reusable route-neutral adapter unit contract for healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and already-aborted runs; Mock supplies deterministic coverage but is not the second real adapter required for Stage 2;
-- OpenCode Go/Luna and xAI/Grok routes through Pi configuration;
+- OpenCode Go/Luna and OpenCode Go/DeepSeek V4 Flash routes through Pi configuration;
 - file-backed or in-memory job snapshots and ordered events;
 - atomic leaf admission containing the queued snapshot and first event, with later persistence failures isolated from worker retry and terminal-result fabrication;
 - top-level `schemaVersion: 1` on new leaf Job and Orchestration records, with schema-less legacy-v1 file reads materialized in memory without rewriting and unsupported explicit versions rejected;
@@ -127,6 +127,8 @@ Route diagnostics have two explicit modes. The default `doctor` command is a fas
 The current file stores provide persistent audit snapshots. After acquiring exclusive storage ownership, an execution-owning runtime deterministically marks every prior nonterminal Job or Orchestration failed once without replay; recorded PID liveness is audit evidence, not takeover authority. Read-oriented runtimes do not perform recovery. The stores do not provide resumable execution, a restartable queue, journaling, distributed coordination, or automatic cleanup of arbitrary descendants and worktrees left by an uncatchable hard process crash.
 
 Provider and model independence are currently routing properties implemented by the selected worker. AgentKnot does not yet expose an independent provider-runtime interface.
+
+A pinned OpenCode CLI probe established a plausible native worker protocol but no independent credential path or material correctness, lifecycle, observability, isolation, or maintenance benefit over Pi. A native adapter therefore remains proposed rather than implemented; it must not read or translate Pi credentials, and it requires a same-route experiment plus the Stage 2 conformance and soak gates before promotion ([decision 0028](../postmortems/0028-native-opencode-adapter-evidence-gate.md)).
 
 Pi extensions are optional worker-profile inputs, not portable core dependencies. A community package can enter the repository dogfood route only after source/supply-chain review and repeated same-task comparison against the minimal Pi route show no regression in terminal completion, artifact validity, or tests and a measurable improvement in upstream intervention, token use, or elapsed work. Trials must use an exact version or immutable external path without global or repository-local installation, and must preserve the selected provider, model, and thinking level. AgentKnot never silently selects an extension or model fallback.
 

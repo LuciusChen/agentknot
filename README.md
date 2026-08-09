@@ -34,7 +34,7 @@ The labels below are availability claims, not maturity ratings. **Current** mean
 | **Current** | Configuration-only `doctor`, opt-in exact-route `doctor --live`, and HTTP process liveness. | Implemented and covered by diagnostic and HTTP contract tests; live probes are point-in-time evidence and are not run as normal-job preflights. |
 | **Experimental** | Reviewed Pi worker profiles/extensions; none is promoted. | Evaluation only: use an exact version or immutable path without global or repository installation, then run repeated same-task Luna/max A/B trials against the minimal profile; completion, artifact verification, and target tests must not regress and session-statistics, elapsed-time, retry, or upstream-intervention evidence must show a repeatable net benefit before promotion. `pi-readseek@0.9.10` regressed its first pair. `pi-lean-ctx@3.9.18` produced two selected, passing artifacts and saved 39.0% total Pi tokens on the larger task, but on an independent smaller task it used 36.2% more tokens and took 45.7% longer; the inconsistent profile is not promoted. See [experiments 0013](postmortems/0013-pi-readseek-profile-ab.md) and [0014](postmortems/0014-pi-lean-ctx-profile-ab.md). |
 | **Experimental** | Pi/OpenCode Go/DeepSeek V4 Flash at `thinkingLevel=max` for configured low-complexity dogfood work. | The route passed live probes and one isolated same-task comparison. It is now selected only by the repository's human-authored `low` rule; it is not a claimed intelligence ranking, fallback target, or replacement for Luna on medium/high work. Upstream artifact review remains required. See [experiment 0017](postmortems/0017-deepseek-flash-route-ab.md) and [decision 0020](postmortems/0020-human-authored-active-route-selection.md). |
-| **Proposed** | Additional native worker adapters and an independent provider-runtime interface. | Not available; requires a demonstrated lifecycle or observability benefit, or evidence that route data is insufficient, followed by the applicable Stage 2 contract and real-worker gates. |
+| **Proposed** | Additional native worker adapters and an independent provider-runtime interface. | A pinned OpenCode CLI `v1.18.15` probe confirmed a structured CLI/ACP surface, but no independent credential or material benefit over Pi was demonstrated, so implementation remains deferred. Any candidate still requires the Stage 2 contract and real-worker gates ([decision 0028](postmortems/0028-native-opencode-adapter-evidence-gate.md)). |
 | **Proposed** | Authenticated local automation, signed callbacks, restart-aware queues/backpressure, approval/policy controls, and an OS-sandbox backend. | Not available; each capability requires its own threat model and the Stage 3 authentication, recovery, approval, and boundary tests. |
 | **Proposed** | An explicit artifact-promotion operation. | Not available; it may be considered only if dirty-target, base-mismatch, checksum, and explicit controller/human-approval checks are safe and tested. |
 | **Deferred** | Automatic patch application, commit, merge, push, deployment, or pull-request creation. | Not available by design; artifact inspection ends with an upstream controller or human decision. |
@@ -236,10 +236,10 @@ The source is identity and audit metadata; it is not used to choose implementati
 Provider changes are route-only:
 
 ```bash
-agentknot run --source claude --route grok "..."
+agentknot run --source claude --route deepseek-flash "..."
 ```
 
-The included `grok` route uses Pi with the xAI provider. Update the model ID in `agentknot.config.json` to match the account's available catalog.
+The included `deepseek-flash` route keeps Pi and OpenCode Go but selects DeepSeek V4 Flash/max. Repository automatic delegation uses it only for the human-authored low-complexity rule; explicit callers may select it directly. Luna/max remains the conservative default, and neither route is a fallback for the other.
 
 ## HTTP automation
 
