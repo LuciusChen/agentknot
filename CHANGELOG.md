@@ -28,7 +28,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 
 - Live event observers are advisory; observer failures are persisted without retrying or failing successful worker execution.
 - Stale nonterminal leaf jobs are marked failed once on startup instead of remaining indefinitely active.
-- Automatic delegation defaults to `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; each value is capped at 6 and concurrency cannot exceed the child count. The repository dogfood configuration uses a six-task pool with four concurrent Pi/OpenCode Go/Luna execution slots.
+- Automatic delegation defaults to `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; each value is capped at 6 and concurrency cannot exceed the child count. The repository dogfood configuration now permits all six independently safe Pi/OpenCode Go/Luna tasks to run concurrently; fewer useful tasks still use fewer workers.
 - Planner instructions reserve parallel execution for independently verifiable subtasks without execution-order dependencies or overlapping expected write scopes; the scheduler starts only the available tasks up to the concurrency cap and refills slots as workers complete.
 - Controller metadata now follows one recursive JSON-compatible object contract across TypeScript and HTTP leaf/orchestration APIs.
 - Background Pi runs and live probes disable ambient extension, skill, prompt-template, and theme discovery while retaining repository instructions and explicitly configured resources. Third-party profiles require isolated, exact-version A/B evidence before dogfood promotion ([decision 0012](postmortems/0012-evidence-gated-pi-profiles.md)).

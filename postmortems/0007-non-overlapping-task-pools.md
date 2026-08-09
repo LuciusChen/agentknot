@@ -66,3 +66,9 @@ Deferred. Planner-declared paths are model output and may be incomplete. A futur
 ## Privacy and security review
 
 The decision changes scheduling and prompt policy only. It introduces no credentials, remote execution, automatic promotion, or new source access.
+
+## Addenda
+
+### 2026-08-09: Raise dogfood active slots to six
+
+The repository later raised `maxConcurrency` from four to the existing supported ceiling of six while keeping `maxChildren: 6`. This is a configuration-only dogfood change: product defaults remain two, the scheduler still starts only available eligible tasks, non-parallel plans still run one child at a time, and the non-overlap/dependency rules remain unchanged. Raising the ceiling cannot reduce the latency of a plan containing only two or three useful subtasks.
