@@ -2,6 +2,83 @@ export const JOB_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'cancel
 
 export type JobStatus = (typeof JOB_STATUSES)[number];
 
+export const JOB_TERMINAL_OUTCOMES = ['succeeded', 'failed', 'cancelled'] as const;
+
+export type JobTerminalOutcome = (typeof JOB_TERMINAL_OUTCOMES)[number];
+
+export const JOB_COMPLETION_SUMMARY_CHANGED_FILES_UNAVAILABLE_REASONS = [
+  'workspace-isolation-disabled',
+  'artifact-unavailable',
+  'artifact-paths-unavailable',
+] as const;
+
+export type JobCompletionSummaryChangedFilesUnavailableReason =
+  (typeof JOB_COMPLETION_SUMMARY_CHANGED_FILES_UNAVAILABLE_REASONS)[number];
+
+export const WORKER_COMPLETION_REPORT_UNAVAILABLE_REASONS = [
+  'absent',
+  'malformed',
+  'not-retained',
+] as const;
+
+export type WorkerCompletionReportUnavailableReason =
+  (typeof WORKER_COMPLETION_REPORT_UNAVAILABLE_REASONS)[number];
+
+export const WORKER_COMPLETION_CHECK_OUTCOMES = ['passed', 'failed', 'unknown'] as const;
+
+export type WorkerCompletionCheckOutcome = (typeof WORKER_COMPLETION_CHECK_OUTCOMES)[number];
+
+export interface WorkerCompletionCheck {
+  command: string;
+  outcome: WorkerCompletionCheckOutcome;
+  notes?: string;
+}
+
+/** Worker claims are kept distinct from controller-captured artifact evidence. */
+export interface WorkerCompletionReport {
+  schemaVersion: 1;
+  changedFiles: string[];
+  checksRun: WorkerCompletionCheck[];
+  remainingRisks: string[];
+  notes: string[];
+}
+
+export interface JobCompletionSummaryArtifactEvidence {
+  attempt: number;
+  sha256: string;
+  baseCommit: string;
+}
+
+/** Controller-captured Git evidence; captured paths are not semantic verification. */
+export type JobCompletionSummaryChangedFiles =
+  | {
+      status: 'captured';
+      paths: string[];
+      artifact: JobCompletionSummaryArtifactEvidence;
+    }
+  | {
+      status: 'unavailable';
+      reason: JobCompletionSummaryChangedFilesUnavailableReason;
+    };
+
+export type JobCompletionSummaryWorkerReported =
+  | {
+      status: 'reported';
+      report: WorkerCompletionReport;
+    }
+  | {
+      status: 'unavailable';
+      reason: WorkerCompletionReportUnavailableReason;
+    };
+
+export interface JobCompletionSummary {
+  schemaVersion: 1;
+  outcome: JobTerminalOutcome;
+  attempt: number;
+  changedFiles: JobCompletionSummaryChangedFiles;
+  workerReported: JobCompletionSummaryWorkerReported;
+}
+
 export const WORKSPACE_ISOLATION_MODES = ['none', 'git-worktree'] as const;
 
 export type WorkspaceIsolationMode = (typeof WORKSPACE_ISOLATION_MODES)[number];
@@ -163,6 +240,8 @@ export interface JobRecord {
   artifacts?: JobArtifact[];
   result?: JobResult;
   error?: JobError;
+  /** Additive terminal evidence; absent on legacy records. */
+  completionSummary?: JobCompletionSummary;
   callback?: {
     delivered: boolean;
     status?: number;
@@ -182,6 +261,8 @@ export interface WorkerRunInput {
 export interface WorkerRunResult {
   output: string;
   metadata?: Record<string, unknown>;
+  /** Optional structured worker claim; the orchestrator validates it before summarizing. */
+  completionReport?: WorkerCompletionReport;
 }
 
 export interface WorkerProbeInput {

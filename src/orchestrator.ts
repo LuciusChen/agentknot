@@ -5,6 +5,10 @@ import path from 'node:path';
 import type { AgentKnotConfig } from './config.js';
 import { resolveRoute } from './config.js';
 import { isExecutorProcessAlive } from './execution.js';
+import {
+  capturedChangedFilesSummary,
+  workerReportedSummary,
+} from './completion-summary.js';
 import { assertJsonMetadata } from './metadata.js';
 import {
   WorkspaceIsolationManager,
@@ -16,6 +20,7 @@ import type {
   JobArtifactList,
   JobArtifactPreview,
   JobArtifactVerificationReport,
+  JobCompletionSummary,
   JobEvent,
   JobEventType,
   JobExecution,
@@ -276,6 +281,25 @@ export class Orchestrator {
     }
   }
 
+  #completionSummary(
+    job: JobRecord,
+    outcome: JobCompletionSummary['outcome'],
+    retainedNormalResult: boolean,
+    workerReport: unknown
+  ): JobCompletionSummary {
+    return {
+      schemaVersion: 1,
+      outcome,
+      attempt: job.attempt,
+      changedFiles: capturedChangedFilesSummary(
+        this.#workspaceIsolation.mode === 'git-worktree',
+        job.artifacts,
+        job.attempt
+      ),
+      workerReported: workerReportedSummary(workerReport, retainedNormalResult),
+    };
+  }
+
   async get(id: string): Promise<JobRecord | undefined> {
     return this.#store.get(id);
   }
@@ -347,6 +371,7 @@ export class Orchestrator {
       };
       delete job.result;
       delete job.callback;
+      job.completionSummary = this.#completionSummary(job, 'failed', false, undefined);
       await this.#appendEvent(
         job,
         'job.failed',
@@ -414,6 +439,8 @@ export class Orchestrator {
             attempt: job.attempt,
             retryable: false,
           };
+          const outcome = controller.signal.aborted ? 'cancelled' : 'failed';
+          job.completionSummary = this.#completionSummary(job, outcome, false, undefined);
           await this.#emit(job, controller.signal.aborted ? 'job.cancelled' : 'job.failed', details);
         }
         await this.#deliverCallback(job);
@@ -514,6 +541,7 @@ export class Orchestrator {
           ...(result.metadata === undefined ? {} : { metadata: result.metadata }),
         };
         delete job.error;
+        job.completionSummary = this.#completionSummary(job, 'succeeded', true, result.completionReport);
         await this.#emit(job, 'job.succeeded', { attempt });
         return;
       }
@@ -522,8 +550,10 @@ export class Orchestrator {
       const retryable = !jobSignal.aborted && attempt < job.route.maxAttempts;
       job.error = { ...details, attempt, retryable };
       if (!retryable) {
-        job.status = jobSignal.aborted ? 'cancelled' : 'failed';
+        const outcome = jobSignal.aborted ? 'cancelled' : 'failed';
+        job.status = outcome;
         job.completedAt = this.#now().toISOString();
+        job.completionSummary = this.#completionSummary(job, outcome, false, undefined);
         await this.#emit(job, jobSignal.aborted ? 'job.cancelled' : 'job.failed', {
           ...details,
           attempt,

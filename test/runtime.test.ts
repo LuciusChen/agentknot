@@ -200,6 +200,11 @@ test('createRuntime deterministically fails stale nonterminal jobs once without 
     assert.equal(job?.error?.name, 'ExecutionInterruptedError');
     assert.equal(job?.error?.retryable, false);
     assert.equal(job?.completedAt, job?.updatedAt);
+    assert.equal(job?.completionSummary?.outcome, 'failed');
+    assert.deepEqual(job?.completionSummary?.workerReported, {
+      status: 'unavailable',
+      reason: 'not-retained',
+    });
     assert.equal(job?.events.at(-1)?.sequence, expectedSequence);
     assert.equal(job?.events.at(-1)?.type, 'job.failed');
     assert.deepEqual(job?.events.at(-1)?.data, {

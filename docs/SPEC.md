@@ -2,7 +2,7 @@
 
 - Status: Living architecture contract
 - Version: 0.1
-- Last updated: 2026-08-08
+- Last updated: 2026-08-09
 - Applies to: AgentKnot 0.0.x unless a section is marked proposed
 
 ## Purpose
@@ -55,6 +55,7 @@ The controller, worker, provider, and model are separate concepts:
 | Persistent snapshots | `JobStore` | live event listeners |
 | HTTP transport and active-request map | HTTP server | worker protocols |
 | Artifact listing, verification, and preview | orchestrator/workspace manager | worker adapter or execution loop |
+| Terminal completion summary and provenance ordering | orchestrator with workspace-manager artifact evidence | worker adapter/provider claims |
 | Artifact acceptance/application | external controller or human | AgentKnot execution loop |
 
 Moving a responsibility across this table requires a SPEC update and a decision record before implementation.
@@ -94,6 +95,28 @@ A `git-patch` artifact is controller-captured Git evidence from one isolated att
 
 Leaf Job and Orchestration admission validate `metadata` recursively as a JSON-compatible object at both TypeScript and HTTP boundaries before persistence. Unsupported values fail before a Job or Orchestration record is admitted, so file and HTTP transports preserve one metadata contract.
 
+### `JobCompletionSummary`
+
+`JobCompletionSummary` is an optional top-level field on `JobRecord` so schemaVersion 1 records written before this slice remain readable and byte-stable. Every newly terminal succeeded, failed, or cancelled Job receives the summary before its terminal event is appended and persisted. Its route-neutral shape is:
+
+```ts
+interface JobCompletionSummary {
+  schemaVersion: 1;
+  outcome: 'succeeded' | 'failed' | 'cancelled';
+  attempt: number;
+  changedFiles:
+    | { status: 'captured'; paths: string[]; artifact: { attempt: number; sha256: string; baseCommit: string } }
+    | { status: 'unavailable'; reason: 'workspace-isolation-disabled' | 'artifact-unavailable' | 'artifact-paths-unavailable' };
+  workerReported:
+    | { status: 'reported'; report: WorkerCompletionReport }
+    | { status: 'unavailable'; reason: 'absent' | 'malformed' | 'not-retained' };
+}
+```
+
+The captured branch copies only `changedFiles` from the artifact whose attempt equals the terminal attempt and carries that artifact's attempt, SHA-256, and base commit; it never calls those paths semantically verified. Direct workspace mode reports `workspace-isolation-disabled`, a missing terminal-attempt artifact reports `artifact-unavailable`, and an artifact without usable path evidence reports `artifact-paths-unavailable`. Earlier retry artifacts remain in `JobRecord.artifacts` and are not summarized as terminal evidence.
+
+`WorkerCompletionReport` is an optional adapter result, not a Job result field. A strict schemaVersion 1 report contains worker-claimed `changedFiles: string[]`, `checksRun` entries with a non-empty `command`, `outcome` of `passed`, `failed`, or `unknown`, and optional string `notes`, plus `remainingRisks: string[]` and `notes: string[]`. The orchestrator validates this runtime shape and maps an absent or malformed report to the stable `workerReported` unavailable branch without failing an otherwise successful job. Failed or cancelled Jobs without a retained normal result use `not-retained`. AgentKnot never derives this report from output prose, normalized worker events, stderr, or session statistics. The bundled Pi adapter currently does not emit the strict report, so its normal successful Jobs expose `workerReported: { status: 'unavailable', reason: 'absent' }`.
+
 ### `ResolvedRoute`
 
 A route snapshot contains:
@@ -131,7 +154,7 @@ The adapter owns:
 - normalization of worker activity into AgentKnot worker events;
 - worker-process termination when its implementation supports cancellation.
 
-The adapter does not own job state transitions, retries, attempt numbering, workspace isolation, artifact capture, callback delivery, or persistence.
+The adapter does not own job state transitions, retries, attempt numbering, workspace isolation, artifact capture, callback delivery, or persistence. An adapter may return the optional strict `WorkerCompletionReport` as `completionReport`; the orchestrator owns runtime validation and terminal-summary placement.
 
 The JSON configuration boundary exposes the built-in `mock` and `pi-rpc` adapter kinds only; `createRuntime()` loads that configuration and registers those built-ins. A custom `WorkerAdapter` is a TypeScript construction path: callers provide an `AgentKnotConfig`, `JobStore`, and adapter map to `Orchestrator`, and construct `OrchestrationService` separately when they need orchestration. A custom adapter cannot be selected by adding an arbitrary adapter name to JSON, and adapter-specific behavior must remain at the worker boundary.
 
@@ -217,17 +240,16 @@ For one job:
 2. Event sequence numbers start at one and increase by one.
 3. An event is appended to the snapshot and the snapshot is saved before the live `onEvent` listener receives it.
 4. State fields are changed before the corresponding lifecycle event is saved.
-5. A terminal event is saved before `completion` resolves.
-6. Artifact capture and cleanup happen before the attempt outcome is finalized.
-7. Callback bookkeeping happens after terminal execution and does not change execution status.
+5. The terminal completion summary is populated before the corresponding terminal event is saved or observed.
+6. A terminal event is saved before `completion` resolves.
+7. Artifact capture and cleanup happen before the attempt outcome is finalized.
+8. Callback bookkeeping happens after terminal execution and does not change execution status.
 
 The `onEvent` listener is awaited for ordering but is advisory. A rejection appends `job.observer.failed` with the observed sequence/type and error details; it does not retry or fail worker execution. Failure while persisting that observer-failure evidence remains a store failure.
 
 ### Terminal semantics
 
-A succeeded job has `result`, terminal timestamps, resolved route evidence, attempt count, and any captured artifacts.
-
-A failed or cancelled job has `error`, terminal timestamps, attempt count, ordered events, and any artifacts captured from failed attempts.
+A succeeded job has `result`, terminal timestamps, resolved route evidence, attempt count, any captured artifacts, and a completion summary. A failed or cancelled job has `error`, terminal timestamps, attempt count, ordered events, any artifacts captured from failed attempts, and a completion summary. The summary's `attempt` and captured changed paths always refer to the terminal attempt; a worker report is retained only when a normal result was retained for that terminal success.
 
 Artifact inspection is a read-only orchestrator/workspace operation. The TypeScript API exposes `listArtifacts(jobId)`, `verifyArtifacts(jobId)`, and `previewArtifact(jobId, attempt)` with the language-neutral `JobArtifactList`, `JobArtifactVerificationReport`, and `JobArtifactPreview` payloads. Verification resolves only artifacts recorded on the selected job, validates their managed storage paths, recomputes size and SHA-256, and compares each recorded base commit with the current source repository `HEAD`. Missing, unreadable, path-mismatched, tampered, unsupported, or base-mismatched evidence returns stable issue codes and `valid: false`. Preview returns at most 1 MiB of UTF-8 Git patch text; content is `null` when file size or SHA-256 does not match, while a base mismatch is reported without hiding otherwise intact diagnostic content. Inspection never applies patches or mutates, commits, merges, or pushes the source repository.
 
@@ -305,7 +327,7 @@ Pi RPC is strict LF-delimited JSONL. Its adapter decodes streaming UTF-8 explici
 
 Every Pi normal run and live probe appends each of `--no-extensions`, `--no-skills`, `--no-prompt-templates`, and `--no-themes` exactly once after deduplicating those flags from configured command arguments. Explicit resource arguments remain unchanged, so a reviewed profile can name an exact extension, skill, prompt template, or theme without re-enabling ambient discovery. The adapter does not pass `--no-context-files`; repository instructions such as `AGENTS.md` remain available. These flags reduce ambient variability and capability but do not form a security sandbox.
 
-After a successful normal run reaches `agent_settled`, the Pi adapter sends one correlated `get_session_stats` RPC request before terminating its owned child. It allowlists non-negative message/tool counts, input/output/cache/total token counts, cost, and optional context usage into `result.metadata.sessionStats`; it does not retain session paths, session identifiers, raw statistics, or error text from this response. Timeout, unsupported responses, and invalid shapes are recorded only as `unavailableReason` and cannot change an otherwise successful result. Live probes do not request session statistics.
+After a successful normal run reaches `agent_settled`, the Pi adapter sends one correlated `get_session_stats` RPC request before terminating its owned child. It allowlists non-negative message/tool counts, input/output/cache/total token counts, cost, and optional context usage into `result.metadata.sessionStats`; it does not retain session paths, session identifiers, raw statistics, or error text from this response. Timeout, unsupported responses, and invalid shapes are recorded only as `unavailableReason` and cannot change an otherwise successful result. Live probes do not request session statistics. Session statistics, output prose, stderr, and worker events are never treated as a completion report; Pi does not yet emit the strict `WorkerCompletionReport` contract.
 
 The Pi adapter derives one effective environment by overlaying configured worker environment values on `process.env`. Configuration-only doctor, live probe, and normal run use that snapshot consistently for bare-command `PATH` lookup, required environment presence, Pi's explicit agent directory, worker-home default auth directory, and spawned child environment. Empty or whitespace credential values are absent. A relative command containing a path separator, a relative `PATH` entry, or a relative `PI_CODING_AGENT_DIR` remains relative to AgentKnot's own process directory during doctor because that boundary has no worker workspace.
 
@@ -335,7 +357,7 @@ GET  /health/live
 GET  /health                    compatibility alias
 ```
 
-`POST /v1/jobs` starts execution in the serving process and returns `202` with the admitted snapshot.
+`POST /v1/jobs` starts execution in the serving process and returns `202` with the admitted snapshot. Terminal full `JobRecord` JSON returned by HTTP, CLI `--json`, TypeScript methods, and callbacks includes the additive `completionSummary` when the record was newly terminal; no new endpoint or serializer is required, and human CLI rendering remains unchanged.
 
 Cancellation uses process-local active-job and active-orchestration maps. After a server restart, a persisted nonterminal record is reconciled as failed and is not an active cancellable execution.
 
@@ -389,8 +411,10 @@ Runtime selection and provider fallback must be completed before a job starts. A
 - Public runtime input must be validated at its transport boundary.
 - Existing job snapshots must retain their resolved route and event meaning.
 - New optional fields may be added compatibly; changing state or event semantics requires a versioned contract and migration decision. `JobArtifact.changedFiles` is optional when reading persisted records, while newly captured git-worktree artifacts always emit an array.
+- `JobRecord.completionSummary` is optional for legacy v1 reads; existing records without it are not rewritten, while newly terminal records produced by this runtime include the additive summary.
+- `WorkerCompletionReport` is optional at the adapter boundary and is strictly validated before it enters a summary; custom adapters that return only `output` remain valid.
 - One wire payload should have one canonical type/schema. HTTP, CLI, callbacks, and TypeScript APIs must not describe the same payload independently without a mechanical compatibility check.
-- Worker-specific fields belong in adapter-owned metadata or raw evidence, not in the controller-neutral top-level contract.
+- Worker-specific transport fields belong in adapter-owned metadata or raw evidence, not in the controller-neutral top-level contract; the explicitly versioned `WorkerCompletionReport` is the narrow route-neutral exception for worker claims under `JobCompletionSummary.workerReported`.
 - Removal or renaming of public states, event types, artifact fields, or endpoint semantics requires an explicit migration plan.
 
 ## Verification requirements
@@ -408,6 +432,7 @@ At minimum, the conformance suite must eventually prove:
 - adapter decoding of split UTF-8, split JSONL frames, malformed frames, premature exit, and terminal settlement;
 - clean source repositories and independent retry worktrees;
 - patches and Git-derived repository-relative `changedFiles` for tracked, non-ignored untracked, binary, worker-committed, empty, retry, and unusual-filename changes;
+- terminal completion summaries for success, direct mode, captured empty/nonempty paths, absent/malformed worker reports, failure, cancellation, retry terminal-attempt scoping, persist-before-observer ordering, callback/HTTP/CLI JSON surfaces, and legacy record byte stability;
 - artifact checksum and base-application validity;
 - exact cleanup on success, failure, retry, timeout, and cancellation;
 - documented crash/restart behavior;

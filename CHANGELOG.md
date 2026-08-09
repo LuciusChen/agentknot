@@ -10,6 +10,8 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Strict planner assessments, deterministic task-kind policy, persisted plans, parent/child provenance, and bounded depth-one concurrent dispatch.
 - Separate file and memory orchestration stores with ordered lifecycle events, cancellation propagation, and fail-without-resume startup reconciliation.
 - Top-level `schemaVersion: 1` on new leaf Job and Orchestration records, with read-only legacy-v1 file materialization, byte-stable snapshots, and clear rejection of unsupported explicit versions; no migration command or automatic rewrite is added.
+- Additive schemaVersion 1 `JobCompletionSummary` evidence on newly terminal Jobs, including terminal-attempt controller-captured artifact paths, stable unavailable reasons, and explicit worker-reported evidence.
+- Optional strict schemaVersion 1 `WorkerCompletionReport` support for custom adapters, with absent and malformed reports represented as unavailable without inferring from worker prose or events; the bundled Pi adapter does not yet emit the report.
 - `off`, `suggest`, and `auto` delegation configuration with per-request `inherit`, `never`, `suggest`, and `force` controls.
 - Git worktree patch artifacts that include tracked, non-ignored untracked, binary, and worker-committed changes.
 - Controller-captured Git-derived repository-relative `changedFiles` evidence on newly captured worktree artifacts, including `[]` for an empty patch, with legacy artifacts remaining readable without the field.
@@ -46,3 +48,4 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Pi RPC timeout and cancellation now use bounded `SIGTERM` → `SIGKILL` supervision for the exact owned child and bounded stdio draining, preventing a child that ignores `SIGTERM` from leaving the Job active indefinitely; malformed JSONL and exit-without-settlement errors now retain protocol context ([postmortem 0009](postmortems/0009-pi-rpc-child-supervision.md)).
 - Pi configuration-only diagnostics now use the same effective worker environment as `run` and `probe` for command discovery, required environment names, and Pi auth-directory/home resolution; empty credential values remain absent and secret values are not returned.
 - Worktree retries start from the same base commit and clean only AgentKnot-owned worktree registrations.
+- Terminal completion summaries are populated before terminal events are persisted or observed, summarize only the terminal retry attempt, and remain additive across TypeScript, CLI JSON, HTTP, and callback JobRecord surfaces.

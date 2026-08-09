@@ -2,7 +2,7 @@
 
 - Status: Living product contract
 - Version: 0.1
-- Last updated: 2026-08-08
+- Last updated: 2026-08-09
 
 ## Product thesis
 
@@ -72,7 +72,7 @@ AgentKnot only advertises behavior that is implemented and verified. Proposed ad
 
 ### Evidence-bearing completion
 
-A terminal job must carry a result or an explicit error, its resolved route and attempts, and any produced artifacts. "The agent said it finished" is not sufficient evidence for artifact promotion.
+A terminal job must carry a result or an explicit error, its resolved route and attempts, and any produced artifacts. "The agent said it finished" is not sufficient evidence for artifact promotion. A new terminal Job also carries an additive schemaVersion 1 completion summary: controller-captured changed paths are tied to the terminal artifact when available, while worker claims, checks, risks, and notes remain explicitly reported evidence rather than semantic verification.
 
 ### Safe handoff by default
 
@@ -103,6 +103,7 @@ Version 0.0.1 currently implements:
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
 - read-only artifact listing, integrity/base verification, and bounded patch preview through TypeScript, CLI, and HTTP;
+- additive schemaVersion 1 terminal Job completion summaries with terminal outcome/attempt, controller-captured artifact path provenance, and explicit unavailable states; strict worker completion reports are accepted from custom adapters, while the bundled Pi adapter does not yet emit them;
 - configuration validation and explicit configuration-only and opt-in live route diagnostics;
 - canonical HTTP process liveness that explicitly reports storage, routes, and inference as not checked, without claiming route readiness.
 - controller-neutral orchestration through CLI, HTTP, and TypeScript;
@@ -146,7 +147,7 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 6. AgentKnot validates the request, snapshots the route, creates the job record, and records `job.queued`.
 7. AgentKnot begins execution, prepares an isolated attempt when configured, and invokes the route's worker adapter.
 8. The adapter translates worker activity into normalized events while AgentKnot owns state, timeout, retry, cancellation, persistence, and cleanup.
-9. AgentKnot records a terminal result or error and captures any attempt patch artifacts.
+9. AgentKnot captures the terminal attempt artifact, builds the completion summary, and persists it before the terminal event is delivered.
 10. The controller inspects the parent/child evidence and explicitly decides whether to promote an artifact outside AgentKnot.
 
 The current `queued` state is an admission event immediately followed by execution; it does not imply a capacity-aware scheduler.
@@ -164,6 +165,8 @@ The product remains on course when all of the following are true:
 - automatic delegation is isolated, depth-one, capped, non-recursive, and cannot select configured keep-upstream task kinds;
 - every emitted job event is already present in the persisted record;
 - every terminal job is inspectable after the invoking call returns;
+- every newly terminal succeeded, failed, or cancelled Job has a schemaVersion 1 completion summary before its terminal event is persisted or observed, and retries summarize only the terminal attempt;
+- completion summaries distinguish controller-captured artifact paths from worker-reported claims, never infer reports from prose/events/stderr/session statistics, and preserve explicit unavailable reasons;
 - new leaf Job and Orchestration records carry `schemaVersion: 1`, legacy file reads remain byte-stable, and unsupported explicit versions fail rather than defaulting to v1;
 - Git worktree mode leaves the source workspace clean and returns artifacts without applying them;
 - controllers can verify and preview recorded artifacts without source mutation, while acceptance and promotion remain explicit upstream decisions;
@@ -189,6 +192,7 @@ These are evidence requirements, not claims that the current MVP has already met
 
 - Product language such as "durable", "queue", "timeout", "provider-neutral", or "isolation" can imply stronger guarantees than the implementation provides.
 - Raw worker events, prompts, output, and tool results can grow without bound and can contain sensitive content even when API keys are excluded intentionally.
+- Worker completion reports are claims at the adapter boundary; accepting their strict shape does not verify changed paths, check outcomes, remaining risks, or notes.
 - A custom adapter may ignore cooperative cancellation unless the adapter contract and process supervision enforce termination.
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete job record.
 - A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk.

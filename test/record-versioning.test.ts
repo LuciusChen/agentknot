@@ -168,6 +168,7 @@ test('FileJobStore materializes a legacy v1 record without rewriting read-only a
 
   const materialized = await store.get(id);
   assert.equal(materialized?.schemaVersion, 1);
+  assert.equal(materialized?.completionSummary, undefined);
   assert.equal(materialized?.artifacts?.[0]?.changedFiles, undefined);
   assert.deepEqual(await readFile(path.join(directory, `${id}.json`)), before);
   assert.equal((await store.list())[0]?.schemaVersion, 1);

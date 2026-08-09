@@ -1,7 +1,7 @@
 # AgentKnot roadmap
 
 - Status: Living execution plan
-- Last updated: 2026-08-08
+- Last updated: 2026-08-09
 - Planning model: evidence-gated stages, not date promises
 
 ## How to use this roadmap
@@ -64,7 +64,10 @@ Make leaf-job semantics and the bounded delegation slice reliable enough that a 
 - [x] Add a capability/status table that distinguishes current, experimental, proposed, and deferred behavior.
 - [x] Version persisted leaf Job and Orchestration records before incompatible schema evolution begins; new records use `schemaVersion: 1`, legacy file reads materialize missing versions without rewriting, and explicit unsupported versions fail.
 - [x] Validate controller metadata recursively as JSON-compatible values so TypeScript/HTTP admission and file storage preserve one contract.
-- Define a structured completion summary: changed files, checks run, remaining risks, and worker-reported notes, without treating worker assertions as verified facts.
+- Define a structured completion summary: changed files, checks run, remaining risks, and worker-reported notes, without treating worker assertions as verified facts. This remains an in-progress item because the bundled Pi adapter does not yet emit the strict worker report.
+  - [x] Add the additive schemaVersion 1 `JobRecord.completionSummary` with terminal outcome/attempt, terminal-attempt artifact provenance, and stable unavailable reasons.
+  - [x] Validate optional custom-adapter worker reports strictly and preserve absent/malformed/unretained states without inferring from prose, events, stderr, or session statistics.
+  - [ ] Add and verify strict `WorkerCompletionReport` emission from the promoted Pi path before marking the full completion-summary item complete.
 
 ### Lifecycle and persistence work
 
@@ -141,7 +144,7 @@ Delivered in this slice:
 
 - TypeScript, CLI, and HTTP contracts for artifact listing, size/SHA-256 verification, current-source base-commit verification, and integrity-gated bounded patch preview.
 - Git-derived repository-relative `changedFiles` arrays on newly captured worktree artifacts, including `[]` for empty patches, with intent-to-add and NUL-delimited path handling for tracked, untracked, binary, committed, retry, and unusual-filename changes.
-- Deterministic tests for valid, missing, tampered, and base-mismatched evidence that prove inspection does not mutate the source repository; changed-file evidence remains controller-captured artifact data rather than the full structured completion summary.
+- Deterministic tests for valid, missing, tampered, and base-mismatched evidence that prove inspection does not mutate the source repository; changed-file evidence remains controller-captured artifact data and is now carried into the terminal summary only with artifact identity, never as semantic verification.
 
 Still outside this slice:
 
@@ -154,6 +157,7 @@ Still outside this slice:
 - Every README capability is implemented and tested or visibly marked proposed/deferred.
 - Crash/restart behavior for every nonterminal state is deterministic and tested.
 - Every orchestration persists a valid plan before dispatch, never exceeds its child/depth/concurrency bounds, and leaves artifact integration upstream.
+- Every newly terminal Job has an additive completion summary before terminal observation, and the full worker-report gate remains visibly open until Pi emits the strict report.
 - Observer and callback failures cannot change a correct execution result.
 - A supported adapter cannot leave a timed-out or cancelled job indefinitely active.
 - A read-only CLI or API inspection cannot reconcile or mutate an active Job or Orchestration record.
