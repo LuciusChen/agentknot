@@ -27,6 +27,7 @@ This is an MVP. It already provides:
 - optional vendor-neutral Git worktree isolation with per-attempt patch artifacts;
 - read-only artifact listing, integrity/base verification, and bounded patch preview;
 - normalized text, tool, retry, lifecycle, artifact, and stderr events;
+- reproducible Pi workers with ambient extensions, skills, prompt templates, and themes disabled, plus sanitized per-job Pi session statistics;
 - configuration validation, explicit configuration-only and opt-in live route diagnostics, and an explicit HTTP process-liveness contract.
 
 Controllers still choose whether a request enters the leaf Job API or the orchestration API. AgentKnot cannot intercept arbitrary native Codex or Claude chats; a thin controller integration must call `agentknot orchestrate`, `POST /v1/orchestrations`, or `runtime.orchestrate()`.
@@ -125,13 +126,18 @@ AgentKnot starts:
 
 ```text
 pi --no-skills \
+  --no-extensions \
+  --no-prompt-templates \
+  --no-themes \
   --mode rpc \
   --provider opencode-go \
   --model gpt-5.6-luna \
   --no-session
 ```
 
-It disables automatic skill discovery for the background coding worker, sends the prompt over stdin as JSONL, and waits for Pi's `agent_settled` event, so retries and queued continuation events finish before the job is marked complete. The adapter decodes streaming UTF-8 independently of process chunk boundaries, reports malformed frames and missing settlement explicitly, and uses bounded `SIGTERM` → `SIGKILL` supervision for the exact Pi child on timeout or cancellation. It does not perform process-wide cleanup or claim ownership of arbitrary descendants. Repository context files such as `AGENTS.md` remain available.
+The adapter disables ambient extension, skill, prompt-template, and theme discovery for every background Pi run and live probe. Explicit `--extension`, `--skill`, `--prompt-template`, and `--theme` arguments remain available for reviewed worker profiles, while repository context files such as `AGENTS.md` stay enabled. A profile must not depend on global or repository-local Pi installation state: use an exact reviewed package version or immutable external path, compare it with the minimal route on the same real task, and promote it to dogfood only after repeated completion/artifact/test evidence shows a net benefit. Recommendation alone is not promotion evidence; see [decision 0012](postmortems/0012-evidence-gated-pi-profiles.md).
+
+AgentKnot sends the prompt over stdin as JSONL and waits for Pi's `agent_settled` event, so retries and queued continuation events finish before the job is marked complete. After a successful normal run it requests `get_session_stats` and stores only sanitized counts, token totals, cost, and optional context usage under result metadata; unsupported, malformed, or timed-out statistics are advisory and do not turn successful work into failure. The adapter decodes streaming UTF-8 independently of process chunk boundaries, reports malformed frames and missing settlement explicitly, and uses bounded `SIGTERM` → `SIGKILL` supervision for the exact Pi child on timeout or cancellation. It does not perform process-wide cleanup or claim ownership of arbitrary descendants.
 
 ## Switching controller or provider
 
@@ -224,7 +230,6 @@ The separation between worker and provider is deliberate. Workspace isolation is
     "pi": {
       "adapter": "pi-rpc",
       "command": "pi",
-      "commandArgs": ["--no-skills"],
       "noSession": true
     }
   },

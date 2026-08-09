@@ -295,6 +295,10 @@ Core consumers may depend on the normalized event name, job ID, sequence, timest
 
 Pi RPC is strict LF-delimited JSONL. Its adapter decodes streaming UTF-8 explicitly and does not assume that process chunks align with JSON messages or use Node `readline` behavior as its protocol definition. Each non-empty line must parse as a JSON object; malformed input reports line context. Process exit before `agent_settled` is an error, with `agent_end`-without-settlement distinguished from exit before `agent_end`.
 
+Every Pi normal run and live probe appends each of `--no-extensions`, `--no-skills`, `--no-prompt-templates`, and `--no-themes` exactly once after deduplicating those flags from configured command arguments. Explicit resource arguments remain unchanged, so a reviewed profile can name an exact extension, skill, prompt template, or theme without re-enabling ambient discovery. The adapter does not pass `--no-context-files`; repository instructions such as `AGENTS.md` remain available. These flags reduce ambient variability and capability but do not form a security sandbox.
+
+After a successful normal run reaches `agent_settled`, the Pi adapter sends one correlated `get_session_stats` RPC request before terminating its owned child. It allowlists non-negative message/tool counts, input/output/cache/total token counts, cost, and optional context usage into `result.metadata.sessionStats`; it does not retain session paths, session identifiers, raw statistics, or error text from this response. Timeout, unsupported responses, and invalid shapes are recorded only as `unavailableReason` and cannot change an otherwise successful result. Live probes do not request session statistics.
+
 The Pi adapter derives one effective environment by overlaying configured worker environment values on `process.env`. Configuration-only doctor, live probe, and normal run use that snapshot consistently for bare-command `PATH` lookup, required environment presence, Pi's explicit agent directory, worker-home default auth directory, and spawned child environment. Empty or whitespace credential values are absent. A relative command containing a path separator, a relative `PATH` entry, or a relative `PI_CODING_AGENT_DIR` remains relative to AgentKnot's own process directory during doctor because that boundary has no worker workspace.
 
 Orchestration events cover queued, planning, planner start/completion, planned, dispatching, child start/completion, cancellation requested, and terminal succeeded/failed/cancelled transitions. Their sequence is gap-free within one parent snapshot. Leaf job events remain authoritative for worker-level activity.
@@ -340,6 +344,7 @@ There is no authentication, authorization, TLS termination, CORS policy, rate li
 - Credentials stay in environment variables or Pi's external credential store.
 - Configuration declares required environment-variable names, not their values.
 - AgentKnot does not intentionally copy API keys or auth-file contents into job records.
+- Pi session-stat metadata is allowlisted and excludes session paths, session identifiers, raw responses, and provider error text.
 - Managed worktree cleanup targets an exact path created and owned by AgentKnot.
 - Git patch artifacts are never applied automatically.
 - Automatic delegation cannot be configured without Git worktree isolation, is depth-one, and never promotes child artifacts.

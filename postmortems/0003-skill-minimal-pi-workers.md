@@ -87,13 +87,19 @@ The first Pi launch used Node 23.1, which lacked the zstd API expected by the in
 - [ ] Make `doctor` detect Pi/runtime incompatibility instead of assuming AgentKnot's Node baseline is sufficient — Stage 1.
 - [x] Add `--no-skills` to the default Pi worker command.
 - [x] Expand repository-owned `AGENTS.md` with architecture, lifecycle, security, and test rules.
-- [ ] Add a documented explicit profile mechanism before enabling task-specific Pi extensions — demonstrated task need required.
+- [x] Add a documented explicit profile mechanism before enabling task-specific Pi extensions — see decision 0012.
 - [ ] Add Pi CLI compatibility checks to adapter conformance — Stage 2.
 - [ ] Pin and review any third-party extension before it becomes a supported profile.
 
 ## Deferred work
 
 OhMyPi compatibility and task-specific Pi plugins remain deferred until a concrete job cannot be served by the skill-minimal worker. Any future extension must preserve controller and worker portability.
+
+## Addenda
+
+### 2026-08-09: Broaden ambient isolation and admit evidence-gated profiles
+
+The Pi adapter now disables ambient extensions, skills, prompt templates, and themes for both normal runs and live probes while deliberately retaining repository context files. Explicit resource arguments still work, so isolation does not prohibit a reviewed task profile. Successful normal jobs also capture sanitized advisory Pi session statistics. The explicit profile mechanism and promotion gate are defined by [decision 0012](./0012-evidence-gated-pi-profiles.md); no third-party profile was promoted by this implementation alone.
 
 ## Privacy and security review
 

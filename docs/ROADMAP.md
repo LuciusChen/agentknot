@@ -105,7 +105,13 @@ Delivered in this slice:
 - Deterministic malformed JSONL, split UTF-8/frame, premature-exit, missing-settlement, timeout, and cancellation fixtures exercise the real Pi adapter and public Orchestrator boundary.
 - The Pi adapter settles after abort with bounded exact-child `SIGTERM` → `SIGKILL` supervision and bounded owned-stream draining; it does not perform broad process cleanup.
 - Pi configuration-only doctor and spawned execution now share one effective worker environment for command discovery, required names, and auth-directory/home lookup, with deterministic precedence and secret-non-disclosure coverage.
+- Pi normal runs and live probes disable all ambient resource discovery while preserving explicit reviewed resources and repository context; successful normal jobs capture sanitized advisory session statistics for empirical worker-profile comparisons.
 - Canonical `GET /health/live` and its explicit not-checked payload distinguish HTTP process liveness from route readiness; legacy `GET /health` remains an identical compatibility alias, and readiness inference stays opt-in through CLI diagnostics.
+
+Next evidence gate:
+
+- Review one bounded community Pi extension without installing it globally or into the target repository, pin its exact version, and run repeated same-task Luna/max A/B trials against the minimal profile.
+- Promote a separate dogfood worker/profile only if completion, artifact verification, and target tests do not regress and session statistics, elapsed work, or recorded upstream intervention show a repeatable net benefit; otherwise keep the minimal route and record the negative result.
 
 ### Runtime reconciliation correctness
 

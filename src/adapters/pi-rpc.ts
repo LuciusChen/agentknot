@@ -18,10 +18,12 @@ import type {
 } from '../types.js';
 
 interface PiRpcEvent {
+  id?: string;
   type?: string;
   success?: boolean;
   command?: string;
   error?: string;
+  data?: unknown;
   message?: unknown;
   messages?: unknown[];
   assistantMessageEvent?: {
@@ -150,13 +152,140 @@ async function hasPiAuth(provider: string, environment: EffectiveEnvironment): P
 const CHILD_SIGTERM_GRACE_MS = 100;
 const CHILD_SIGKILL_WAIT_MS = 1_000;
 const CHILD_OUTPUT_DRAIN_GRACE_MS = 1_000;
+const SESSION_STATS_WAIT_MS = 1_000;
+const SESSION_STATS_REQUEST_ID = 'agentknot-session-stats';
+const AMBIENT_DISCOVERY_DISABLE_FLAGS = [
+  '--no-extensions',
+  '--no-skills',
+  '--no-prompt-templates',
+  '--no-themes',
+] as const;
+
+type SessionStatsUnavailableReason = 'timeout' | 'unsupported' | 'invalid';
+
+type SanitizedSessionStats = {
+  userMessages: number;
+  assistantMessages: number;
+  toolCalls: number;
+  toolResults: number;
+  totalMessages: number;
+  tokens: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+  cost: number;
+  contextUsage?: {
+    tokens: number | null;
+    contextWindow: number;
+    percent: number | null;
+  };
+};
+
+type SessionStatsMetadata = SanitizedSessionStats | { unavailableReason: SessionStatsUnavailableReason };
 
 function rpcLine(value: Record<string, unknown>): string {
   return `${JSON.stringify(value)}\n`;
 }
 
+function withAmbientDiscoveryDisabled(configuredArgs: readonly string[] | undefined): string[] {
+  const disabledFlags = new Set<string>(AMBIENT_DISCOVERY_DISABLE_FLAGS);
+  const seen = new Set<string>();
+  const args: string[] = [];
+  for (const arg of configuredArgs ?? []) {
+    if (disabledFlags.has(arg)) {
+      if (seen.has(arg)) continue;
+      seen.add(arg);
+    }
+    args.push(arg);
+  }
+  for (const flag of AMBIENT_DISCOVERY_DISABLE_FLAGS) {
+    if (!seen.has(flag)) args.push(flag);
+  }
+  return args;
+}
+
 function isPiRpcEvent(value: unknown): value is PiRpcEvent {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return isNonNegativeFiniteNumber(value) && Number.isInteger(value);
+}
+
+function sanitizeSessionStats(value: unknown): SanitizedSessionStats | undefined {
+  if (!isRecord(value)) return undefined;
+  const userMessages = value.userMessages;
+  const assistantMessages = value.assistantMessages;
+  const toolCalls = value.toolCalls;
+  const toolResults = value.toolResults;
+  const totalMessages = value.totalMessages;
+  if (
+    !isNonNegativeInteger(userMessages) ||
+    !isNonNegativeInteger(assistantMessages) ||
+    !isNonNegativeInteger(toolCalls) ||
+    !isNonNegativeInteger(toolResults) ||
+    !isNonNegativeInteger(totalMessages)
+  ) {
+    return undefined;
+  }
+
+  const tokens = value.tokens;
+  if (!isRecord(tokens)) return undefined;
+  const input = tokens.input;
+  const output = tokens.output;
+  const cacheRead = tokens.cacheRead;
+  const cacheWrite = tokens.cacheWrite;
+  const total = tokens.total;
+  if (
+    !isNonNegativeInteger(input) ||
+    !isNonNegativeInteger(output) ||
+    !isNonNegativeInteger(cacheRead) ||
+    !isNonNegativeInteger(cacheWrite) ||
+    !isNonNegativeInteger(total)
+  ) {
+    return undefined;
+  }
+
+  const cost = value.cost;
+  if (!isNonNegativeFiniteNumber(cost)) return undefined;
+
+  let contextUsage: SanitizedSessionStats['contextUsage'];
+  if (value.contextUsage !== undefined) {
+    if (!isRecord(value.contextUsage)) return undefined;
+    const contextTokens = value.contextUsage.tokens;
+    const contextWindow = value.contextUsage.contextWindow;
+    const contextPercent = value.contextUsage.percent;
+    if (
+      !(contextTokens === null || isNonNegativeInteger(contextTokens)) ||
+      !isNonNegativeInteger(contextWindow) ||
+      !(contextPercent === null || isNonNegativeFiniteNumber(contextPercent))
+    ) {
+      return undefined;
+    }
+    contextUsage = {
+      tokens: contextTokens,
+      contextWindow,
+      percent: contextPercent,
+    };
+  }
+
+  return {
+    userMessages,
+    assistantMessages,
+    toolCalls,
+    toolResults,
+    totalMessages,
+    tokens: { input, output, cacheRead, cacheWrite, total },
+    cost,
+    ...(contextUsage === undefined ? {} : { contextUsage }),
+  };
 }
 
 function parseRpcLine(line: string, lineNumber: number): PiRpcEvent {
@@ -234,6 +363,56 @@ function waitForPromiseOrTimeout(promise: Promise<unknown>, timeoutMs: number): 
       }
     );
   });
+}
+
+function waitForRpcResponse(
+  response: Promise<PiRpcEvent | undefined>,
+  timeoutMs: number
+): Promise<{ response?: PiRpcEvent; timedOut: boolean }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      resolve({ timedOut: true });
+    }, timeoutMs);
+    void response.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value === undefined ? { timedOut: false } : { response: value, timedOut: false });
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ timedOut: false });
+      }
+    );
+  });
+}
+
+async function requestSessionStats(
+  child: ChildProcessWithoutNullStreams,
+  response: Promise<PiRpcEvent | undefined>,
+  requestId: string
+): Promise<SessionStatsMetadata> {
+  if (childExited(child)) return { unavailableReason: 'unsupported' };
+  try {
+    child.stdin.write(rpcLine({ id: requestId, type: 'get_session_stats' }));
+  } catch {
+    return { unavailableReason: 'unsupported' };
+  }
+
+  const result = await waitForRpcResponse(response, SESSION_STATS_WAIT_MS);
+  if (result.timedOut) return { unavailableReason: 'timeout' };
+  const event = result.response;
+  if (!event || event.type !== 'response' || event.id !== requestId || event.command !== 'get_session_stats') {
+    return { unavailableReason: 'unsupported' };
+  }
+  if (event.success !== true) return { unavailableReason: 'unsupported' };
+  const stats = sanitizeSessionStats(event.data);
+  return stats ?? { unavailableReason: 'invalid' };
 }
 
 async function terminateChild(
@@ -353,7 +532,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       child = spawn(
         command,
         [
-          ...(this.config.commandArgs ?? []),
+          ...withAmbientDiscoveryDisabled(this.config.commandArgs),
           '--mode',
           'rpc',
           '--provider',
@@ -492,7 +671,12 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       }
       return {
         output,
-        metadata: { command, rawEventCount, stderr: stderr.trim() || undefined },
+        metadata: {
+          command,
+          rawEventCount,
+          stderr: stderr.trim() || undefined,
+          ambientDiscoveryDisabled: true,
+        },
       };
     } finally {
       input.signal.removeEventListener('abort', abort);
@@ -516,7 +700,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
 
     const command = this.config.command ?? 'pi';
     const args = [
-      ...(this.config.commandArgs ?? []),
+      ...withAmbientDiscoveryDisabled(this.config.commandArgs),
       '--mode',
       'rpc',
       '--provider',
@@ -540,6 +724,16 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     let assistantError: string | undefined;
     let agentEnded = false;
     let stderr = '';
+    let statsRequestId: string | undefined;
+    let statsResponseResolved = false;
+    let resolveStatsResponse!: (event: PiRpcEvent | undefined) => void;
+    const statsResponse = new Promise<PiRpcEvent | undefined>((resolve) => {
+      resolveStatsResponse = (event) => {
+        if (statsResponseResolved) return;
+        statsResponseResolved = true;
+        resolve(event);
+      };
+    });
     let resolveSettled!: () => void;
     let rejectSettled!: (error: Error) => void;
     const settled = new Promise<void>((resolve, reject) => {
@@ -558,6 +752,10 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
 
     const handleEvent = async (event: PiRpcEvent): Promise<void> => {
       rawEventCount += 1;
+      if (event.type === 'response' && statsRequestId !== undefined && event.id === statsRequestId) {
+        resolveStatsResponse(event);
+        return;
+      }
       switch (event.type) {
         case 'agent_start':
           await emit('worker.started', { adapter: 'pi-rpc', attempt: input.attempt });
@@ -654,9 +852,11 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       if (!completed) rejectSettled(error);
     });
     child.once('error', (error) => {
+      resolveStatsResponse(undefined);
       if (!completed) rejectSettled(error);
     });
     child.once('exit', (code, signal) => {
+      resolveStatsResponse(undefined);
       const output = Promise.allSettled([stdoutTask, stderrTask]);
       void waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_GRACE_MS)
         .then(() => {
@@ -679,9 +879,20 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       child.stdin.write(rpcLine({ id: 'prompt', type: 'prompt', message: input.prompt }));
       await settled;
       if (assistantError) throw new Error(assistantError);
+      if (input.signal.aborted) {
+        throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
+      }
+      statsRequestId = SESSION_STATS_REQUEST_ID;
+      const sessionStats = await requestSessionStats(child, statsResponse, statsRequestId);
       return {
         output,
-        metadata: { command, rawEventCount, stderr: stderr.trim() || undefined },
+        metadata: {
+          command,
+          rawEventCount,
+          stderr: stderr.trim() || undefined,
+          ambientDiscoveryDisabled: true,
+          sessionStats,
+        },
       };
     } finally {
       completed = true;

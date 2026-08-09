@@ -4,6 +4,9 @@ let buffer = '';
 let thinkingLevel;
 let autoRetry;
 
+if (process.env.FAKE_PI_ARGV_FILE) {
+  writeFileSync(process.env.FAKE_PI_ARGV_FILE, JSON.stringify(process.argv.slice(2)));
+}
 if (process.env.FAKE_PI_PID_FILE) writeFileSync(process.env.FAKE_PI_PID_FILE, String(process.pid));
 if (process.env.FAKE_PI_CWD_FILE) writeFileSync(process.env.FAKE_PI_CWD_FILE, process.cwd());
 
@@ -12,6 +15,13 @@ function send(value) {
 }
 
 function handle(command) {
+  if (command.type === 'get_session_stats') {
+    if (process.env.FAKE_PI_STATS_REQUEST_FILE) {
+      writeFileSync(process.env.FAKE_PI_STATS_REQUEST_FILE, JSON.stringify(command));
+    }
+    send({ id: command.id, type: 'response', command: command.type, success: true });
+    return;
+  }
   if (command.type === 'set_auto_retry') {
     autoRetry = command.enabled;
     send({ id: command.id, type: 'response', command: command.type, success: true });

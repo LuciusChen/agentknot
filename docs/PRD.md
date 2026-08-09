@@ -96,6 +96,8 @@ Version 0.0.1 currently implements:
 - OpenCode Go/Luna and xAI/Grok routes through Pi configuration;
 - file-backed or in-memory job snapshots and ordered events;
 - immediate execution with cooperative timeouts, retries, and cancellation, plus bounded exact-child supervision in the bundled Pi adapter;
+- reproducible Pi execution that disables ambient extension, skill, prompt-template, and theme discovery while preserving repository instructions and explicitly configured resources;
+- sanitized per-job Pi session statistics for measuring message/tool counts, token use, cost, and context use without retaining session paths, identifiers, or raw responses;
 - one-shot completion callbacks to trusted URLs;
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
@@ -114,6 +116,8 @@ Route diagnostics have two explicit modes. The default `doctor` command is a fas
 The current file stores provide persistent audit snapshots. Execution-owning runtimes deterministically mark stale nonterminal jobs or orchestrations failed on startup when their recorded process is absent; read-oriented CLI runtimes do not perform this recovery. The stores do not provide resumable execution, a restartable queue, journaling, multi-process coordination, PID-reuse protection, or automatic cleanup of worktrees left by a hard process crash.
 
 Provider and model independence are currently routing properties implemented by the selected worker. AgentKnot does not yet expose an independent provider-runtime interface.
+
+Pi extensions are optional worker-profile inputs, not portable core dependencies. A community package can enter the repository dogfood route only after source/supply-chain review and repeated same-task comparison against the minimal Pi route show no regression in terminal completion, artifact validity, or tests and a measurable improvement in upstream intervention, token use, or elapsed work. Trials must use an exact version or immutable external path without global or repository-local installation, and must preserve the selected provider, model, and thinking level. AgentKnot never silently selects an extension or model fallback.
 
 ## Non-goals
 

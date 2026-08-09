@@ -25,6 +25,38 @@ const route: ResolvedRoute = {
 };
 
 const conformanceFixture = path.resolve('test/fixtures/fake-pi-conformance.mjs');
+const fakePiFixture = path.resolve('test/fixtures/fake-pi.mjs');
+const diagnosticsFixture = path.resolve('test/fixtures/fake-pi-diagnostics.mjs');
+const ambientDiscoveryDisableFlags = [
+  '--no-extensions',
+  '--no-skills',
+  '--no-prompt-templates',
+  '--no-themes',
+];
+
+async function readFixtureArgv(file: string): Promise<string[]> {
+  const value: unknown = JSON.parse(await readFile(file, 'utf8'));
+  if (!Array.isArray(value)) throw new Error('Fixture argv was not an array');
+  const args: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') throw new Error('Fixture argv contained a non-string');
+    args.push(item);
+  }
+  return args;
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Expected a metadata record');
+  }
+  const record: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) record[key] = item;
+  return record;
+}
+
+function countArguments(args: readonly string[], value: string): number {
+  return args.filter((arg) => arg === value).length;
+}
 
 function createConformanceAdapter(
   mode: string,
@@ -66,6 +98,38 @@ async function waitForPid(pidFile: string): Promise<number> {
 function assertProcessGone(pid: number): void {
   assert.throws(() => process.kill(pid, 0), (error: unknown) => {
     return (error as NodeJS.ErrnoException).code === 'ESRCH';
+  });
+}
+
+function createFakePiOrchestrator(environment: Record<string, string>): Orchestrator {
+  const config: AgentKnotConfig = {
+    version: 1,
+    defaultRoute: 'fake-pi',
+    storage: { directory: '.agentknot/jobs' },
+    workers: {
+      pi: {
+        adapter: 'pi-rpc',
+        command: process.execPath,
+        commandArgs: [fakePiFixture],
+        noSession: true,
+        environment,
+      },
+    },
+    routes: {
+      'fake-pi': {
+        worker: 'pi',
+        provider: 'test-provider',
+        model: 'test-model',
+        requiredEnv: [],
+        maxAttempts: 1,
+        timeoutMs: 10_000,
+      },
+    },
+  };
+  return new Orchestrator({
+    config,
+    store: new MemoryJobStore(),
+    adapters: createAdapters(config),
   });
 }
 
@@ -323,6 +387,218 @@ test('PiRpcWorkerAdapter speaks JSONL RPC and normalizes Pi events', async () =>
   assert.ok(events.includes('worker.tool.started'));
   assert.ok(events.includes('worker.tool.completed'));
   assert.equal(events.filter((event) => event === 'worker.text.delta').length, 2);
+});
+
+test('PiRpcWorkerAdapter isolates ambient discovery for normal runs while preserving explicit resources and context', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-argv-run-'));
+  const argvFile = path.join(directory, 'argv.json');
+  const cwdFile = path.join(directory, 'cwd.txt');
+  const statsRequestFile = path.join(directory, 'stats-request.json');
+  try {
+    const adapter = new PiRpcWorkerAdapter('pi', {
+      adapter: 'pi-rpc',
+      command: process.execPath,
+      commandArgs: [
+        fakePiFixture,
+        '--no-skills',
+        '--no-skills',
+        '--extension',
+        'explicit-extension',
+        '--skill',
+        'explicit-skill',
+        '--prompt-template',
+        'explicit-prompt-template',
+        '--theme',
+        'explicit-theme',
+        '--no-themes',
+        '--no-themes',
+      ],
+      noSession: true,
+      environment: {
+        FAKE_PI_ARGV_FILE: argvFile,
+        FAKE_PI_CWD_FILE: cwdFile,
+        FAKE_PI_STATS_REQUEST_FILE: statsRequestFile,
+      },
+    });
+    const result = await adapter.run(
+      {
+        jobId: 'job_pi_argv_run',
+        prompt: 'do work',
+        workspace: directory,
+        route,
+        attempt: 1,
+        signal: new AbortController().signal,
+      },
+      () => undefined
+    );
+    const args = await readFixtureArgv(argvFile);
+    for (const flag of ambientDiscoveryDisableFlags) assert.equal(countArguments(args, flag), 1, flag);
+    assert.equal(args.includes('--no-context-files'), false, 'AGENTS.md context must remain enabled');
+    for (const argument of [
+      '--extension',
+      'explicit-extension',
+      '--skill',
+      'explicit-skill',
+      '--prompt-template',
+      'explicit-prompt-template',
+      '--theme',
+      'explicit-theme',
+    ]) {
+      assert.ok(args.includes(argument), `missing explicit Pi argument ${argument}`);
+    }
+    assert.equal(args[args.indexOf('--provider') + 1], route.provider);
+    assert.equal(args[args.indexOf('--model') + 1], route.model);
+    assert.equal(await readFile(cwdFile, 'utf8'), directory);
+    assert.equal(recordValue(result.metadata).ambientDiscoveryDisabled, true);
+
+    const statsRequest = recordValue(JSON.parse(await readFile(statsRequestFile, 'utf8')));
+    assert.equal(statsRequest.id, 'agentknot-session-stats');
+    assert.equal(statsRequest.type, 'get_session_stats');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter isolates ambient discovery for live probes and never requests session stats', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-argv-probe-'));
+  const argvFile = path.join(directory, 'argv.json');
+  const cwdFile = path.join(directory, 'cwd.txt');
+  const statsRequestFile = path.join(directory, 'stats-request.json');
+  try {
+    const adapter = new PiRpcWorkerAdapter('pi', {
+      adapter: 'pi-rpc',
+      command: process.execPath,
+      commandArgs: [
+        diagnosticsFixture,
+        '--no-extensions',
+        '--no-extensions',
+        '--no-prompt-templates',
+        '--no-prompt-templates',
+        '--extension',
+        'probe-extension',
+        '--skill',
+        'probe-skill',
+        '--prompt-template',
+        'probe-prompt-template',
+        '--theme',
+        'probe-theme',
+      ],
+      noSession: true,
+      environment: {
+        FAKE_PI_ARGV_FILE: argvFile,
+        FAKE_PI_CWD_FILE: cwdFile,
+        FAKE_PI_STATS_REQUEST_FILE: statsRequestFile,
+      },
+    });
+    const result = await adapter.probe({ route, signal: new AbortController().signal });
+    const args = await readFixtureArgv(argvFile);
+    for (const flag of ambientDiscoveryDisableFlags) assert.equal(countArguments(args, flag), 1, flag);
+    assert.equal(args.includes('--no-context-files'), false, 'AGENTS.md context must remain enabled');
+    for (const argument of [
+      '--extension',
+      'probe-extension',
+      '--skill',
+      'probe-skill',
+      '--prompt-template',
+      'probe-prompt-template',
+      '--theme',
+      'probe-theme',
+    ]) {
+      assert.ok(args.includes(argument), `missing explicit Pi argument ${argument}`);
+    }
+    assert.equal(args[args.indexOf('--provider') + 1], route.provider);
+    assert.equal(args[args.indexOf('--model') + 1], route.model);
+    const probeWorkspace = await readFile(cwdFile, 'utf8');
+    assert.notEqual(probeWorkspace, process.cwd());
+    await assert.rejects(stat(probeWorkspace), (error: unknown) => {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT';
+    });
+    assert.equal(recordValue(result.metadata).ambientDiscoveryDisabled, true);
+    assert.equal(recordValue(result.metadata).sessionStats, undefined);
+    await assert.rejects(stat(statsRequestFile), (error: unknown) => {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT';
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter sanitizes correlated session stats without retaining sensitive response fields', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-stats-success-'));
+  const statsRequestFile = path.join(directory, 'stats-request.json');
+  try {
+    const orchestrator = createFakePiOrchestrator({
+      FAKE_PI_STATS_REQUEST_FILE: statsRequestFile,
+    });
+    const started = await orchestrator.start({ prompt: 'collect stats', workspace: directory });
+    const job = await started.completion;
+
+    assert.equal(job.status, 'succeeded');
+    const metadata = recordValue(recordValue(job.result).metadata);
+    assert.equal(metadata.ambientDiscoveryDisabled, true);
+    assert.deepEqual(metadata.sessionStats, {
+      userMessages: 2,
+      assistantMessages: 3,
+      toolCalls: 4,
+      toolResults: 5,
+      totalMessages: 6,
+      tokens: { input: 11, output: 12, cacheRead: 13, cacheWrite: 14, total: 50 },
+      cost: 0.42,
+      contextUsage: { tokens: 321, contextWindow: 1000, percent: 32.1 },
+    });
+    const request = recordValue(JSON.parse(await readFile(statsRequestFile, 'utf8')));
+    assert.equal(request.id, 'agentknot-session-stats');
+    assert.equal(request.type, 'get_session_stats');
+    const serialized = JSON.stringify(job);
+    for (const forbidden of [
+      '/private/session.json',
+      'secret-session-id',
+      '/private/raw-stats-path',
+      'secret-raw-stats',
+      'secret-token',
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, `retained forbidden stats value ${forbidden}`);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter keeps stats advisory for unsupported, malformed, and timed-out responses', async () => {
+  const cases = [
+    ['unsupported', 'unsupported'],
+    ['invalid', 'invalid'],
+    ['timeout', 'timeout'],
+  ] as const;
+  for (const [mode, reason] of cases) {
+    const directory = await mkdtemp(path.join(os.tmpdir(), `agentknot-pi-stats-${mode}-`));
+    const pidFile = path.join(directory, 'child.pid');
+    let pid: number | undefined;
+    try {
+      const orchestrator = createFakePiOrchestrator({
+        FAKE_PI_STATS_MODE: mode,
+        FAKE_PI_PID_FILE: pidFile,
+      });
+      const started = await orchestrator.start({ prompt: `stats ${mode}`, workspace: directory });
+      pid = await waitForPid(pidFile);
+      const job = await started.completion;
+
+      assert.equal(job.status, 'succeeded', mode);
+      const metadata = recordValue(recordValue(job.result).metadata);
+      assert.deepEqual(metadata.sessionStats, { unavailableReason: reason });
+      assert.equal(JSON.stringify(job).includes('secret'), false);
+      assertProcessGone(pid);
+    } finally {
+      if (pid !== undefined) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // The adapter already reaped the exact child.
+        }
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
 });
 
 test('PiRpcWorkerAdapter decodes split JSONL frames and split UTF-8 exactly', async () => {

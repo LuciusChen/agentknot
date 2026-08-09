@@ -15,6 +15,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Opt-in `doctor --live --route NAME` diagnostics that perform one bounded real inference through the exact resolved route, without Job or artifact persistence; the repository promotion check covers Pi/OpenCode Go/Luna at `thinkingLevel: "max"`.
 - Canonical `GET /health/live` process liveness with an explicit not-checked storage/route/inference payload; `GET /health` remains an identical compatibility alias and HTTP readiness remains intentionally absent.
 - Deterministic Pi RPC conformance fixtures for split JSONL/UTF-8 input, malformed frames, premature exit, missing settlement, timeout, and cancellation.
+- Sanitized Pi `get_session_stats` metadata for successful normal jobs, including message/tool counts, token totals, cost, and optional context usage; unavailable statistics remain advisory.
 - Product requirements, technical specification, evidence-gated roadmap, and decision/postmortem records.
 
 ### Changed
@@ -24,7 +25,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Automatic delegation defaults to `maxChildren: 2` and `maxConcurrency: 2` when dispatch limits are omitted; each value is capped at 6 and concurrency cannot exceed the child count. The repository dogfood configuration uses a six-task pool with four concurrent Pi/OpenCode Go/Luna execution slots.
 - Planner instructions reserve parallel execution for independently verifiable subtasks without execution-order dependencies or overlapping expected write scopes; the scheduler starts only the available tasks up to the concurrency cap and refills slots as workers complete.
 - Controller metadata now follows one recursive JSON-compatible object contract across TypeScript and HTTP leaf/orchestration APIs.
-- Background Pi workers disable ambient skill discovery by default while retaining repository instructions.
+- Background Pi runs and live probes disable ambient extension, skill, prompt-template, and theme discovery while retaining repository instructions and explicitly configured resources. Third-party profiles require isolated, exact-version A/B evidence before dogfood promotion ([decision 0012](postmortems/0012-evidence-gated-pi-profiles.md)).
 - The repository Luna route now uses Pi's `max` thinking level for planning, delegated worker execution, and live diagnostic probes that select that route.
 - Configuration-only `doctor` output explicitly says that live inference was not checked; `doctor --live` uses a 30-second control-plane timeout, reports provider errors with a nonzero exit status, reports unsupported adapters honestly, never falls back to another route, and does not add a preflight to normal jobs.
 
