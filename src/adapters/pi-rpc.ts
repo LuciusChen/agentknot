@@ -5,10 +5,12 @@ import path from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 
+import { validateWorkerCompletionReport } from '../completion-summary.js';
 import type { PiRpcWorkerConfig } from '../config.js';
 import type {
   ResolvedRoute,
   WorkerAdapter,
+  WorkerCompletionReport,
   WorkerEventSink,
   WorkerHealth,
   WorkerProbeInput,
@@ -472,6 +474,50 @@ function childExitError(
 const LIVE_PROBE_PROMPT =
   'This is a bounded AgentKnot live inference probe. Reply with exactly "AgentKnot live inference probe succeeded." and do not use tools or modify files.';
 
+/** The only machine suffix recognized by normal Pi runs. */
+export const PI_WORKER_COMPLETION_REPORT_MARKER = 'AGENTKNOT_WORKER_COMPLETION_REPORT_V1';
+
+/**
+ * This instruction is intentionally route-neutral and is appended only by `run`, never by the
+ * configuration doctor or live probe paths.
+ */
+export const PI_WORKER_COMPLETION_REPORT_INSTRUCTION = [
+  'End your final assistant message with exactly one single-line marked JSON envelope.',
+  `The line must begin "${PI_WORKER_COMPLETION_REPORT_MARKER}: " and contain schemaVersion 1 WorkerCompletionReport JSON with changedFiles as a string array, checksRun entries with command, outcome (passed, failed, or unknown), and optional notes, remainingRisks as a string array, and notes as a string array.`,
+  'Do not add any text after that line. All values are worker-reported claims, not AgentKnot verification.',
+].join(' ');
+
+interface ParsedWorkerCompletionOutput {
+  output: string;
+  completionReport?: WorkerCompletionReport | null;
+}
+
+const WORKER_COMPLETION_REPORT_SUFFIX = new RegExp(
+  `(^|\\r?\\n)${PI_WORKER_COMPLETION_REPORT_MARKER}: ([^\\r\\n]*)(?![\\s\\S])`
+);
+
+function parseWorkerCompletionOutput(output: string): ParsedWorkerCompletionOutput {
+  const match = WORKER_COMPLETION_REPORT_SUFFIX.exec(output);
+  if (!match) return { output };
+
+  const separator = match[1] ?? '';
+  const payload = match[2] ?? '';
+  let value: unknown;
+  try {
+    value = JSON.parse(payload);
+  } catch {
+    return { output, completionReport: null };
+  }
+
+  const report = validateWorkerCompletionReport(value);
+  if (!report) return { output, completionReport: null };
+
+  return {
+    output: output.slice(0, (match.index ?? 0) + separator.length),
+    completionReport: report,
+  };
+}
+
 export class PiRpcWorkerAdapter implements WorkerAdapter {
   readonly name: string;
 
@@ -876,16 +922,21 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           rpcLine({ id: 'thinking', type: 'set_thinking_level', level: input.route.thinkingLevel })
         );
       }
-      child.stdin.write(rpcLine({ id: 'prompt', type: 'prompt', message: input.prompt }));
+      const prompt = `${input.prompt}\n\n${PI_WORKER_COMPLETION_REPORT_INSTRUCTION}`;
+      child.stdin.write(rpcLine({ id: 'prompt', type: 'prompt', message: prompt }));
       await settled;
       if (assistantError) throw new Error(assistantError);
       if (input.signal.aborted) {
         throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
       }
+      const parsedOutput = parseWorkerCompletionOutput(output);
       statsRequestId = SESSION_STATS_REQUEST_ID;
       const sessionStats = await requestSessionStats(child, statsResponse, statsRequestId);
       return {
-        output,
+        output: parsedOutput.output,
+        ...(parsedOutput.completionReport === undefined
+          ? {}
+          : { completionReport: parsedOutput.completionReport }),
         metadata: {
           command,
           rawEventCount,

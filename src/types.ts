@@ -261,8 +261,12 @@ export interface WorkerRunInput {
 export interface WorkerRunResult {
   output: string;
   metadata?: Record<string, unknown>;
-  /** Optional structured worker claim; the orchestrator validates it before summarizing. */
-  completionReport?: WorkerCompletionReport;
+  /**
+   * Optional structured worker claim; the orchestrator validates it before summarizing.
+   * `null` means the worker detected its completion-report envelope but it was malformed or
+   * unsupported. Missing (`undefined`) means no envelope was detected.
+   */
+  completionReport?: WorkerCompletionReport | null;
 }
 
 export interface WorkerProbeInput {

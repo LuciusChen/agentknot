@@ -13,10 +13,44 @@ if (process.env.FAKE_PI_PID_FILE) {
   writeFileSync(process.env.FAKE_PI_PID_FILE, String(process.pid));
 }
 
+const WORKER_COMPLETION_REPORT_MARKER = 'AGENTKNOT_WORKER_COMPLETION_REPORT_V1';
+
 let buffer = '';
 
 function send(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+function completionOutput() {
+  if (process.env.FAKE_PI_COMPLETION_OUTPUT !== undefined) return process.env.FAKE_PI_COMPLETION_OUTPUT;
+  const humanOutput = process.env.FAKE_PI_HUMAN_OUTPUT ?? 'fake result';
+  const validReport = {
+    schemaVersion: 1,
+    changedFiles: ['worker-claimed.ts'],
+    checksRun: [
+      { command: 'npm test', outcome: 'passed' },
+      { command: 'npm run lint', outcome: 'unknown', notes: 'No lint script.' },
+    ],
+    remainingRisks: ['Worker-reported risk.'],
+    notes: ['Worker-reported note.'],
+  };
+  const envelope = `${WORKER_COMPLETION_REPORT_MARKER}: ${JSON.stringify(validReport)}`;
+  switch (process.env.FAKE_PI_COMPLETION_MODE ?? 'missing') {
+    case 'valid':
+      return `${humanOutput}\n${envelope}`;
+    case 'malformed':
+      return `${humanOutput}\n${WORKER_COMPLETION_REPORT_MARKER}: {"schemaVersion":1,"changedFiles":"not-an-array"}`;
+    case 'unsupported':
+      return `${humanOutput}\n${WORKER_COMPLETION_REPORT_MARKER}: ${JSON.stringify({ ...validReport, schemaVersion: 2 })}`;
+    case 'trailing':
+      return `${humanOutput}\n${envelope}\ntrailing prose`;
+    case 'prose':
+      return `${humanOutput}; AGENTKNOT_WORKER_COMPLETION_REPORT_V1 is mentioned in ordinary prose.`;
+    case 'missing':
+      return humanOutput;
+    default:
+      throw new Error(`Unknown completion mode: ${process.env.FAKE_PI_COMPLETION_MODE}`);
+  }
 }
 
 function handle(command) {
@@ -82,11 +116,17 @@ function handle(command) {
     return;
   }
 
+  if (process.env.FAKE_PI_PROMPT_FILE) {
+    writeFileSync(process.env.FAKE_PI_PROMPT_FILE, command.message);
+  }
+  const output = completionOutput();
+  const splitAt = Math.min(5, output.length);
+
   send({ id: command.id, type: 'response', command: 'prompt', success: true });
   send({ type: 'agent_start' });
   send({
     type: 'message_update',
-    assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'fake ' },
+    assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: output.slice(0, splitAt) },
   });
   send({
     type: 'tool_execution_start',
@@ -103,7 +143,7 @@ function handle(command) {
   });
   send({
     type: 'message_update',
-    assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'result' },
+    assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: output.slice(splitAt) },
   });
   send({ type: 'agent_end', messages: [], willRetry: false });
   send({ type: 'agent_settled' });

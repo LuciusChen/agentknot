@@ -103,7 +103,7 @@ Version 0.0.1 currently implements:
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
 - read-only artifact listing, integrity/base verification, and bounded patch preview through TypeScript, CLI, and HTTP;
-- additive schemaVersion 1 terminal Job completion summaries with terminal outcome/attempt, controller-captured artifact path provenance, and explicit unavailable states; strict worker completion reports are accepted from custom adapters, while the bundled Pi adapter does not yet emit them;
+- additive schemaVersion 1 terminal Job completion summaries with terminal outcome/attempt, controller-captured artifact path provenance, and explicit unavailable states; strict worker completion reports are accepted from custom adapters and normal Pi runs, with missing or malformed Pi envelopes remaining advisory; the deterministic emission slice is implemented but its Luna/max dogfood gate remains open;
 - configuration validation and explicit configuration-only and opt-in live route diagnostics;
 - canonical HTTP process liveness that explicitly reports storage, routes, and inference as not checked, without claiming route readiness.
 - controller-neutral orchestration through CLI, HTTP, and TypeScript;
@@ -166,7 +166,7 @@ The product remains on course when all of the following are true:
 - every emitted job event is already present in the persisted record;
 - every terminal job is inspectable after the invoking call returns;
 - every newly terminal succeeded, failed, or cancelled Job has a schemaVersion 1 completion summary before its terminal event is persisted or observed, and retries summarize only the terminal attempt;
-- completion summaries distinguish controller-captured artifact paths from worker-reported claims, never infer reports from prose/events/stderr/session statistics, and preserve explicit unavailable reasons;
+- completion summaries distinguish controller-captured artifact paths from worker-reported claims, never infer reports from prose/events/stderr/session statistics, and preserve explicit unavailable reasons; normal Pi runs use only the exact end-marked envelope, with absent or malformed envelopes unable to fail an otherwise successful job;
 - new leaf Job and Orchestration records carry `schemaVersion: 1`, legacy file reads remain byte-stable, and unsupported explicit versions fail rather than defaulting to v1;
 - Git worktree mode leaves the source workspace clean and returns artifacts without applying them;
 - controllers can verify and preview recorded artifacts without source mutation, while acceptance and promotion remain explicit upstream decisions;

@@ -37,6 +37,7 @@ function handle(command) {
     return;
   }
 
+  if (process.env.FAKE_PI_PROMPT_FILE) writeFileSync(process.env.FAKE_PI_PROMPT_FILE, command.message);
   if (process.env.FAKE_PI_HANG === '1') return;
 
   send({ id: command.id, type: 'response', command: 'prompt', success: true });

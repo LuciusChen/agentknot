@@ -98,6 +98,8 @@ export function workerReportedSummary(
 ): JobCompletionSummaryWorkerReported {
   if (!retainedNormalResult) return { status: 'unavailable', reason: 'not-retained' };
   if (value === undefined) return { status: 'unavailable', reason: 'absent' };
+  // The Pi adapter uses null to mark a detected malformed/unsupported envelope. Keep that
+  // distinction at the adapter boundary while mapping it to the stable summary reason.
   const report = validateWorkerCompletionReport(value);
   if (!report) return { status: 'unavailable', reason: 'malformed' };
   return { status: 'reported', report };

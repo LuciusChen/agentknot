@@ -64,10 +64,11 @@ Make leaf-job semantics and the bounded delegation slice reliable enough that a 
 - [x] Add a capability/status table that distinguishes current, experimental, proposed, and deferred behavior.
 - [x] Version persisted leaf Job and Orchestration records before incompatible schema evolution begins; new records use `schemaVersion: 1`, legacy file reads materialize missing versions without rewriting, and explicit unsupported versions fail.
 - [x] Validate controller metadata recursively as JSON-compatible values so TypeScript/HTTP admission and file storage preserve one contract.
-- Define a structured completion summary: changed files, checks run, remaining risks, and worker-reported notes, without treating worker assertions as verified facts. This remains an in-progress item because the bundled Pi adapter does not yet emit the strict worker report.
+- Define a structured completion summary: changed files, checks run, remaining risks, and worker-reported notes, without treating worker assertions as verified facts. The additive summary and deterministic normal-Pi emission slice are implemented; the full item remains in progress until an actual Luna/max dogfood job proves emission.
   - [x] Add the additive schemaVersion 1 `JobRecord.completionSummary` with terminal outcome/attempt, terminal-attempt artifact provenance, and stable unavailable reasons.
-  - [x] Validate optional custom-adapter worker reports strictly and preserve absent/malformed/unretained states without inferring from prose, events, stderr, or session statistics.
-  - [ ] Add and verify strict `WorkerCompletionReport` emission from the promoted Pi path before marking the full completion-summary item complete.
+  - [x] Validate optional custom-adapter and normal-Pi worker reports strictly, preserving absent/malformed/unretained states without inferring from prose, events, stderr, or session statistics.
+  - [x] Append the exact provider/model-neutral report instruction only to normal Pi runs, parse only an end-anchored single-line suffix, strip valid suffixes from output, and keep malformed/unsupported envelopes advisory.
+  - [ ] Add and verify strict `WorkerCompletionReport` emission from the promoted Pi path with an actual Luna/max dogfood job before marking the full completion-summary item complete.
 
 ### Lifecycle and persistence work
 
@@ -108,7 +109,7 @@ Delivered in this slice:
 - Deterministic malformed JSONL, split UTF-8/frame, premature-exit, missing-settlement, timeout, and cancellation fixtures exercise the real Pi adapter and public Orchestrator boundary.
 - The Pi adapter settles after abort with bounded exact-child `SIGTERM` → `SIGKILL` supervision and bounded owned-stream draining; it does not perform broad process cleanup.
 - Pi configuration-only doctor and spawned execution now share one effective worker environment for command discovery, required names, and auth-directory/home lookup, with deterministic precedence and secret-non-disclosure coverage.
-- Pi normal runs and live probes disable all ambient resource discovery while preserving explicit reviewed resources and repository context; successful normal jobs capture sanitized advisory session statistics for empirical worker-profile comparisons.
+- Pi normal runs and live probes disable all ambient resource discovery while preserving explicit reviewed resources and repository context; successful normal jobs capture sanitized advisory session statistics for empirical worker-profile comparisons, and normal runs have deterministic, strictly validated completion-report emission while live probes remain unchanged.
 - Canonical `GET /health/live` and its explicit not-checked payload distinguish HTTP process liveness from route readiness; legacy `GET /health` remains an identical compatibility alias, and readiness inference stays opt-in through CLI diagnostics.
 
 Next evidence gate:
@@ -157,7 +158,7 @@ Still outside this slice:
 - Every README capability is implemented and tested or visibly marked proposed/deferred.
 - Crash/restart behavior for every nonterminal state is deterministic and tested.
 - Every orchestration persists a valid plan before dispatch, never exceeds its child/depth/concurrency bounds, and leaves artifact integration upstream.
-- Every newly terminal Job has an additive completion summary before terminal observation, and the full worker-report gate remains visibly open until Pi emits the strict report.
+- Every newly terminal Job has an additive completion summary before terminal observation, and the full worker-report gate remains visibly open until an actual Luna/max dogfood job proves the strict Pi report emission.
 - Observer and callback failures cannot change a correct execution result.
 - A supported adapter cannot leave a timed-out or cancelled job indefinitely active.
 - A read-only CLI or API inspection cannot reconcile or mutate an active Job or Orchestration record.
