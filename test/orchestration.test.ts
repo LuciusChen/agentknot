@@ -357,6 +357,32 @@ test('OrchestrationService uses explicit upstream fallback for malformed planner
   assert.deepEqual(record.children, []);
 });
 
+test('OrchestrationService rejects a nested missing acceptanceCriteria without dispatching children', async () => {
+  const workspace = await createGitWorkspace('agentknot-fallback-missing-criteria-');
+  const malformedAssessment = {
+    ...assessment,
+    subtasks: assessment.subtasks.map((subtask, index) => {
+      if (index !== 1) return subtask;
+      const { acceptanceCriteria: _acceptanceCriteria, ...rest } = subtask;
+      return rest;
+    }),
+  };
+  const adapter = new PlannerAndWorkerAdapter(assessment, 5, JSON.stringify(malformedAssessment));
+  const { jobStore, orchestrations } = createServices(adapter);
+
+  const record = await orchestrations.run({ prompt: 'Reject incomplete structured planner output.', workspace });
+
+  assert.equal(record.status, 'succeeded');
+  assert.equal(record.plan?.decision, 'upstream');
+  assert.equal(record.plan?.willDispatch, false);
+  assert.match(record.plan?.plannerError?.message ?? '', /subtasks\[1\]/);
+  assert.match(record.plan?.plannerError?.message ?? '', /missing: acceptanceCriteria/);
+  assert.equal(record.result?.action, 'upstream');
+  assert.deepEqual(record.children, []);
+  assert.equal(adapter.workerRuns, 0);
+  assert.equal((await jobStore.list()).length, 1);
+});
+
 test('OrchestrationService cancellation stops active child jobs and does not launch more work', async () => {
   const workspace = await createGitWorkspace('agentknot-orchestration-cancel-');
   const adapter = new PlannerAndWorkerAdapter(assessment, 1_000);
