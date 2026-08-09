@@ -7,6 +7,7 @@ import { StringDecoder } from 'node:string_decoder';
 
 import { validateWorkerCompletionReport } from '../completion-summary.js';
 import type { PiRpcWorkerConfig } from '../config.js';
+import { MAX_PI_STDERR_BYTES, limitTextSuffix } from '../record-limits.js';
 import type {
   ResolvedRoute,
   WorkerAdapter,
@@ -678,9 +679,14 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     });
 
     const stderrTask = (async () => {
+      const decoder = new StringDecoder('utf8');
       for await (const chunk of child.stderr) {
-        stderr = `${stderr}${Buffer.from(chunk).toString('utf8')}`.slice(-4_096);
+        stderr = limitTextSuffix(
+          `${stderr}${decoder.write(Buffer.from(chunk))}`,
+          MAX_PI_STDERR_BYTES
+        );
       }
+      stderr = limitTextSuffix(`${stderr}${decoder.end()}`, MAX_PI_STDERR_BYTES);
     })().catch((error: unknown) => {
       rejectSettled(error instanceof Error ? error : new Error(String(error)));
     });
@@ -890,11 +896,16 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     });
 
     const stderrTask = (async () => {
-      for await (const chunk of child.stderr) {
-        const text = Buffer.from(chunk).toString('utf8');
-        stderr = `${stderr}${text}`.slice(-4_096);
+      const decoder = new StringDecoder('utf8');
+      const recordStderr = async (text: string): Promise<void> => {
+        if (text === '') return;
+        stderr = limitTextSuffix(`${stderr}${text}`, MAX_PI_STDERR_BYTES);
         await emit('worker.stderr', { text });
+      };
+      for await (const chunk of child.stderr) {
+        await recordStderr(decoder.write(Buffer.from(chunk)));
       }
+      await recordStderr(decoder.end());
     })().catch((error: unknown) => {
       if (!completed) rejectSettled(error instanceof Error ? error : new Error(String(error)));
     });

@@ -17,7 +17,7 @@ import type {
   PlannedSubtask,
   TaskAssessment,
 } from '../src/orchestration-types.js';
-import { Orchestrator } from '../src/orchestrator.js';
+import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { MemoryJobStore } from '../src/store.js';
 import type {
   ResolvedRoute,
@@ -174,10 +174,12 @@ class RetryingChildAdapter implements WorkerAdapter {
 class FailingOrchestrationStore implements OrchestrationStore {
   readonly delegate = new MemoryOrchestrationStore();
   saveCalls = 0;
+  created: OrchestrationRecord | undefined;
 
   constructor(readonly failAtSave: number) {}
 
   create(record: OrchestrationRecord): Promise<void> {
+    this.created = structuredClone(record);
     return this.delegate.create(record);
   }
 
@@ -193,6 +195,45 @@ class FailingOrchestrationStore implements OrchestrationStore {
 
   list(): Promise<OrchestrationRecord[]> {
     return this.delegate.list();
+  }
+}
+
+class SwitchableOrchestrationStore implements OrchestrationStore {
+  readonly delegate = new MemoryOrchestrationStore();
+  failNextSave = false;
+
+  create(record: OrchestrationRecord): Promise<void> {
+    return this.delegate.create(record);
+  }
+
+  async save(record: OrchestrationRecord): Promise<void> {
+    if (this.failNextSave) {
+      this.failNextSave = false;
+      throw new Error('injected cancellation save failure');
+    }
+    await this.delegate.save(record);
+  }
+
+  get(id: string): Promise<OrchestrationRecord | undefined> {
+    return this.delegate.get(id);
+  }
+
+  list(): Promise<OrchestrationRecord[]> {
+    return this.delegate.list();
+  }
+}
+
+class ChildPersistenceFailureAdapter implements WorkerAdapter {
+  readonly name = 'test';
+
+  async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
+    return { ok: true, message: 'persistence failure adapter ready' };
+  }
+
+  async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
+    await emit('worker.started', { route: input.route.name });
+    if (input.route.name === 'planner') return { output: JSON.stringify(assessment) };
+    throw new JobPersistenceError('terminal', 'job.succeeded', new Error('child snapshot full'));
   }
 }
 
@@ -750,7 +791,7 @@ test('OrchestrationService cancels an admitted planner when parent persistence f
     store: new MemoryJobStore(),
     adapters: new Map([[adapter.name, adapter]]),
   });
-  const store = new FailingOrchestrationStore(3);
+  const store = new FailingOrchestrationStore(2);
   const orchestrations = new OrchestrationService({ config: config.delegation!, jobs, store });
 
   const record = await orchestrations.run({ prompt: 'Review persistence.', workspace });
@@ -760,6 +801,8 @@ test('OrchestrationService cancels an admitted planner when parent persistence f
   assert.match(record.error?.message ?? '', /injected orchestration save failure/);
   assert.equal(planner?.status, 'cancelled');
   assert.equal(adapter.activeRuns, 0);
+  assert.equal(store.created?.events[0]?.type, 'orchestration.queued');
+  assert.equal(store.created?.events[0]?.sequence, 1);
 });
 
 test('OrchestrationService cancels an admitted child when parent persistence fails', async () => {
@@ -771,7 +814,7 @@ test('OrchestrationService cancels an admitted child when parent persistence fai
     store: new MemoryJobStore(),
     adapters: new Map([[adapter.name, adapter]]),
   });
-  const store = new FailingOrchestrationStore(7);
+  const store = new FailingOrchestrationStore(6);
   const orchestrations = new OrchestrationService({ config: config.delegation!, jobs, store });
 
   const record = await orchestrations.run({ prompt: 'Review persistence.', workspace });
@@ -785,4 +828,61 @@ test('OrchestrationService cancels an admitted child when parent persistence fai
   assert.equal(record.children[0]?.status, 'cancelled');
   assert.equal(childJob?.status, 'cancelled');
   assert.equal(adapter.activeRuns, 0);
+});
+
+test('OrchestrationService aborts active work even when cancellation evidence cannot be saved', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-cancel-save-failure-');
+  const adapter = new BlockingPlannerAdapter();
+  const config = testConfig(1);
+  const jobs = new Orchestrator({
+    config,
+    store: new MemoryJobStore(),
+    adapters: new Map([[adapter.name, adapter]]),
+  });
+  const store = new SwitchableOrchestrationStore();
+  const orchestrations = new OrchestrationService({ config: config.delegation!, jobs, store });
+  const started = await orchestrations.start({ prompt: 'Cancel despite persistence failure.', workspace });
+  await adapter.plannerStarted;
+
+  store.failNextSave = true;
+  await assert.rejects(started.cancel(), /injected cancellation save failure/);
+  const record = await started.completion;
+
+  assert.equal(record.status, 'cancelled');
+  assert.equal(record.cancelRequestedAt, undefined);
+  assert.equal(record.events.some((event) => event.type === 'orchestration.cancel.requested'), false);
+  assert.equal(adapter.activeRuns, 0);
+  assert.deepEqual(
+    record.events.map((event) => event.sequence),
+    Array.from({ length: record.events.length }, (_, index) => index + 1)
+  );
+});
+
+test('OrchestrationService propagates child control-plane persistence failure without fabricating worker failure', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-child-persistence-');
+  const adapter = new ChildPersistenceFailureAdapter();
+  const config = testConfig(1);
+  const jobStore = new MemoryJobStore();
+  const jobs = new Orchestrator({
+    config,
+    store: jobStore,
+    adapters: new Map([[adapter.name, adapter]]),
+  });
+  const store = new MemoryOrchestrationStore();
+  const orchestrations = new OrchestrationService({ config: config.delegation!, jobs, store });
+
+  await assert.rejects(
+    orchestrations.run({ prompt: 'Propagate child persistence.', workspace }),
+    JobPersistenceError
+  );
+  const parent = (await store.list())[0]!;
+  const child = (await jobStore.list()).find(
+    (job) => (job.request.metadata?.agentknotDelegation as Record<string, unknown>)?.role === 'worker'
+  );
+
+  assert.equal(parent.status, 'dispatching');
+  assert.equal(parent.children[0]?.status, 'running');
+  assert.equal(parent.events.some((event) => event.type === 'orchestration.child.completed'), false);
+  assert.equal(child?.status, 'running');
+  assert.equal(child?.error, undefined);
 });

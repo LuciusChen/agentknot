@@ -902,6 +902,22 @@ test('PiRpcWorkerAdapter distinguishes agent_end without agent_settled', async (
   );
 });
 
+test('PiRpcWorkerAdapter stream-decodes and byte-bounds a split UTF-8 stderr suffix', async () => {
+  const adapter = createConformanceAdapter('stderr-split-exit');
+
+  await assert.rejects(
+    adapter.run(conformanceInput(new AbortController().signal), () => undefined),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /code=29/);
+      assert.match(message, /before🙂after/);
+      assert.doesNotMatch(message, /discard-/);
+      assert.doesNotMatch(message, /�/);
+      return true;
+    }
+  );
+});
+
 test('Orchestrator bounds timeout cleanup when the owned Pi child ignores SIGTERM', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-timeout-'));
   const pidFile = path.join(directory, 'child.pid');

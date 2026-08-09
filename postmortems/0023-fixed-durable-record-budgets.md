@@ -83,3 +83,9 @@ This decision does not cap patch artifact files, delete old snapshots/artifacts,
 ## Privacy and security review
 
 The tests use generated repeated characters and synthetic paths only. No real prompt, model output, credentials, repository content, callback endpoint, or artifact bytes are retained in this record.
+
+## Addenda
+
+### 2026-08-09: Luna/max post-commit audit
+
+Four read-only Luna/max jobs audited commit `658f9a6` through orchestration `orchestration_52171ea3-ae0e-485d-96f7-654019a6da36`; all artifacts were empty. The audit found that callback overflow can skip delivery yet still fail to save its bookkeeping under the independent 16 MiB snapshot ceiling, so current wording now says AgentKnot *attempts* that save. It also exposed parent-orchestration persistence gaps: queued admission is now atomic, failed event appends roll back, cancellation always propagates abort, and child Job persistence rejection is no longer synthesized as worker failure. Object evidence is JSON-normalized before its standalone budget is measured, and Pi stderr now uses streaming UTF-8 decoding with a 4 KiB byte suffix. Exact-boundary and rejected-save fixtures were expanded without making budgets configurable.

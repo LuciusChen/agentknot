@@ -78,6 +78,7 @@ Make leaf-job semantics and the bounded delegation slice reliable enough that a 
 - Define and test persistence-failure behavior at admission, event append, terminal transition, artifact recording, and callback bookkeeping.
   - [x] Keep callback-bookkeeping persistence outside the execution failure path: attempt delivery once, preserve the already-persisted terminal result, never redeliver, and reject completion with the store error when its delivery state cannot be saved ([incident 0019](../postmortems/0019-callback-bookkeeping-persistence-boundary.md)).
   - [x] Atomically admit `queued` with `job.queued`; classify event, artifact-recording, and terminal-transition save failures as control-plane persistence errors without worker retry, substitute terminal state, or callback delivery; remove unrecorded patches and retain the last good snapshot for restart reconciliation ([incident 0021](../postmortems/0021-job-persistence-failure-boundaries.md)).
+  - [x] Atomically admit parent `queued` with `orchestration.queued`, roll back unsaved parent events, propagate child control-plane persistence failures without fabricating worker outcomes, and ensure cancellation persistence cannot block abort propagation.
 - [x] On startup, after exclusive storage ownership is established, fail every prior nonterminal Job/Orchestration once without replay or PID-based takeover; resumable execution remains outside this stage.
 - [x] Enforce the supported single-writer file runtime with non-blocking advisory locks on both canonical storage directories, clear second-owner refusal, read-only runtime capability checks, active-work close refusal, and crash-release/restart coverage; no lease, heartbeat, database, or dependency package is added ([decision 0022](../postmortems/0022-file-runtime-single-writer-ownership.md)).
 - [x] Bound prompt/metadata admission, event payload/count, Pi stderr retention, result/report/error data, callback payload, and complete Job/Orchestration snapshot growth with fixed UTF-8 budgets and explicit evidence; artifact bytes, retention, and redaction remain separate ([decision 0023](../postmortems/0023-fixed-durable-record-budgets.md)).
@@ -140,6 +141,7 @@ Delivered:
 Still open:
 
 - Extend crash/soak coverage across every nonterminal Job and Orchestration phase and verify crash-left resource reporting; ownership itself does not clean resources it cannot prove it owns.
+- Attribute and prevent development/dogfood test commands that outlive their tool invocation; exact stale groups were contained, but the interrupted-tool path is not yet reproduced ([incident 0024](../postmortems/0024-stale-dogfood-test-processes.md)).
 
 ### Route-diagnostics slice admitted into Stage 1
 

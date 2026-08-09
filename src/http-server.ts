@@ -154,7 +154,10 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
       if (method === 'POST' && pathname === '/v1/jobs') {
         const started = await runtime.start(asJobRequest(await readJson(request)));
         activeJobs.set(started.job.id, started);
-        void started.completion.finally(() => activeJobs.delete(started.job.id));
+        void started.completion.then(
+          () => activeJobs.delete(started.job.id),
+          () => activeJobs.delete(started.job.id)
+        );
         sendJson(response, 202, { job: started.job });
         return;
       }
@@ -220,7 +223,10 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
         }
         const started = await runtime.startOrchestration(asOrchestrationRequest(await readJson(request)));
         activeOrchestrations.set(started.orchestration.id, started);
-        void started.completion.finally(() => activeOrchestrations.delete(started.orchestration.id));
+        void started.completion.then(
+          () => activeOrchestrations.delete(started.orchestration.id),
+          () => activeOrchestrations.delete(started.orchestration.id)
+        );
         sendJson(response, 202, { orchestration: started.orchestration });
         return;
       }

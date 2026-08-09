@@ -56,6 +56,14 @@ function sendSplitUtf8Frames(done) {
   });
 }
 
+function sendSplitUtf8Stderr(done) {
+  const encoded = Buffer.from(`discard-${'x'.repeat(4_096)}-before🙂after`, 'utf8');
+  const emojiStart = encoded.indexOf(Buffer.from('🙂', 'utf8'));
+  process.stderr.write(encoded.subarray(0, emojiStart + 1), () => {
+    setTimeout(() => process.stderr.write(encoded.subarray(emojiStart + 1), done), 20);
+  });
+}
+
 function handle(command) {
   if (command.type !== 'prompt') return;
 
@@ -80,6 +88,11 @@ function handle(command) {
           process.stderr.write('missing settlement fixture\n');
           process.exit(23);
         }, 50);
+      });
+      break;
+    case 'stderr-split-exit':
+      sendFrames([{ type: 'agent_start' }], true, () => {
+        sendSplitUtf8Stderr(() => process.exit(29));
       });
       break;
     case 'ignore-sigterm':

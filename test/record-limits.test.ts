@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -19,6 +19,8 @@ import {
   MAX_RESULT_OUTPUT_BYTES,
   MAX_WORKER_COMPLETION_REPORT_BYTES,
   MAX_WORKER_EVENTS,
+  limitText,
+  limitTextSuffix,
   utf8Bytes,
 } from '../src/record-limits.js';
 import { FileJobStore, MemoryJobStore } from '../src/store.js';
@@ -65,15 +67,36 @@ async function workspace(): Promise<string> {
 
 function orchestrator(
   script: ScriptedAdapter['script'],
-  options: { fetch?: typeof globalThis.fetch } = {}
+  options: { fetch?: typeof globalThis.fetch; store?: MemoryJobStore } = {}
 ): Orchestrator {
   return new Orchestrator({
     config,
-    store: new MemoryJobStore(),
+    store: options.store ?? new MemoryJobStore(),
     adapters: new Map([['test', new ScriptedAdapter(script)]]),
-    ...options,
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
 }
+
+test('text limit helpers preserve exact and partial ASCII, 2-byte, 3-byte, and 4-byte UTF-8 boundaries', () => {
+  for (const character of ['a', 'é', '€', '🙂']) {
+    const value = `prefix-${character}`;
+    const exactBytes = utf8Bytes(value);
+    assert.deepEqual(limitText(value, exactBytes), { value });
+
+    const bounded = limitText(value, exactBytes - 1);
+    assert.ok(utf8Bytes(bounded.value) <= exactBytes - 1);
+    assert.equal(bounded.value.includes('�'), false);
+    assert.deepEqual(bounded.truncation, { originalBytes: exactBytes, maxBytes: exactBytes - 1 });
+
+    const suffixBytes = utf8Bytes('suffix');
+    const suffix = limitTextSuffix(`${character}suffix`, suffixBytes);
+    assert.equal(suffix, 'suffix');
+    assert.ok(utf8Bytes(suffix) <= suffixBytes);
+    assert.equal(suffix.includes('�'), false);
+  }
+  assert.throws(() => limitText('x', 0.5), /non-negative safe integer/);
+  assert.throws(() => limitTextSuffix('x', -1), /non-negative safe integer/);
+});
 
 test('Job and Orchestration admission enforce shared prompt, metadata size, and metadata depth limits', async () => {
   const directory = await workspace();
@@ -175,6 +198,34 @@ test('worker event payloads and event count are bounded with one durable truncat
   });
 });
 
+test('non-serializable adapter event and result objects are replaced with bounded evidence', async () => {
+  const directory = await workspace();
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  const job = await orchestrator(async (_input, emit) => {
+    await emit('worker.raw', circular);
+    return { output: 'ok', metadata: circular };
+  }).run({ prompt: 'normalize objects', workspace: directory });
+  const evidence = {
+    agentknotRecordLimit: {
+      action: 'replaced',
+      reason: 'not-json-serializable',
+    },
+  };
+  const eventLimit = job.events.find((event) => event.type === 'worker.raw')?.data
+    ?.agentknotRecordLimit as Record<string, unknown>;
+  const metadataLimit = job.result?.metadata?.agentknotRecordLimit as Record<string, unknown>;
+
+  assert.deepEqual(
+    { agentknotRecordLimit: { action: eventLimit.action, reason: eventLimit.reason } },
+    evidence
+  );
+  assert.deepEqual(
+    { agentknotRecordLimit: { action: metadataLimit.action, reason: metadataLimit.reason } },
+    evidence
+  );
+});
+
 test('oversized structured worker reports are rejected without retaining them in terminal records', async () => {
   const directory = await workspace();
   const job = await orchestrator(async () => ({
@@ -246,6 +297,57 @@ test('memory and file stores reject oversized Job and Orchestration snapshots be
   );
   assert.deepEqual(await memoryJobs.list(), []);
   assert.deepEqual(await memoryOrchestrations.list(), []);
+
+  const admittedJob: JobRecord = {
+    ...job,
+    id: 'job_save_boundary',
+    request: { prompt: 'last good Job', workspace: directory },
+  };
+  const rejectedJob: JobRecord = {
+    ...admittedJob,
+    request: { ...admittedJob.request, metadata: { oversized } },
+  };
+  await memoryJobs.create(admittedJob);
+  await fileJobs.create(admittedJob);
+  const jobBytes = await readFile(path.join(directory, 'jobs', `${admittedJob.id}.json`));
+  await assert.rejects(memoryJobs.save(rejectedJob), /Job record is .* maximum is 16777216 bytes/);
+  await assert.rejects(fileJobs.save(rejectedJob), /Job record is .* maximum is 16777216 bytes/);
+  assert.deepEqual(await memoryJobs.get(admittedJob.id), admittedJob);
+  assert.deepEqual(await fileJobs.get(admittedJob.id), admittedJob);
+  assert.deepEqual(await readFile(path.join(directory, 'jobs', `${admittedJob.id}.json`)), jobBytes);
+  assert.deepEqual(await readdir(path.join(directory, 'jobs')), [`${admittedJob.id}.json`]);
+
+  const admittedOrchestration: OrchestrationRecord = {
+    ...orchestration,
+    id: 'orchestration_save_boundary',
+    request: { prompt: 'last good Orchestration', workspace: directory },
+  };
+  const rejectedOrchestration: OrchestrationRecord = {
+    ...admittedOrchestration,
+    request: { ...admittedOrchestration.request, metadata: { oversized } },
+  };
+  await memoryOrchestrations.create(admittedOrchestration);
+  await fileOrchestrations.create(admittedOrchestration);
+  const orchestrationBytes = await readFile(
+    path.join(directory, 'orchestrations', `${admittedOrchestration.id}.json`)
+  );
+  await assert.rejects(
+    memoryOrchestrations.save(rejectedOrchestration),
+    /Orchestration record is .* maximum is 16777216 bytes/
+  );
+  await assert.rejects(
+    fileOrchestrations.save(rejectedOrchestration),
+    /Orchestration record is .* maximum is 16777216 bytes/
+  );
+  assert.deepEqual(await memoryOrchestrations.get(admittedOrchestration.id), admittedOrchestration);
+  assert.deepEqual(await fileOrchestrations.get(admittedOrchestration.id), admittedOrchestration);
+  assert.deepEqual(
+    await readFile(path.join(directory, 'orchestrations', `${admittedOrchestration.id}.json`)),
+    orchestrationBytes
+  );
+  assert.deepEqual(await readdir(path.join(directory, 'orchestrations')), [
+    `${admittedOrchestration.id}.json`,
+  ]);
 });
 
 test('callback delivery is skipped when the independently serialized body exceeds its budget', async () => {
@@ -256,7 +358,11 @@ test('callback delivery is skipped when the independently serialized body exceed
     return new Response(null, { status: 204 });
   };
   const callbackUrl = `https://example.test/${'x'.repeat(9 * 1024 * 1024)}`;
-  const job = await orchestrator(async () => ({ output: 'ok' }), { fetch: fakeFetch }).run({
+  const store = new MemoryJobStore();
+  const job = await orchestrator(async () => ({ output: 'ok' }), {
+    fetch: fakeFetch,
+    store,
+  }).run({
     prompt: 'bound callback',
     workspace: directory,
     callbackUrl,
@@ -266,4 +372,5 @@ test('callback delivery is skipped when the independently serialized body exceed
   assert.equal(job.status, 'succeeded');
   assert.equal(job.callback?.delivered, false);
   assert.match(job.callback?.error ?? '', /Callback payload is .* maximum is 8388608 bytes/);
+  assert.deepEqual(await store.get(job.id), job);
 });

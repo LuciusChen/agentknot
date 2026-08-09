@@ -124,7 +124,7 @@ In `shadow` mode, `PlannedSubtask.route` remains `dispatch.defaultRoute`; eviden
 
 A `git-patch` artifact is controller-captured Git evidence from one isolated attempt. In addition to its attempt, managed path, size, SHA-256, and recorded base commit, it may expose `changedFiles`, a string array of repository-relative paths derived from Git. Newly captured git-worktree artifacts always include this field, including `[]` when the captured patch is empty. The paths describe repository changes relative to the recorded base; they are not worker claims, semantic verification, or a completion summary, and AgentKnot does not parse worker prose or tool events to populate them. Older persisted artifacts may omit `changedFiles` and remain valid.
 
-Leaf Job and Orchestration admission validate `metadata` recursively as a JSON-compatible object at both TypeScript and HTTP boundaries before persistence. Unsupported values, nesting beyond 20 levels, or compact JSON above 64 KiB fail before a record is admitted. Job and Orchestration prompts likewise fail admission above 64 KiB of UTF-8. File and HTTP transports therefore preserve one metadata and prompt contract; the HTTP request-body ceiling remains an independent transport limit.
+Leaf Job and Orchestration admission validate `metadata` recursively as a JSON-compatible object at both TypeScript and HTTP boundaries before persistence. Unsupported values, nesting beyond 20 levels, or compact JSON above 64 KiB fail before a record is admitted. Caller-supplied Job and Orchestration request prompts likewise fail admission above 64 KiB of UTF-8. Derived planner and child prompts pass through ordinary Job admission; the Pi completion-report instruction is appended later at its adapter boundary. File and HTTP transports therefore preserve one metadata and request-prompt contract; the HTTP request-body ceiling remains an independent transport limit.
 
 ### `JobCompletionSummary`
 
@@ -236,7 +236,7 @@ Current persistence does not provide:
 
 - `fsync` durability guarantees;
 - a journal or event log independent of snapshots;
-- multi-process locking or compare-and-swap updates;
+- distributed locking, compare-and-swap updates, or protection from writers that ignore the runtime's advisory locks;
 - schema migration;
 - restartable or resumable execution;
 - retention or compaction.
@@ -250,6 +250,8 @@ At execution-owning runtime startup, both storage locks are acquired before reco
 Every newly created parent `OrchestrationRecord` has top-level `schemaVersion: 1`. `FileOrchestrationStore` applies the same legacy-v1 materialization and read-only byte-stability rule, and explicitly unsupported schema versions fail clearly rather than being treated as v1.
 
 Memory and file Orchestration stores enforce the same 16 MiB exact-snapshot ceiling as the Job stores. Child output duplicated into parent provenance is therefore bounded by both the leaf output limit and the final parent snapshot limit.
+
+Parent admission atomically creates status `queued` with sequence-one `orchestration.queued`. Later event persistence appends in memory only for the duration of the save and rolls back the event and timestamp if the save fails, leaving the last successful store snapshot authoritative. A child `JobPersistenceError` remains a control-plane failure: the parent cancels other active children and propagates the rejection without fabricating a worker-style child outcome. A cancellation-evidence save failure is reported but cannot prevent abort propagation to the planner or active children. Parent and child files are not transactionally rolled back; restart reconciliation remains responsible for authoritative nonterminal snapshots after the owner exits.
 
 The stores assume one execution owner, enforced for conforming file runtimes at `createRuntime()` rather than inside each store call. They provide no compare-and-swap, journal, schema migration, resume, distributed concurrency, or parent/child transaction spanning multiple snapshot files.
 
@@ -304,10 +306,10 @@ A timeout aborts the same attempt signal. It is not a universal hard kill indepe
 
 When `callbackUrl` is supplied, AgentKnot currently:
 
-- makes one HTTP POST after terminal execution;
+- attempts at most one HTTP POST after terminal execution;
 - sends the complete job snapshot as JSON;
 - waits at most ten seconds for the request;
-- refuses to make the request when the compact JSON body exceeds 8 MiB and records the measured-size error as undelivered;
+- refuses to make the request when the compact JSON body exceeds 8 MiB and attempts to record the measured-size error as undelivered;
 - records delivery boolean, HTTP status, or error;
 - does not sign, authenticate, retry, deduplicate, or allowlist the request;
 - never converts a succeeded job to failed because callback delivery failed.
@@ -368,13 +370,13 @@ Current normalized worker event types are:
 - `worker.raw`
 - `worker.stderr`
 
-Core consumers may depend on the normalized event name, job ID, sequence, timestamp, and JSON-compatible data. They must not depend on an undocumented Pi RPC payload hidden inside `worker.raw`. Event `data` is limited to 16 KiB of stored JSON; an oversized or non-serializable object is replaced by `agentknotRecordLimit` evidence. Each Job retains at most 512 `worker.*` events. The first excess event is represented by one persisted `job.worker.events.truncated` carrying the cap and first dropped type; later worker events are neither persisted nor sent to the live observer. Lifecycle events are not counted, so terminal state can still be recorded after a worker-event flood.
+Core consumers may depend on the normalized event name, job ID, sequence, timestamp, and JSON-compatible data. They must not depend on an undocumented Pi RPC payload hidden inside `worker.raw`. Event `data` is normalized through JSON and limited to 16 KiB as a standalone pretty-printed value; an oversized, non-object, or non-serializable value is replaced by `agentknotRecordLimit` evidence. Each Job retains at most 512 `worker.*` events. The first excess event is represented by one persisted `job.worker.events.truncated` carrying the cap and first dropped type; later worker events are neither persisted nor sent to the live observer. Lifecycle events are not counted, so terminal state can still be recorded after a worker-event flood.
 
 ### Pi normal-run record-volume boundary
 
 For normal `PiRpcWorkerAdapter.run` executions only, exactly four Pi lifecycle envelope types are recognized as known bookkeeping frames: `turn_start`, `turn_end`, `message_start`, and `message_end`. The adapter does not emit `worker.raw` for those frames, but every received Pi frame still increments `metadata.rawEventCount`, including the four known envelopes; unknown event types continue to emit `worker.raw`. Normalized text, tool, and retry events, final output, completion-report behavior, live-probe behavior, route/provider/model/thinking configuration, and the global event-type list are unchanged. This is a bounded record-volume filter, not a Pi-token-saving claim or general truncation; it adds no schema migration or plugin installation and does not change configuration or probes.
 
-Terminal `result.output` retains at most a 1 MiB valid UTF-8 prefix. If shortened, `result.outputTruncation` records the original and maximum byte counts. Result metadata is limited to 64 KiB of stored object JSON and is replaced with structured evidence if oversized or non-serializable. Error names are limited to 256 bytes and messages to 16 KiB, with an inline original-byte notice when truncated. The supported Pi adapter retains the last 4,096 stderr characters before the global event-data and event-count limits apply.
+Terminal `result.output` retains at most a 1 MiB valid UTF-8 prefix. If shortened, `result.outputTruncation` records the original and maximum byte counts. Result metadata is JSON-normalized, limited to 64 KiB as a standalone pretty-printed object, and replaced with structured evidence if oversized or non-serializable. Error names are limited to 256 bytes and messages to 16 KiB, with an inline original-byte notice when truncated. The supported Pi adapter stream-decodes stderr and retains a valid UTF-8 suffix of at most 4 KiB before the global event-data and event-count limits apply.
 
 These record budgets do not limit worker compute, upstream provider token use, patch artifact bytes, or retention duration. Prompts, retained model output, stderr, tool data, metadata, and patches may contain sensitive user or repository content. No document may imply automatic redaction until that separate feature exists and is verified ([decision 0023](../postmortems/0023-fixed-durable-record-budgets.md)).
 
@@ -498,7 +500,7 @@ At minimum, the conformance suite must eventually prove:
 - configuration-only doctor wording, successful and failed/unsupported live-probe outcomes, timeout/abort cleanup, CLI exit behavior, exact Pi propagation of route thinking level, and normal-run completion-report prompt injection, valid/missing/malformed/unsupported parsing, output preservation, strict end anchoring, summary propagation, and live-probe exclusion;
 - strict planner validation, deterministic policy filtering, persisted-before-dispatch plan evidence, parent/child provenance, global process-local concurrency, and orchestration cancellation;
 - strict route-selection configuration rejection, candidate-route validation at config load, first-match/default behavior, zero-based match indexing, plan-hash coverage, shadow default-route authority, exact active-route dispatch, and public child metadata carrying task kind, parent complexity, and evidence;
-- supported concurrency and record-size limits once those claims exist.
+- the fixed documented concurrency and record-size limits under adversarial stress, including rejected writes and delivery refusal.
 
 Passing a unit test for an internal helper is not sufficient when a public transport, worker process, Git lifecycle, or persistence boundary changed.
 

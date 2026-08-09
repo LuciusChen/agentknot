@@ -7,6 +7,7 @@ import { isExecutorProcessAlive } from './execution.js';
 import { assertJsonMetadata } from './metadata.js';
 import {
   MAX_PROMPT_BYTES,
+  RecordSizeLimitError,
   assertTextLimit,
   limitErrorDetails,
   limitEventData,
@@ -30,7 +31,7 @@ import type {
   PlannedSubtask,
   StartOrchestrationResult,
 } from './orchestration-types.js';
-import type { Orchestrator } from './orchestrator.js';
+import { JobPersistenceError, type Orchestrator } from './orchestrator.js';
 import type { JobRecord } from './types.js';
 
 export interface OrchestrationServiceOptions {
@@ -223,8 +224,9 @@ export class OrchestrationService {
     }
 
     const now = this.#now().toISOString();
+    const id = `orchestration_${randomUUID()}`;
     const record: OrchestrationRecord = {
-      id: `orchestration_${randomUUID()}`,
+      id,
       schemaVersion: 1,
       status: 'queued',
       request: normalized,
@@ -232,17 +234,22 @@ export class OrchestrationService {
       createdAt: now,
       updatedAt: now,
       execution: { runtimeId: this.#runtimeId, pid: process.pid, startedAt: now },
-      events: [],
+      events: [
+        {
+          sequence: 1,
+          orchestrationId: id,
+          at: now,
+          type: 'orchestration.queued',
+          data: { source: normalized.source ?? 'unknown', mode: this.#config.mode },
+        },
+      ],
       children: [],
     };
     const controller = new AbortController();
     await this.#store.create(record);
-    await this.#appendEvent(record, 'orchestration.queued', {
-      source: normalized.source ?? 'unknown',
-      mode: record.policy.mode,
-    });
 
     const completion = this.#execute(record, controller.signal).catch(async (error: unknown) => {
+      if (error instanceof JobPersistenceError || error instanceof RecordSizeLimitError) throw error;
       if (record.status !== 'failed' && record.status !== 'cancelled') {
         const details = errorDetails(error);
         record.status = controller.signal.aborted ? 'cancelled' : 'failed';
@@ -264,14 +271,22 @@ export class OrchestrationService {
       cancel: async () => {
         if (controller.signal.aborted || ['succeeded', 'failed', 'cancelled'].includes(record.status)) return;
         const requestedAt = this.#now().toISOString();
+        const previousCancelRequestedAt = record.cancelRequestedAt;
         record.cancelRequestedAt = requestedAt;
-        await this.#appendEvent(
-          record,
-          'orchestration.cancel.requested',
-          { source: 'controller' },
-          requestedAt
-        );
-        controller.abort(new Error('Orchestration cancelled by controller'));
+        try {
+          await this.#appendEvent(
+            record,
+            'orchestration.cancel.requested',
+            { source: 'controller' },
+            requestedAt
+          );
+        } catch (error) {
+          if (previousCancelRequestedAt === undefined) delete record.cancelRequestedAt;
+          else record.cancelRequestedAt = previousCancelRequestedAt;
+          throw error;
+        } finally {
+          controller.abort(new Error('Orchestration cancelled by controller'));
+        }
       },
     };
   }
@@ -523,6 +538,7 @@ export class OrchestrationService {
         if (settled.outcome.job.result) settled.item.child.output = settled.outcome.job.result.output;
         if (settled.outcome.job.error) settled.item.child.error = structuredClone(settled.outcome.job.error);
       } else {
+        if (settled.outcome.error instanceof JobPersistenceError) throw settled.outcome.error;
         const details = errorDetails(settled.outcome.error);
         settled.item.child.status = signal.aborted ? 'cancelled' : 'failed';
         settled.item.child.error = { ...details, attempt: 0, retryable: false };
@@ -563,6 +579,7 @@ export class OrchestrationService {
     let appended: OrchestrationEvent | undefined;
     const previous = this.#recordMutations.get(record.id) ?? Promise.resolve();
     const current = previous.then(async () => {
+      const previousUpdatedAt = record.updatedAt;
       const event: OrchestrationEvent = {
         sequence: record.events.length + 1,
         orchestrationId: record.id,
@@ -573,7 +590,13 @@ export class OrchestrationService {
       appended = event;
       record.events.push(event);
       record.updatedAt = at;
-      await this.#store.save(record);
+      try {
+        await this.#store.save(record);
+      } catch (error) {
+        if (record.events.at(-1) === event) record.events.pop();
+        record.updatedAt = previousUpdatedAt;
+        throw error;
+      }
     });
     this.#recordMutations.set(record.id, current);
     try {

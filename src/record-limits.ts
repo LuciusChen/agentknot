@@ -7,6 +7,7 @@ export const MAX_RESULT_OUTPUT_BYTES = 1024 * 1024;
 export const MAX_WORKER_COMPLETION_REPORT_BYTES = 256 * 1024;
 export const MAX_ERROR_NAME_BYTES = 256;
 export const MAX_ERROR_MESSAGE_BYTES = 16 * 1024;
+export const MAX_PI_STDERR_BYTES = 4 * 1024;
 export const MAX_JOB_RECORD_BYTES = 16 * 1024 * 1024;
 export const MAX_ORCHESTRATION_RECORD_BYTES = 16 * 1024 * 1024;
 export const MAX_CALLBACK_BODY_BYTES = 8 * 1024 * 1024;
@@ -32,7 +33,14 @@ export function utf8Bytes(value: string): number {
   return Buffer.byteLength(value, 'utf8');
 }
 
+function assertByteBudget(maxBytes: number): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError('maxBytes must be a non-negative safe integer');
+  }
+}
+
 export function assertTextLimit(label: string, value: string, maxBytes: number): void {
+  assertByteBudget(maxBytes);
   const actualBytes = utf8Bytes(value);
   if (actualBytes > maxBytes) {
     throw new Error(`${label} is ${actualBytes} bytes; maximum is ${maxBytes} bytes`);
@@ -43,6 +51,7 @@ export function limitText(
   value: string,
   maxBytes: number
 ): { value: string; truncation?: TextTruncation } {
+  assertByteBudget(maxBytes);
   const encoded = Buffer.from(value, 'utf8');
   if (encoded.byteLength <= maxBytes) return { value };
 
@@ -52,6 +61,16 @@ export function limitText(
     value: encoded.subarray(0, end).toString('utf8'),
     truncation: { originalBytes: encoded.byteLength, maxBytes },
   };
+}
+
+export function limitTextSuffix(value: string, maxBytes: number): string {
+  assertByteBudget(maxBytes);
+  const encoded = Buffer.from(value, 'utf8');
+  if (encoded.byteLength <= maxBytes) return value;
+
+  let start = encoded.byteLength - maxBytes;
+  while (start < encoded.byteLength && (encoded[start]! & 0xc0) === 0x80) start += 1;
+  return encoded.subarray(start).toString('utf8');
 }
 
 export function limitErrorDetails(error: unknown): { name: string; message: string } {
@@ -80,9 +99,15 @@ export function limitObjectData(
   field: string,
   maxBytes: number
 ): Record<string, unknown> {
+  assertByteBudget(maxBytes);
   try {
-    const actualBytes = utf8Bytes(JSON.stringify(data, null, 2));
-    if (actualBytes <= maxBytes) return data;
+    const serialized = JSON.stringify(data, null, 2);
+    const normalized: unknown = JSON.parse(serialized);
+    if (typeof normalized !== 'object' || normalized === null || Array.isArray(normalized)) {
+      throw new Error('serialized value is not an object');
+    }
+    const actualBytes = utf8Bytes(serialized);
+    if (actualBytes <= maxBytes) return normalized as Record<string, unknown>;
     return {
       agentknotRecordLimit: {
         field,
