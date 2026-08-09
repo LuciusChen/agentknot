@@ -42,7 +42,7 @@ The active rule is a human choice, not a claim that DeepSeek is objectively best
 - [x] Deterministic policy tests cover active rule match, conservative default, plan-hash impact, and unchanged shadow behavior.
 - [x] Orchestration tests prove the selected route reaches the persisted plan, child-start event, resolved Job, and public child metadata.
 - [x] Re-run exact live probes for both Luna/max and DeepSeek Flash/max with no fallback; both succeeded on 2026-08-09.
-- [ ] Complete one real low-complexity dogfood orchestration through the active DeepSeek rule and verify its artifact upstream.
+- [x] Complete a real low-complexity dogfood orchestration through the active DeepSeek rule: `orchestration_97ce1a83-13a5-4bd1-b2b4-e2d7afd93106` dispatched two independent children on `deepseek-flash`; both resolved Pi/OpenCode Go/DeepSeek V4 Flash/max, succeeded, and produced checksum/base-valid single-file artifacts. Upstream rejected the verbose patches as-is and integrated their test intent compactly to avoid fixture duplication.
 - [ ] Keep automatic/learned ranking deferred until separate comparable scorecards and an explicit decision gate exist.
 
 ## Privacy and security review

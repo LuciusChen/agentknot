@@ -242,7 +242,16 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
     delegation: {
       mode: 'off',
       planner: { strategy: 'hybrid', route: 'mock' },
-      dispatch: { defaultRoute: 'mock', maxChildren: 2, maxDepth: 1, maxConcurrency: 1 },
+      dispatch: {
+        defaultRoute: 'mock',
+        maxChildren: 2,
+        maxDepth: 1,
+        maxConcurrency: 1,
+        routeSelection: {
+          mode: 'active',
+          rules: [{ route: 'mock', complexities: ['low'] }],
+        },
+      },
       policy: { delegate: ['documentation'], keepUpstream: ['commit', 'push'] },
       fallback: 'upstream',
     },
@@ -265,8 +274,8 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
   try {
     const policyResponse = await fetch(`${baseUrl}/v1/delegation`);
     assert.equal(policyResponse.status, 200);
-    const policy = (await policyResponse.json()) as { delegation: { mode: string } };
-    assert.equal(policy.delegation.mode, 'off');
+    const policy = (await policyResponse.json()) as { delegation: typeof config.delegation };
+    assert.deepEqual(policy.delegation, config.delegation);
 
     const createdResponse = await fetch(`${baseUrl}/v1/orchestrations`, {
       method: 'POST',

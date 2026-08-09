@@ -31,8 +31,17 @@ async function createModeOffFixture(): Promise<CliFixture> {
         defaultRoute: 'mock',
         storage: { directory: 'jobs', orchestrationDirectory: 'orchestrations' },
         workers: { mock: { adapter: 'mock' } },
-        routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
-        delegation: { mode: 'off' },
+        routes: {
+          mock: { worker: 'mock', provider: 'mock', model: 'mock' },
+          alternate: { worker: 'mock', provider: 'mock', model: 'alternate' },
+        },
+        delegation: {
+          mode: 'off',
+          dispatch: {
+            defaultRoute: 'alternate',
+            routeSelection: { mode: 'active', rules: [{ route: 'mock' }] },
+          },
+        },
       },
       null,
       2
@@ -147,10 +156,16 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
   assert.equal(record.result?.action, 'upstream');
   assert.deepEqual(record.children, []);
 
+  const humanDelegation = await runCli(fixture.configPath, 'delegation');
+  assert.match(humanDelegation.stdout, /\tworker-default=alternate\t/);
+  assert.match(humanDelegation.stdout, /\troute-selection=active\t/);
+
   const delegation = await runCli(fixture.configPath, 'delegation', '--json');
   const policy = JSON.parse(delegation.stdout) as DelegationConfig;
   assert.equal(policy.mode, 'off');
   assert.equal(policy.planner.route, 'mock');
+  assert.equal(policy.dispatch.defaultRoute, 'alternate');
+  assert.equal(policy.dispatch.routeSelection?.mode, 'active');
 
   const list = await runCli(fixture.configPath, 'orchestrations', '--json');
   const records = JSON.parse(list.stdout) as OrchestrationRecord[];
