@@ -104,6 +104,7 @@ Version 0.0.1 currently implements:
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
 - read-only artifact listing, integrity/base verification, and bounded patch preview through TypeScript, CLI, and HTTP;
+- additive delegated-parent artifact review that compares controller-captured terminal paths, reports exact path overlap as potential integration-conflict evidence, and marks missing child evidence incomplete;
 - additive schemaVersion 1 terminal Job completion summaries with terminal outcome/attempt, controller-captured artifact path provenance, and explicit unavailable states; strict worker completion reports are accepted from custom adapters and normal Pi runs, with missing or malformed Pi envelopes remaining advisory; deterministic coverage and a real Pi/OpenCode Go/Luna/max dogfood emission satisfy the evidence gate;
 - configuration validation and explicit configuration-only and opt-in live route diagnostics;
 - canonical HTTP process liveness that explicitly reports storage, routes, and inference as not checked, without claiming route readiness.
@@ -154,7 +155,9 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 7. AgentKnot begins execution, prepares an isolated attempt when configured, and invokes the route's worker adapter.
 8. The adapter translates worker activity into normalized events while AgentKnot owns state, timeout, retry, cancellation, persistence, and cleanup.
 9. AgentKnot captures the terminal attempt artifact, builds the completion summary, and persists it before the terminal event is delivered.
-10. The controller inspects the parent/child evidence and explicitly decides whether to promote an artifact outside AgentKnot.
+10. For delegated work, AgentKnot compares each child's controller-captured terminal paths. Exact paths owned by multiple children are persisted as potential integration conflicts; missing evidence makes the review incomplete. This does not replace artifact integrity/base verification or prove semantic compatibility.
+11. The controller verifies and previews the selected child artifacts, reviews overlap and unavailable evidence, and deliberately accepts or rejects the artifact or child set upstream. That review decision does not mutate Job/Orchestration state or the source repository.
+12. Only after acceptance may the controller perform a separate explicit promotion in its own repository workflow. AgentKnot does not automatically apply, commit, merge, or push artifacts.
 
 If event, artifact-recording, or terminal persistence fails after admission, the leaf completion rejects as a control-plane persistence failure. It does not retry the worker, invent a failed terminal result, or deliver a terminal callback; the last successfully persisted snapshot remains authoritative and unrecorded patch evidence is removed.
 
@@ -183,6 +186,7 @@ The product remains on course when all of the following are true:
 - new leaf Job and Orchestration records carry `schemaVersion: 1`, legacy file reads remain byte-stable, and unsupported explicit versions fail rather than defaulting to v1;
 - Git worktree mode leaves the source workspace clean and returns artifacts without applying them;
 - controllers can verify and preview recorded artifacts without source mutation, while acceptance and promotion remain explicit upstream decisions;
+- delegated parent results compare terminal controller-captured paths deterministically, report repeated paths without calling them semantic conflicts, and mark missing evidence incomplete rather than clean;
 - retries start from the same recorded base rather than prior-attempt edits;
 - credentials are not intentionally copied into configuration, records, events, logs, callbacks, or artifact metadata;
 - local records and artifacts remain until deliberate exact operator deletion, with no automatic expiry, cascade deletion, or content-redaction claim;
@@ -208,6 +212,7 @@ These are evidence requirements, not claims that the current MVP has already met
 - Raw worker events, prompts, output, and tool results remain capable of containing sensitive content even though their admitted or persisted representations now have fixed byte/count budgets; size bounds are not redaction.
 - Local snapshots and patch artifacts are retained indefinitely by default; operators must control filesystem access and deliberately delete exact inactive records because Stage 1 has no automatic retention service or purge API.
 - Worker completion reports are claims at the adapter boundary; accepting their strict shape does not verify changed paths, check outcomes, remaining risks, or notes.
+- Exact child path overlap is conservative potential-conflict evidence: same-path patches can be compatible, disjoint paths can still be semantically coupled, and every selected artifact still requires integrity/base review.
 - A custom adapter may ignore cooperative cancellation unless the adapter contract and process supervision enforce termination.
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete bounded job record when its serialized body is no more than 8 MiB.
 - A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk. Shadow suggestions and active configured routing both inherit the limits of the parent complexity and task-kind classification; active mode therefore keeps a conservative Luna default and never adds fallback.

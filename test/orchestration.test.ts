@@ -108,6 +108,31 @@ class PlannerAndWorkerAdapter implements WorkerAdapter {
   }
 }
 
+class ArtifactWritingAdapter implements WorkerAdapter {
+  readonly name = 'test';
+
+  constructor(
+    readonly assessment: TaskAssessment,
+    readonly pathsByPrompt: Map<string, string[]>
+  ) {}
+
+  async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
+    return { ok: true, message: 'artifact-writing adapter ready' };
+  }
+
+  async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
+    await emit('worker.started', { route: input.route.name });
+    if (input.route.name === 'planner') return { output: JSON.stringify(this.assessment) };
+    for (const [prompt, changedPaths] of this.pathsByPrompt) {
+      if (!input.prompt.includes(prompt)) continue;
+      for (const changedPath of changedPaths) {
+        await writeFile(path.join(input.workspace, changedPath), `${prompt}\n`);
+      }
+    }
+    return { output: `completed ${input.route.name}` };
+  }
+}
+
 class BlockingPlannerAdapter implements WorkerAdapter {
   readonly name = 'test';
   activeRuns = 0;
@@ -350,6 +375,11 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
   assert.equal(record.children.every((child) => child.policyVersion === 1), true);
   assert.equal(record.result?.action, 'delegated');
   assert.equal(record.result?.children.length, 2);
+  assert.deepEqual(record.result?.artifactReview, {
+    status: 'checked',
+    conflicts: [],
+    unavailable: [],
+  });
   assert.equal(adapter.workerRuns, 2);
   assert.equal(adapter.peakWorkers, 1);
   assert.ok(
@@ -370,6 +400,96 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
     assert.equal(provenance.planHash, record.plan?.planHash);
     assert.equal(provenance.policyVersion, 1);
   }
+});
+
+test('OrchestrationService flags deterministic child artifact path overlaps', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-artifact-overlap-');
+  const overlapAssessment: TaskAssessment = {
+    ...assessment,
+    taskKinds: ['test-gap-analysis'],
+    subtasks: [
+      {
+        title: 'First artifact',
+        kind: 'test-gap-analysis',
+        prompt: 'Produce first artifact.',
+        acceptanceCriteria: ['First artifact is captured'],
+      },
+      {
+        title: 'Second artifact',
+        kind: 'test-gap-analysis',
+        prompt: 'Produce second artifact.',
+        acceptanceCriteria: ['Second artifact is captured'],
+      },
+      {
+        title: 'Third artifact',
+        kind: 'test-gap-analysis',
+        prompt: 'Produce third artifact.',
+        acceptanceCriteria: ['Third artifact is captured'],
+      },
+    ],
+  };
+  const adapter = new ArtifactWritingAdapter(
+    overlapAssessment,
+    new Map([
+      ['Produce first artifact.', ['first.ts', 'shared-a.ts', 'shared-b.ts']],
+      ['Produce second artifact.', ['second.ts', 'shared-a.ts', 'shared-b.ts']],
+      ['Produce third artifact.', ['third.ts', 'shared-b.ts']],
+    ])
+  );
+  const { orchestrations, orchestrationStore } = createServices(adapter, 3, 1, 3);
+
+  const record = await orchestrations.run({ prompt: 'Produce three isolated artifacts.', workspace });
+  const subtaskIds = record.plan?.subtasks.map((subtask) => subtask.id);
+  assert.ok(subtaskIds);
+  assert.deepEqual(record.result?.artifactReview, {
+    status: 'checked',
+    conflicts: [
+      { path: 'shared-a.ts', subtaskIds: subtaskIds.slice(0, 2) },
+      { path: 'shared-b.ts', subtaskIds },
+    ],
+    unavailable: [],
+  });
+  assert.deepEqual((await orchestrationStore.get(record.id))?.result?.artifactReview, record.result?.artifactReview);
+  assert.equal((await execFileAsync('git', ['status', '--short'], { cwd: workspace })).stdout, '');
+});
+
+test('OrchestrationService marks missing terminal child evidence as incomplete', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-artifact-incomplete-');
+  const adapter = new PlannerAndWorkerAdapter(assessment);
+  const { jobs, orchestrations } = createServices(adapter, 2);
+  const getJob = jobs.get.bind(jobs);
+  jobs.get = async (id) => {
+    const job = await getJob(id);
+    if (
+      job?.status === 'succeeded' &&
+      (job.request.metadata?.agentknotDelegation as Record<string, unknown> | undefined)?.role ===
+        'worker' &&
+      job.request.prompt.includes('Update documentation')
+    ) {
+      const legacy = structuredClone(job);
+      delete legacy.completionSummary;
+      return legacy;
+    }
+    return job;
+  };
+
+  const record = await orchestrations.run({ prompt: 'Review incomplete evidence.', workspace });
+  const unavailableChild = record.children.find((child) => {
+    const subtask = record.plan?.subtasks.find((candidate) => candidate.id === child.subtaskId);
+    return subtask?.prompt.includes('Update documentation');
+  });
+  assert.ok(unavailableChild);
+  assert.deepEqual(record.result?.artifactReview, {
+    status: 'incomplete',
+    conflicts: [],
+    unavailable: [
+      {
+        subtaskId: unavailableChild.subtaskId,
+        jobId: unavailableChild.jobId,
+        reason: 'completion-summary-unavailable',
+      },
+    ],
+  });
 });
 
 test('OrchestrationService keeps shadow suggestions out of child route authority and preserves metadata', async () => {

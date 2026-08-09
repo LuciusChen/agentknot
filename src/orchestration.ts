@@ -22,6 +22,7 @@ import {
 import type {
   AgentKnotDelegationMetadata,
   DelegationPlan,
+  OrchestrationArtifactReview,
   OrchestrationChild,
   OrchestrationEvent,
   OrchestrationEventType,
@@ -336,7 +337,11 @@ export class OrchestrationService {
     await this.#dispatch(record, plan.subtasks, dispatchConcurrency, signal);
     throwIfAborted(signal);
 
-    record.result = { action: 'delegated', children: structuredClone(record.children) };
+    record.result = {
+      action: 'delegated',
+      children: structuredClone(record.children),
+      artifactReview: await this.#reviewChildArtifacts(record.children),
+    };
     const failedChildren = record.children.filter((child) => child.status !== 'succeeded');
     record.completedAt = this.#now().toISOString();
     if (failedChildren.length > 0) {
@@ -362,6 +367,71 @@ export class OrchestrationService {
       );
     }
     return structuredClone(record);
+  }
+
+  async #reviewChildArtifacts(
+    children: OrchestrationChild[]
+  ): Promise<OrchestrationArtifactReview> {
+    const ownersByPath = new Map<string, string[]>();
+    const unavailable: OrchestrationArtifactReview['unavailable'] = [];
+
+    for (const child of children) {
+      const job = await this.#jobs.get(child.jobId);
+      if (!job) {
+        unavailable.push({
+          subtaskId: child.subtaskId,
+          jobId: child.jobId,
+          reason: 'job-not-found',
+        });
+        continue;
+      }
+      const changedFiles = job.completionSummary?.changedFiles;
+      if (
+        !changedFiles ||
+        (changedFiles.status !== 'captured' && changedFiles.status !== 'unavailable')
+      ) {
+        unavailable.push({
+          subtaskId: child.subtaskId,
+          jobId: child.jobId,
+          reason: 'completion-summary-unavailable',
+        });
+        continue;
+      }
+      if (changedFiles.status === 'unavailable') {
+        unavailable.push({
+          subtaskId: child.subtaskId,
+          jobId: child.jobId,
+          reason: changedFiles.reason,
+        });
+        continue;
+      }
+      if (
+        !Array.isArray(changedFiles.paths) ||
+        !changedFiles.paths.every((item) => typeof item === 'string')
+      ) {
+        unavailable.push({
+          subtaskId: child.subtaskId,
+          jobId: child.jobId,
+          reason: 'artifact-paths-unavailable',
+        });
+        continue;
+      }
+      for (const changedPath of new Set(changedFiles.paths)) {
+        const owners = ownersByPath.get(changedPath) ?? [];
+        owners.push(child.subtaskId);
+        ownersByPath.set(changedPath, owners);
+      }
+    }
+
+    const conflicts = [...ownersByPath]
+      .filter(([, subtaskIds]) => subtaskIds.length > 1)
+      .map(([changedPath, subtaskIds]) => ({ path: changedPath, subtaskIds }))
+      .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+    return {
+      status: unavailable.length === 0 ? 'checked' : 'incomplete',
+      conflicts,
+      unavailable,
+    };
   }
 
   async #plan(record: OrchestrationRecord, signal: AbortSignal): Promise<DelegationPlan> {

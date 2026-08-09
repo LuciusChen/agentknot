@@ -1,5 +1,10 @@
 import type { DelegationConfig, DelegationMode } from './config.js';
-import type { JobError, JobExecution, JobStatus } from './types.js';
+import type {
+  JobCompletionSummaryChangedFilesUnavailableReason,
+  JobError,
+  JobExecution,
+  JobStatus,
+} from './types.js';
 
 export const ORCHESTRATION_STATUSES = [
   'queued',
@@ -148,9 +153,28 @@ export interface OrchestrationChild {
   error?: JobError;
 }
 
+export type OrchestrationArtifactReviewUnavailableReason =
+  | 'job-not-found'
+  | 'completion-summary-unavailable'
+  | JobCompletionSummaryChangedFilesUnavailableReason;
+
+export interface OrchestrationArtifactReview {
+  /** `checked` means path evidence was available for every child, not that patches are compatible. */
+  status: 'checked' | 'incomplete';
+  /** Exact path overlap is conservative review evidence, not semantic conflict verification. */
+  conflicts: Array<{ path: string; subtaskIds: string[] }>;
+  unavailable: Array<{
+    subtaskId: string;
+    jobId: string;
+    reason: OrchestrationArtifactReviewUnavailableReason;
+  }>;
+}
+
 export interface OrchestrationResult {
   action: 'upstream' | 'suggested' | 'delegated';
   children: OrchestrationChild[];
+  /** Present only for newly completed delegated results. */
+  artifactReview?: OrchestrationArtifactReview;
 }
 
 export interface OrchestrationError {

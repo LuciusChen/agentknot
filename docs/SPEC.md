@@ -56,7 +56,9 @@ The controller, worker, provider, and model are separate concepts:
 | HTTP transport and active-request map | HTTP server | worker protocols |
 | Artifact listing, verification, and preview | orchestrator/workspace manager | worker adapter or execution loop |
 | Terminal completion summary and provenance ordering | orchestrator with workspace-manager artifact evidence | worker adapter/provider claims |
-| Artifact acceptance/application | external controller or human | AgentKnot execution loop |
+| Child artifact path-overlap review | orchestration service using terminal Job evidence | worker/planner claims or semantic diff parsing |
+| Artifact acceptance/rejection | external controller or human | Job/Orchestration terminal state |
+| Artifact promotion/application | external controller or human | AgentKnot execution loop |
 
 Moving a responsibility across this table requires a SPEC update and a decision record before implementation.
 
@@ -145,6 +147,31 @@ interface JobCompletionSummary {
 ```
 
 The captured branch copies only `changedFiles` from the artifact whose attempt equals the terminal attempt and carries that artifact's attempt, SHA-256, and base commit; it never calls those paths semantically verified. Direct workspace mode reports `workspace-isolation-disabled`, a missing terminal-attempt artifact reports `artifact-unavailable`, and an artifact without usable path evidence reports `artifact-paths-unavailable`. Earlier retry artifacts remain in `JobRecord.artifacts` and are not summarized as terminal evidence.
+
+### `OrchestrationResult.artifactReview`
+
+Every newly produced `action: "delegated"` orchestration result adds `artifactReview`; legacy, upstream, and suggested results may omit it. The controller-neutral shape is:
+
+```ts
+interface OrchestrationArtifactReview {
+  status: 'checked' | 'incomplete';
+  conflicts: Array<{ path: string; subtaskIds: string[] }>;
+  unavailable: Array<{
+    subtaskId: string;
+    jobId: string;
+    reason:
+      | 'job-not-found'
+      | 'completion-summary-unavailable'
+      | 'workspace-isolation-disabled'
+      | 'artifact-unavailable'
+      | 'artifact-paths-unavailable';
+  }>;
+}
+```
+
+The orchestration service reads each child's terminal `JobCompletionSummary.changedFiles`. It deduplicates paths within that child, groups exact repository-relative paths across distinct children, sorts conflicts by path, and preserves parent child order in `subtaskIds`. Worker reports, prose, planner scopes, events, stderr, and artifacts from earlier retry attempts never participate.
+
+`checked` means usable captured path evidence was available for every child, including a captured empty array. `incomplete` means at least one child lacked usable evidence and cannot be interpreted as a clean handoff; conflicts among the remaining evidence are still reported. A conflict is conservative potential integration-conflict evidence, not proof that same-path changes are incompatible. Conversely, no conflict does not prove semantic independence, patch integrity, current-base applicability, or acceptance. The additive result is persisted before the existing terminal orchestration event and is carried by existing TypeScript, CLI full-record, and HTTP full-record surfaces without a new endpoint or event.
 
 `WorkerCompletionReport` is an optional adapter result, not a Job result field. A strict schemaVersion 1 report contains worker-claimed `changedFiles: string[]`, `checksRun` entries with a non-empty `command`, `outcome` of `passed`, `failed`, or `unknown`, and optional string `notes`, plus `remainingRisks: string[]` and `notes: string[]`. At the adapter boundary, `completionReport: undefined` means no report envelope was detected and `completionReport: null` means an envelope was detected but its JSON was malformed or unsupported; a valid value is copied only after strict validation and a 256 KiB compact-JSON ceiling. The orchestrator maps an absent, malformed, or oversized report to the stable unavailable branch without failing an otherwise successful job. Failed or cancelled Jobs without a retained normal result use `not-retained`. AgentKnot never derives this report from output prose, normalized worker events, stderr, or session statistics. Normal Pi runs can emit the report through the exact marked suffix described below; live probes and doctor do not. Deterministic coverage and a real Pi/OpenCode Go/Luna/max dogfood emission satisfy the Stage 1 evidence gate.
 
@@ -346,7 +373,7 @@ The parent plan and `orchestration.planned` event are persisted before the first
 
 Planner and child jobs are launched through `Orchestrator.start()`. One shared semaphore caps all active planner and child worker executions across all parent orchestrations in one `OrchestrationService`; this is process-local and not a restartable or multi-process queue. `Orchestrator.start()` itself has no capacity semaphore, so independent callers that issue concurrent direct leaf Jobs bypass `delegation.dispatch.maxConcurrency` and own admission control. For a parallel parent, the dispatcher fills at most `maxConcurrency` slots from the persisted subtask pool, starts fewer workers when fewer tasks exist, and immediately admits the next pending subtask when a child settles. A parent whose validated assessment has `parallelizable: false` receives an effective child concurrency of one even when the configured global cap is higher. If persistence of the parent planner-start or child-start evidence fails after leaf admission, AgentKnot cancels and awaits that admitted job before failing the parent. `maxDepth` is exactly one in v1, and the orchestration engine does not recursively submit its own children. Worker prompts prohibit recursive delegation, commit, push, merge, or artifact application. Because the local HTTP API is unauthenticated, v1 cannot prevent a worker with host access from independently invoking a new orchestration; depth one is an engine invariant, not a hostile-worker security boundary.
 
-Cancellation first persists `cancelRequestedAt` and `orchestration.cancel.requested`, then aborts the planner or active children and prevents later children from launching. Cancellation is process-local and cooperative through the underlying adapter. The parent completes only after launched child jobs settle. One or more non-succeeded children make a delegated parent failed; AgentKnot does not integrate their patch artifacts.
+Cancellation first persists `cancelRequestedAt` and `orchestration.cancel.requested`, then aborts the planner or active children and prevents later children from launching. Cancellation is process-local and cooperative through the underlying adapter. The parent completes only after launched child jobs settle. The service then computes the additive artifact review before persisting the existing terminal event. One or more non-succeeded children make a delegated parent failed; AgentKnot does not integrate their patch artifacts.
 
 ## Events
 
@@ -447,7 +474,7 @@ There is no authentication, authorization, TLS termination, CORS policy, rate li
 - A worker has the operating-system permissions of its process.
 - Worktree isolation is not a filesystem, process, credential, or network sandbox.
 - Callback URLs can cause outbound requests from the AgentKnot host and receive the complete job snapshot when its compact JSON is no more than 8 MiB.
-- The current system has fixed record-size budgets but no retention or automatic redaction policy.
+- The current system has fixed record/artifact budgets and an indefinite local-retention policy, but no automatic expiry, purge, or content-redaction mechanism.
 
 ## Capability evolution
 
@@ -477,6 +504,7 @@ Human-authored active route selection does not satisfy or claim a model-ranking 
 - New optional fields may be added compatibly; changing state or event semantics requires a versioned contract and migration decision. `JobArtifact.changedFiles` is optional when reading persisted records, while newly captured git-worktree artifacts always emit an array.
 - `delegation.dispatch.routeSelection` is optional configuration, and its shadow/active evidence is additive plan/metadata evidence; omission remains disabled and does not change persisted Job or Orchestration `schemaVersion: 1`.
 - `JobRecord.completionSummary` is optional for legacy v1 reads; existing records without it are not rewritten, while newly terminal records produced by this runtime include the additive summary.
+- `OrchestrationResult.artifactReview` is optional for legacy/upstream/suggested results; newly terminal delegated results include the additive review without changing record schemaVersion 1.
 - `WorkerRunResult.completionReport` is optional at the adapter boundary: `undefined` is absent, `null` is a detected malformed or unsupported envelope, and a non-null value is strictly validated before it enters a summary; custom adapters that return only `output` remain valid.
 - One wire payload should have one canonical type/schema. HTTP, CLI, callbacks, and TypeScript APIs must not describe the same payload independently without a mechanical compatibility check.
 - Worker-specific transport fields belong in adapter-owned metadata or raw evidence, not in the controller-neutral top-level contract; the explicitly versioned `WorkerCompletionReport` is the narrow route-neutral exception for worker claims under `JobCompletionSummary.workerReported`.
@@ -503,6 +531,7 @@ At minimum, the conformance suite must eventually prove:
 - documented crash/restart behavior;
 - configuration-only doctor wording, successful and failed/unsupported live-probe outcomes, timeout/abort cleanup, CLI exit behavior, exact Pi propagation of route thinking level, and normal-run completion-report prompt injection, valid/missing/malformed/unsupported parsing, output preservation, strict end anchoring, summary propagation, and live-probe exclusion;
 - strict planner validation, deterministic policy filtering, persisted-before-dispatch plan evidence, parent/child provenance, global process-local concurrency, and orchestration cancellation;
+- delegated parent artifact review for captured empty/disjoint paths, exact grouped multi-child overlaps, incomplete evidence, deterministic ordering, persistence before terminal observation, and source nonmutation;
 - strict route-selection configuration rejection, candidate-route validation at config load, first-match/default behavior, zero-based match indexing, plan-hash coverage, shadow default-route authority, exact active-route dispatch, and public child metadata carrying task kind, parent complexity, and evidence;
 - the fixed documented concurrency and record-size limits under adversarial stress, including rejected writes and delivery refusal.
 
