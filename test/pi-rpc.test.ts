@@ -572,6 +572,57 @@ test('PiRpcWorkerAdapter speaks JSONL RPC and normalizes Pi events', async () =>
   assert.equal(events.filter((event) => event === 'worker.text.delta').length, 2);
 });
 
+test('PiRpcWorkerAdapter filters Pi lifecycle envelopes while counting every normal-run frame', async () => {
+  const adapter = new PiRpcWorkerAdapter('pi', {
+    adapter: 'pi-rpc',
+    command: process.execPath,
+    commandArgs: [fakePiFixture],
+    noSession: true,
+    environment: {
+      FAKE_PI_LIFECYCLE_EVENTS: 'true',
+      FAKE_PI_UNKNOWN_EVENT_TYPE: 'injected_unknown_event',
+    },
+  });
+  const events: Array<{ type: JobEventType; data?: Record<string, unknown> }> = [];
+
+  const result = await adapter.run(
+    {
+      jobId: 'job_pi_lifecycle_filtering',
+      prompt: 'do work',
+      workspace: process.cwd(),
+      route,
+      attempt: 1,
+      signal: new AbortController().signal,
+    },
+    (type, data) => {
+      events.push(data === undefined ? { type } : { type, data });
+    }
+  );
+
+  assert.equal(result.output, 'fake result');
+  assert.ok(events.some((event) => event.type === 'worker.started'));
+  assert.equal(events.filter((event) => event.type === 'worker.text.delta').length, 2);
+  assert.ok(events.some((event) => event.type === 'worker.tool.started'));
+  assert.ok(events.some((event) => event.type === 'worker.tool.completed'));
+  assert.deepEqual(
+    events
+      .filter((event) => event.type === 'worker.raw')
+      .map((event) => event.data),
+    [{ event: { type: 'injected_unknown_event', marker: 'fixture-unknown-event' } }]
+  );
+  assert.equal(recordValue(result.metadata).rawEventCount, 16);
+
+  const lifecycleTypes = new Set(['turn_start', 'turn_end', 'message_start', 'message_end']);
+  assert.equal(
+    events.some(
+      (event) =>
+        event.type === 'worker.raw' &&
+        lifecycleTypes.has(String(event.data?.event && (event.data.event as Record<string, unknown>).type))
+    ),
+    false
+  );
+});
+
 test('PiRpcWorkerAdapter isolates ambient discovery for normal runs while preserving explicit resources and context', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-argv-run-'));
   const argvFile = path.join(directory, 'argv.json');

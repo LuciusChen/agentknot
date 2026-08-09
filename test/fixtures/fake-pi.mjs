@@ -123,7 +123,10 @@ function handle(command) {
   const splitAt = Math.min(5, output.length);
 
   send({ id: command.id, type: 'response', command: 'prompt', success: true });
+  const emitLifecycleFixture = process.env.FAKE_PI_LIFECYCLE_EVENTS === 'true';
+  if (emitLifecycleFixture) send({ type: 'turn_start', turnId: 'fixture-turn' });
   send({ type: 'agent_start' });
+  if (emitLifecycleFixture) send({ type: 'message_start', messageId: 'fixture-message' });
   send({
     type: 'message_update',
     assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: output.slice(0, splitAt) },
@@ -145,7 +148,15 @@ function handle(command) {
     type: 'message_update',
     assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: output.slice(splitAt) },
   });
+  if (emitLifecycleFixture) send({ type: 'message_end', messageId: 'fixture-message' });
   send({ type: 'agent_end', messages: [], willRetry: false });
+  if (emitLifecycleFixture) {
+    send({ type: 'turn_end', turnId: 'fixture-turn' });
+    send({
+      type: process.env.FAKE_PI_UNKNOWN_EVENT_TYPE ?? 'fixture_unknown_event',
+      marker: 'fixture-unknown-event',
+    });
+  }
   send({ type: 'agent_settled' });
 }
 

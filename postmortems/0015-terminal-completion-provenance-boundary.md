@@ -115,3 +115,11 @@ The bounded Pi slice now appends a provider/model-neutral instruction only in no
 ### 2026-08-09 — real Luna/max evidence
 
 Job `job_84ec1f63-860d-44ff-9843-9b277cde181b` ran through the exact promoted Pi/OpenCode Go/`gpt-5.6-luna` route with `thinkingLevel=max`, without fallback. It succeeded on attempt one, produced an empty controller-captured patch with `changedFiles: []`, emitted a valid strict report, and persisted `completionSummary.workerReported.status: reported`; this closes the roadmap emission gate. The same run reported 877,739 total Pi session tokens for a bounded read-only analysis, so report correctness does not establish worker efficiency and context/tool cost remains a separate optimization target.
+
+### 2026-08-09 — bounded Pi record-volume slice
+
+Before this slice, completion-report dogfood Job `job_84ec1f63-860d-44ff-9843-9b277cde181b` occupied 1,869,956 persisted bytes. Its 126 `worker.raw` events occupied 1,370,118 serialized bytes (73.3% of the record) and consisted entirely of `turn_start`, `turn_end`, `message_start`, and `message_end`; those envelopes duplicated prompt, thinking, tool-call, and tool-result content already represented elsewhere. Implementation Job `job_33e49422-cccc-4600-a909-28ce75f41b90` showed the same shape: 618,874 raw-event bytes in an 884,091-byte record (70.0%).
+
+The normal-run-only record-volume boundary is therefore deliberately narrow: `PiRpcWorkerAdapter.run` recognizes exactly those four types as known Pi lifecycle envelopes and omits them from `worker.raw`. Every received Pi frame still increments `metadata.rawEventCount`, including known envelopes; unknown event types remain `worker.raw`. Normalized text/tool/retry events, final output, completion-report behavior, live-probe behavior, route/provider/model/thinking configuration, and global event types are unchanged.
+
+This is a record-volume filter, not a Pi-token-saving claim or general truncation. It does not add a schema migration, plugin installation, configuration/probe change, or global event-type change. Broader retention, compaction, or record-size limits remain separate work and are not established by this slice.

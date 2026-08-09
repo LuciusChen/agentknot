@@ -806,6 +806,11 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
         case 'agent_start':
           await emit('worker.started', { adapter: 'pi-rpc', attempt: input.attempt });
           break;
+        case 'turn_start':
+        case 'turn_end':
+        case 'message_start':
+        case 'message_end':
+          break;
         case 'message_update': {
           const delta = event.assistantMessageEvent;
           if (delta?.type === 'text_delta' && typeof delta.delta === 'string') {
