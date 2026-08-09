@@ -147,6 +147,7 @@ export interface JobExecution {
 
 export interface JobRecord {
   id: string;
+  schemaVersion: 1;
   status: JobStatus;
   request: JobRequest;
   route: ResolvedRoute;

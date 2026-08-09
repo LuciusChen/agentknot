@@ -216,6 +216,7 @@ export class OrchestrationService {
     const now = this.#now().toISOString();
     const record: OrchestrationRecord = {
       id: `orchestration_${randomUUID()}`,
+      schemaVersion: 1,
       status: 'queued',
       request: normalized,
       policy: structuredClone(this.#config),

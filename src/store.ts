@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { materializePersistedRecord } from './record-version.js';
 import type { JobRecord, JobStore } from './types.js';
 
 function cloneJob(job: JobRecord): JobRecord {
@@ -50,8 +51,8 @@ export class FileJobStore implements JobStore {
 
   async get(id: string): Promise<JobRecord | undefined> {
     try {
-      const raw = await readFile(this.#path(id), 'utf8');
-      return JSON.parse(raw) as JobRecord;
+      const raw: unknown = JSON.parse(await readFile(this.#path(id), 'utf8'));
+      return materializePersistedRecord<JobRecord>('Job', raw);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
@@ -77,9 +78,10 @@ export class FileJobStore implements JobStore {
   }
 
   async #write(job: JobRecord): Promise<void> {
-    const target = this.#path(job.id);
+    const versioned = materializePersistedRecord<JobRecord>('Job', job);
+    const target = this.#path(versioned.id);
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(job, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await writeFile(temporary, `${JSON.stringify(versioned, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, target);
   }
 }

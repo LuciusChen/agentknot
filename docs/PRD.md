@@ -95,6 +95,7 @@ Version 0.0.1 currently implements:
 - deterministic mock and Pi RPC worker adapters;
 - OpenCode Go/Luna and xAI/Grok routes through Pi configuration;
 - file-backed or in-memory job snapshots and ordered events;
+- top-level `schemaVersion: 1` on new leaf Job and Orchestration records, with schema-less legacy-v1 file reads materialized in memory without rewriting and unsupported explicit versions rejected;
 - immediate execution with cooperative timeouts, retries, and cancellation, plus bounded exact-child supervision in the bundled Pi adapter;
 - reproducible Pi execution that disables ambient extension, skill, prompt-template, and theme discovery while preserving repository instructions and explicitly configured resources;
 - sanitized per-job Pi session statistics for measuring message/tool counts, token use, cost, and context use without retaining session paths, identifiers, or raw responses;
@@ -163,6 +164,7 @@ The product remains on course when all of the following are true:
 - automatic delegation is isolated, depth-one, capped, non-recursive, and cannot select configured keep-upstream task kinds;
 - every emitted job event is already present in the persisted record;
 - every terminal job is inspectable after the invoking call returns;
+- new leaf Job and Orchestration records carry `schemaVersion: 1`, legacy file reads remain byte-stable, and unsupported explicit versions fail rather than defaulting to v1;
 - Git worktree mode leaves the source workspace clean and returns artifacts without applying them;
 - controllers can verify and preview recorded artifacts without source mutation, while acceptance and promotion remain explicit upstream decisions;
 - retries start from the same recorded base rather than prior-attempt edits;

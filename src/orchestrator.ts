@@ -385,6 +385,7 @@ export class Orchestrator {
     const now = this.#now().toISOString();
     const job: JobRecord = {
       id: `job_${randomUUID()}`,
+      schemaVersion: 1,
       status: 'queued',
       request: normalized,
       route,

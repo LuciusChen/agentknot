@@ -115,6 +115,7 @@ export interface OrchestrationError {
 
 export interface OrchestrationRecord {
   id: string;
+  schemaVersion: 1;
   status: OrchestrationStatus;
   request: OrchestrationRequest;
   /** Immutable effective policy captured before planning begins. */

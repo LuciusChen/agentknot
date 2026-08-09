@@ -36,6 +36,7 @@ function staleJob(id: string, status: Extract<JobStatus, 'queued' | 'running'>, 
   ];
   return {
     id,
+    schemaVersion: 1,
     status,
     request: { prompt: 'stale task', workspace, source: 'test' },
     route: {
@@ -64,6 +65,7 @@ function staleOrchestration(
   const createdAt = '2026-08-08T01:00:00.000Z';
   return {
     id,
+    schemaVersion: 1,
     status,
     request: { prompt: 'stale orchestration', workspace, source: 'test' },
     policy: {

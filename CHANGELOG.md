@@ -9,6 +9,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Controller-neutral automatic delegation through CLI, HTTP, and TypeScript orchestration APIs.
 - Strict planner assessments, deterministic task-kind policy, persisted plans, parent/child provenance, and bounded depth-one concurrent dispatch.
 - Separate file and memory orchestration stores with ordered lifecycle events, cancellation propagation, and fail-without-resume startup reconciliation.
+- Top-level `schemaVersion: 1` on new leaf Job and Orchestration records, with read-only legacy-v1 file materialization, byte-stable snapshots, and clear rejection of unsupported explicit versions; no migration command or automatic rewrite is added.
 - `off`, `suggest`, and `auto` delegation configuration with per-request `inherit`, `never`, `suggest`, and `force` controls.
 - Git worktree patch artifacts that include tracked, non-ignored untracked, binary, and worker-committed changes.
 - Read-only artifact listing, SHA-256/size/base-commit verification, and bounded integrity-gated patch preview through TypeScript, CLI, and HTTP.
@@ -30,6 +31,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Configuration-only `doctor` output explicitly says that live inference was not checked; `doctor --live` uses a 30-second control-plane timeout, reports provider errors with a nonzero exit status, reports unsupported adapters honestly, never falls back to another route, and does not add a preflight to normal jobs.
 - README now includes a capability/status table that labels implemented and tested behavior as current, gates Pi profile experiments with repeated A/B evidence, and marks proposed and deferred features as unavailable.
 - The isolated `pi-readseek@0.9.10` profile remains unpromoted after its first same-task Luna/max trial materially increased token use, elapsed time, tool calls, and persisted record size despite producing a valid passing artifact ([experiment 0013](postmortems/0013-pi-readseek-profile-ab.md)).
+- One isolated `pi-lean-ctx@3.9.18` Luna/max A/B pair reduced total Pi tokens by 39.0% and elapsed time by 30.5% while producing the selected passing versioning artifact, but the profile remains unpromoted until an independent repeat confirms the benefit and addresses higher tool-call and final-context counts ([experiment 0014](postmortems/0014-pi-lean-ctx-profile-ab.md)).
 
 ### Fixed
 

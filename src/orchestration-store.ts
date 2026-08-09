@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { materializePersistedRecord } from './record-version.js';
 import type { OrchestrationRecord, OrchestrationStore } from './orchestration-types.js';
 
 function cloneRecord(record: OrchestrationRecord): OrchestrationRecord {
@@ -50,7 +51,8 @@ export class FileOrchestrationStore implements OrchestrationStore {
 
   async get(id: string): Promise<OrchestrationRecord | undefined> {
     try {
-      return JSON.parse(await readFile(this.#path(id), 'utf8')) as OrchestrationRecord;
+      const raw: unknown = JSON.parse(await readFile(this.#path(id), 'utf8'));
+      return materializePersistedRecord<OrchestrationRecord>('Orchestration', raw);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
@@ -76,9 +78,10 @@ export class FileOrchestrationStore implements OrchestrationStore {
   }
 
   async #write(record: OrchestrationRecord): Promise<void> {
-    const target = this.#path(record.id);
+    const versioned = materializePersistedRecord<OrchestrationRecord>('Orchestration', record);
+    const target = this.#path(versioned.id);
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await writeFile(temporary, `${JSON.stringify(versioned, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, target);
   }
 }

@@ -62,7 +62,7 @@ Make leaf-job semantics and the bounded delegation slice reliable enough that a 
 
 - Keep PRD, SPEC, ROADMAP, README, and postmortems linked and current.
 - [x] Add a capability/status table that distinguishes current, experimental, proposed, and deferred behavior.
-- Version persisted job records before incompatible schema evolution begins.
+- [x] Version persisted leaf Job and Orchestration records before incompatible schema evolution begins; new records use `schemaVersion: 1`, legacy file reads materialize missing versions without rewriting, and explicit unsupported versions fail.
 - Validate controller metadata as JSON values so CLI/HTTP/TypeScript and file storage preserve one contract.
 - Define a structured completion summary: changed files, checks run, remaining risks, and worker-reported notes, without treating worker assertions as verified facts.
 
@@ -111,7 +111,8 @@ Delivered in this slice:
 Next evidence gate:
 
 - The first isolated candidate, `pi-readseek@0.9.10`, passed source review, live loading, artifact verification, and target tests but was rejected after one same-task Luna/max pair materially regressed token use, elapsed time, tool calls, and persisted record size; see [experiment 0013](../postmortems/0013-pi-readseek-profile-ab.md).
-- Review the next bounded candidate without installing it globally or into the target repository, pin its exact version, and run repeated same-task Luna/max A/B trials against the minimal profile.
+- The narrower `pi-lean-ctx@3.9.18` profile passed source and supply-chain review plus one same-task Luna/max pair, reducing total Pi tokens by 39.0% and elapsed time by 30.5% while producing the selected passing versioning artifact; it remains experimental because tool calls and final context grew and the benefit has not been replicated; see [experiment 0014](../postmortems/0014-pi-lean-ctx-profile-ab.md).
+- Repeat the isolated lean profile against the minimal profile on an independent real AgentKnot workload, without installing it globally or into the target repository.
 - Promote a separate dogfood worker/profile only if completion, artifact verification, and target tests do not regress and session statistics, elapsed work, or recorded upstream intervention show a repeatable net benefit; otherwise keep the minimal route and record the negative result.
 
 ### Runtime reconciliation correctness

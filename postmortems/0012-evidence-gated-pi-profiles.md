@@ -58,8 +58,9 @@ Positive consequences are measurable self-hosting improvements, reproducible wor
 
 - [x] Disable ambient Pi extensions, skills, prompt templates, and themes while retaining repository context.
 - [x] Capture sanitized advisory Pi session statistics after successful normal jobs.
-- [x] Review and pin one candidate extension without persistent installation — `pi-readseek@0.9.10`; see experiment 0013.
-- [ ] Run repeated same-task Luna/max A/B trials and record completion, artifact, tests, retries, elapsed time, session statistics, and upstream intervention.
+- [x] Review and pin candidate extensions without persistent installation — `pi-readseek@0.9.10` and `pi-lean-ctx@3.9.18`; see experiments 0013 and 0014.
+- [x] Run one same-task Luna/max A/B pair for each candidate and record completion, artifact, tests, retries, elapsed time, session statistics, and upstream intervention.
+- [ ] Repeat the promising lean profile on an independent real workload before promotion.
 - [ ] Add a formal dogfood profile only if it clears the promotion gates; otherwise record the negative experiment and retain the minimal route.
 
 ## Deferred work

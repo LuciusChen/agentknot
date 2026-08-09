@@ -106,6 +106,7 @@ function staleJob(id: string, route: RouteFixture, workspace: string, pid: numbe
   const startedAt = '2026-08-08T01:00:01.000Z';
   return {
     id,
+    schemaVersion: 1,
     status: 'running',
     request: { prompt: 'stale task', workspace, source: 'test' },
     route: {
@@ -152,6 +153,7 @@ function staleOrchestration(
   const createdAt = '2026-08-08T01:00:00.000Z';
   return {
     id,
+    schemaVersion: 1,
     status: 'dispatching' as Extract<OrchestrationStatus, 'dispatching'>,
     request: { prompt: 'stale orchestration', workspace, source: 'test' },
     policy: {

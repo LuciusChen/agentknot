@@ -125,3 +125,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0011](./0011-explicit-http-liveness-contract.md) | Decision | Accepted | Name HTTP process liveness without implying route readiness |
 | [0012](./0012-evidence-gated-pi-profiles.md) | Decision | Accepted | Promote isolated Pi profiles only on measured dogfood benefit |
 | [0013](./0013-pi-readseek-profile-ab.md) | Experiment | Rejected | Reject the first pi-readseek profile after measured regressions |
+| [0014](./0014-pi-lean-ctx-profile-ab.md) | Experiment | Needs replication | Keep pi-lean-ctx experimental after one beneficial A/B pair |
