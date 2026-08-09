@@ -84,7 +84,7 @@ Worker-specific process and protocol behavior belongs in worker adapters. Orches
 
 ### Bounded automation
 
-Automatic delegation must be explicit at the API boundary, depth-limited, concurrency-limited, isolated, and recorded before execution. It must never imply automatic artifact integration, product decisions, commits, or pushes.
+Automatic delegation must be explicit at the API boundary, depth-limited, concurrency-limited, isolated, and recorded before execution. Its process-local semaphore covers planner and child execution, not independent callers issuing concurrent leaf Job requests; caller-side admission control remains required for direct bursts in v1. Automatic delegation must never imply automatic artifact integration, product decisions, commits, or pushes.
 
 ## Current product scope
 
@@ -110,7 +110,7 @@ Version 0.0.1 currently implements:
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
 - strict planner assessments followed by deterministic task-kind policy;
 - immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
-- bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with four active slots based on live Pi capacity evidence, and a configuration ceiling of six for each with concurrency never exceeding the child count;
+- bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with four active slots backed by a current four-child Luna/max orchestration, and a configuration ceiling of six for each with concurrency never exceeding the child count;
 - fail-without-resume startup reconciliation for stale jobs and orchestration records;
 - optional vendor-neutral shadow route-selection evidence under `delegation.dispatch`, disabled by omission and limited to 1–20 ordered rules whose candidate routes validate at config load, with first-match/default evidence in plans and child metadata while actual children remain on `dispatch.defaultRoute` ([decision 0016](../postmortems/0016-shadow-route-selection.md)).
 
