@@ -27,7 +27,7 @@ This is an MVP. It already provides:
 - optional vendor-neutral Git worktree isolation with per-attempt patch artifacts;
 - read-only artifact listing, integrity/base verification, and bounded patch preview;
 - normalized text, tool, retry, lifecycle, artifact, and stderr events;
-- configuration validation, explicit configuration-only and opt-in live route diagnostics, and HTTP service liveness.
+- configuration validation, explicit configuration-only and opt-in live route diagnostics, and an explicit HTTP process-liveness contract.
 
 Controllers still choose whether a request enters the leaf Job API or the orchestration API. AgentKnot cannot intercept arbitrary native Codex or Claude chats; a thin controller integration must call `agentknot orchestrate`, `POST /v1/orchestrations`, or `runtime.orchestrate()`.
 
@@ -279,8 +279,11 @@ GET  /v1/orchestrations/:id
 GET  /v1/orchestrations/:id/events
 POST /v1/orchestrations/:id/cancel
 GET  /v1/routes
-GET  /health
+GET  /health/live
+GET  /health                    compatibility alias
 ```
+
+`GET /health/live` is the canonical process-liveness endpoint. It returns `status: "live"` and explicitly marks storage, routes, and inference as `not-checked`; `GET /health` returns the identical payload for compatibility. There is intentionally no `GET /health/ready` contract. Use CLI `doctor` for configuration diagnostics and explicit `doctor --live --route NAME` when point-in-time provider inference evidence is required.
 
 ## Safety model
 

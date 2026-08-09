@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { createAdapters } from '../src/adapters/index.js';
 import type { AgentKnotConfig } from '../src/config.js';
 import { createAgentKnotHttpServer } from '../src/http-server.js';
+import type { AgentKnotHttpRuntime } from '../src/http-server.js';
 import { OrchestrationService } from '../src/orchestration.js';
 import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
 import { Orchestrator } from '../src/orchestrator.js';
@@ -21,6 +22,94 @@ async function git(directory: string, ...args: string[]): Promise<string> {
   const result = await execFileAsync('git', args, { cwd: directory, encoding: 'utf8' });
   return String(result.stdout);
 }
+
+test('HTTP liveness endpoints are identical, leave readiness absent, and do not access the runtime', async () => {
+  const runtimeAccesses: string[] = [];
+  const runtime: AgentKnotHttpRuntime = {
+    routes() {
+      runtimeAccesses.push('routes');
+      return [];
+    },
+    async get() {
+      runtimeAccesses.push('get');
+      return undefined;
+    },
+    async list() {
+      runtimeAccesses.push('list');
+      return [];
+    },
+    async listArtifacts() {
+      runtimeAccesses.push('listArtifacts');
+      return undefined;
+    },
+    async verifyArtifacts() {
+      runtimeAccesses.push('verifyArtifacts');
+      return undefined;
+    },
+    async previewArtifact() {
+      runtimeAccesses.push('previewArtifact');
+      return undefined;
+    },
+    async start() {
+      runtimeAccesses.push('start');
+      throw new Error('runtime start must not be called by health handling');
+    },
+    delegationPolicy() {
+      runtimeAccesses.push('delegationPolicy');
+      throw new Error('runtime delegation policy must not be called by health handling');
+    },
+    async getOrchestration() {
+      runtimeAccesses.push('getOrchestration');
+      return undefined;
+    },
+    async listOrchestrations() {
+      runtimeAccesses.push('listOrchestrations');
+      return [];
+    },
+    async startOrchestration() {
+      runtimeAccesses.push('startOrchestration');
+      throw new Error('runtime orchestration start must not be called by health handling');
+    },
+  };
+  const guardedRuntime = new Proxy(runtime, {
+    get(_target, property) {
+      runtimeAccesses.push(String(property));
+      throw new Error(`runtime property ${String(property)} must not be accessed by health handling`);
+    },
+  });
+  const http = createAgentKnotHttpServer(guardedRuntime);
+  const address = await http.listen(0);
+  const baseUrl = `http://${address.host}:${address.port}`;
+
+  try {
+    const [liveResponse, aliasResponse, readyResponse] = await Promise.all([
+      fetch(`${baseUrl}/health/live`),
+      fetch(`${baseUrl}/health`),
+      fetch(`${baseUrl}/health/ready`),
+    ]);
+    assert.equal(liveResponse.status, 200);
+    assert.equal(aliasResponse.status, 200);
+    assert.equal(readyResponse.status, 404);
+
+    const liveBody = await liveResponse.text();
+    const aliasBody = await aliasResponse.text();
+    assert.equal(liveBody, aliasBody);
+    assert.deepEqual(JSON.parse(liveBody) as unknown, {
+      ok: true,
+      service: 'agentknot',
+      status: 'live',
+      checks: {
+        storage: 'not-checked',
+        routes: 'not-checked',
+        inference: 'not-checked',
+      },
+    });
+    assert.deepEqual(JSON.parse(await readyResponse.text()) as unknown, { error: 'Not found' });
+    assert.deepEqual(runtimeAccesses, []);
+  } finally {
+    await http.close();
+  }
+});
 
 test('HTTP API accepts work from a vendor-neutral controller and exposes the result', async () => {
   const config: AgentKnotConfig = {

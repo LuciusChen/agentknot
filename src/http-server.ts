@@ -17,6 +17,16 @@ import type {
 import type { JobRecord } from './types.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
+const LIVE_HEALTH_RESPONSE = {
+  ok: true,
+  service: 'agentknot',
+  status: 'live',
+  checks: {
+    storage: 'not-checked',
+    routes: 'not-checked',
+    inference: 'not-checked',
+  },
+} as const;
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   const data = `${JSON.stringify(body)}\n`;
@@ -129,8 +139,8 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
       const method = request.method ?? 'GET';
       const pathname = requestPath(request);
 
-      if (method === 'GET' && pathname === '/health') {
-        sendJson(response, 200, { ok: true, service: 'agentknot' });
+      if (method === 'GET' && (pathname === '/health/live' || pathname === '/health')) {
+        sendJson(response, 200, LIVE_HEALTH_RESPONSE);
         return;
       }
       if (method === 'GET' && pathname === '/v1/routes') {

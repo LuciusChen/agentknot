@@ -100,7 +100,8 @@ Version 0.0.1 currently implements:
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
 - read-only artifact listing, integrity/base verification, and bounded patch preview through TypeScript, CLI, and HTTP;
-- configuration validation and explicit configuration-only and opt-in live route diagnostics.
+- configuration validation and explicit configuration-only and opt-in live route diagnostics;
+- canonical HTTP process liveness that explicitly reports storage, routes, and inference as not checked, without claiming route readiness.
 - controller-neutral orchestration through CLI, HTTP, and TypeScript;
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
 - strict planner assessments followed by deterministic task-kind policy;

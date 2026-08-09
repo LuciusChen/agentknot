@@ -319,7 +319,8 @@ GET  /v1/orchestrations/:id
 GET  /v1/orchestrations/:id/events
 POST /v1/orchestrations/:id/cancel
 GET  /v1/routes
-GET  /health
+GET  /health/live
+GET  /health                    compatibility alias
 ```
 
 `POST /v1/jobs` starts execution in the serving process and returns `202` with the admitted snapshot.
@@ -328,7 +329,7 @@ Cancellation uses process-local active-job and active-orchestration maps. After 
 
 `createRuntime()` accepts `reconcileOnStartup`, which defaults to `true` for TypeScript compatibility. Passing `false` opens the configured stores without stale-execution recovery. CLI `run`, `orchestrate`, and a parameter-valid `serve` pass `true`; read-oriented and invalid CLI commands pass `false`, and invalid `serve` arguments are rejected before runtime construction. Therefore `show`, lists, artifact inspection, routes, delegation inspection, and both doctor modes cannot mutate Job or Orchestration records through startup reconciliation. PID liveness is still evaluated from an execution owner's namespace, so concurrent execution-owning runtimes, PID reuse, and cross-namespace liveness remain unsupported; the file stores have no lease or compare-and-set protection. See resolved [incident 0010](../postmortems/0010-read-only-cli-runtime-reconciliation.md).
 
-`GET /health` is currently a liveness response for the HTTP process. It does not validate storage, routes, credentials, workers, or provider availability. Route diagnostics, including the opt-in live probe, are exposed by the CLI `doctor` command; they are not currently an HTTP endpoint.
+`GET /health/live` is the canonical liveness response for the HTTP process; `GET /health` is an identical compatibility alias. Both return `{"ok":true,"service":"agentknot","status":"live","checks":{"storage":"not-checked","routes":"not-checked","inference":"not-checked"}}` and do not access runtime methods, storage, credentials, workers, or providers. `GET /health/ready` is intentionally absent. Route diagnostics, including the opt-in live probe, are exposed by the CLI `doctor` command; they are not currently an HTTP endpoint. See [decision 0011](../postmortems/0011-explicit-http-liveness-contract.md).
 
 There is no authentication, authorization, TLS termination, CORS policy, rate limiting, admission limit, or untrusted-network security contract. The server should remain bound to trusted local interfaces unless an external trusted proxy supplies those controls.
 

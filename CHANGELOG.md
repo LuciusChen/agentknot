@@ -13,6 +13,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Git worktree patch artifacts that include tracked, non-ignored untracked, binary, and worker-committed changes.
 - Read-only artifact listing, SHA-256/size/base-commit verification, and bounded integrity-gated patch preview through TypeScript, CLI, and HTTP.
 - Opt-in `doctor --live --route NAME` diagnostics that perform one bounded real inference through the exact resolved route, without Job or artifact persistence; the repository promotion check covers Pi/OpenCode Go/Luna at `thinkingLevel: "max"`.
+- Canonical `GET /health/live` process liveness with an explicit not-checked storage/route/inference payload; `GET /health` remains an identical compatibility alias and HTTP readiness remains intentionally absent.
 - Deterministic Pi RPC conformance fixtures for split JSONL/UTF-8 input, malformed frames, premature exit, missing settlement, timeout, and cancellation.
 - Product requirements, technical specification, evidence-gated roadmap, and decision/postmortem records.
 

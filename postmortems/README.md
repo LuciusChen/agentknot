@@ -122,3 +122,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0008](./0008-route-diagnostics-false-ready.md) | Incident | Resolved | Separate configuration readiness from live Luna inference |
 | [0009](./0009-pi-rpc-child-supervision.md) | Incident | Resolved | Bound Pi RPC child termination after timeout and cancellation |
 | [0010](./0010-read-only-cli-runtime-reconciliation.md) | Incident | Resolved | Prevent read-only CLI runtime reconciliation from mutating active jobs |
+| [0011](./0011-explicit-http-liveness-contract.md) | Decision | Accepted | Name HTTP process liveness without implying route readiness |
