@@ -65,6 +65,7 @@ Evidence now covers the initial read-only direct comparison and one non-empty co
 - [x] Run orchestration before the first Codex model request only under resolved `auto` policy.
 - [x] Bound child output, preview, and complete additional-context size.
 - [x] Add deterministic pre-model hook and populated delegated-handoff coverage.
+- [x] Add deterministic Codex/Claude malformed-handoff coverage for bounded unavailable context, no artifact preview, and no fallback command or route/model argument.
 - [x] Preserve explicit Skill invocation without a duplicate automatic run.
 - [x] Record the first same-task upstream-token reduction without generalizing it.
 - [x] Record one non-empty controller-first versus pre-model implementation comparison without treating it as a pure-direct or universal result ([incident 0031](./0031-bounded-pi-output-drain.md)).
@@ -72,6 +73,8 @@ Evidence now covers the initial read-only direct comparison and one non-empty co
 - [ ] Prove the same terminal/artifact contract through a real Claude controller invocation.
 - [ ] Compare the same multi-child task against an approved direct/controller-first baseline before making a savings claim.
 - [ ] Exercise real-controller planner failure, route timeout, and cleanup behavior.
+
+The deterministic malformed-handoff fixture closes only the thin-adapter catch boundary. Its fake CLI records exactly `delegation` followed by inherited `orchestrate`; it does not start a real planner or worker and therefore cannot close the final real-controller failure, timeout, or cleanup gate.
 
 ## Privacy and security review
 

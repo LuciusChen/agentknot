@@ -282,6 +282,70 @@ test('controller hook runs configured automatic delegation before the model and 
   assert.equal((await readFile(callsFile, 'utf8')).trim().split('\n').length, 3);
 });
 
+for (const integration of integrations) {
+  test(`${integration.controller} hook bounds automatic handoff failure without fallback`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-failure-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const configPath = path.join(directory, 'agentknot.config.json');
+    const prompt = 'Audit the bounded controller handoff and report every mismatch.';
+    const result = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ''}`,
+        AGENTKNOT_CONFIG: configPath,
+        FAKE_AGENTKNOT_CALLS: callsFile,
+        FAKE_AGENTKNOT_HANDOFF: '{',
+        FAKE_AGENTKNOT_PREVIEW: 'FORBIDDEN_PREVIEW',
+      },
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
+    );
+    const output = JSON.parse(result) as {
+      hookSpecificOutput: { hookEventName: string; additionalContext: string };
+    };
+    const context = output.hookSpecificOutput.additionalContext;
+    assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+    assert.equal(context.startsWith('AgentKnot automatic entry was unavailable before dispatch:'), true);
+    assert.match(context, /Continue upstream without silently substituting another worker, provider, or model\./);
+    assert.ok(context.length <= 60_000);
+    for (const forbidden of [
+      'AGENTKNOT_AUTOMATIC_HANDOFF_V1',
+      'FORBIDDEN_PREVIEW',
+      'children',
+      'artifacts',
+      'fallback-worker',
+      'fallback-provider',
+      'fallback-model',
+    ]) {
+      assert.equal(context.includes(forbidden), false);
+    }
+
+    const calls = (await readFile(callsFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[]);
+    assert.deepEqual(calls, [
+      ['delegation', '--json', '--config', configPath],
+      [
+        'orchestrate',
+        '--source',
+        integration.controller,
+        '--workspace',
+        repositoryRoot,
+        '--delegation',
+        'inherit',
+        '--handoff-json',
+        '--prompt',
+        prompt,
+        '--config',
+        configPath,
+      ],
+    ]);
+  });
+}
+
 for (const [removed, survivor] of [
   [integrations[0], integrations[1]],
   [integrations[1], integrations[0]],
