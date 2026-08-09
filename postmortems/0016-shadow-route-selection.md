@@ -109,3 +109,9 @@ Automatic model/provider ranking, automatic route switching, DeepSeek configurat
 ## Privacy and security review
 
 The slice adds task kind, parent assessment complexity, route names, and policy evidence to existing plans and child metadata; it intentionally adds no credentials or authorization data. Worktree isolation and structured metadata do not make AgentKnot an operating-system security sandbox, and existing prompt, output, patch, callback, and retention limitations remain.
+
+## Addenda
+
+### 2026-08-09: Explicit DeepSeek candidate
+
+[Experiment 0017](./0017-deepseek-flash-route-ab.md) later admitted DeepSeek V4 Flash/max as an explicit experimental leaf route after a live probe and one mixed same-task A/B. This does not supersede the shadow-only decision: Luna/max remains formal orchestration dispatch, no shadow rule selects DeepSeek, and automatic ranking, switching, and fallback remain deferred.

@@ -42,6 +42,17 @@
       "maxAttempts": 2,
       "timeoutMs": 3600000
     },
+    "deepseek-flash": {
+      "worker": "pi",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash",
+      "thinkingLevel": "max",
+      "requiredEnv": [
+        "OPENCODE_API_KEY"
+      ],
+      "maxAttempts": 2,
+      "timeoutMs": 3600000
+    },
     "grok": {
       "worker": "pi",
       "provider": "xai",

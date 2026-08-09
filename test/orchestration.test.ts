@@ -352,16 +352,24 @@ test('OrchestrationService keeps shadow suggestions out of child route authority
       { mode: 'shadow', suggestedRoute: 'planner', basis: 'rule', ruleIndex: 1 },
     ]
   );
+  assert.deepEqual(
+    record.events
+      .filter((event) => event.type === 'orchestration.child.started')
+      .map((event) => event.data?.route),
+    ['worker', 'worker']
+  );
 
   const childJobs = (await jobStore.list()).filter(
     (job) => (job.request.metadata?.agentknotDelegation as Record<string, unknown> | undefined)?.role === 'worker'
   );
   assert.equal(childJobs.length, 2);
   for (const childJob of childJobs) {
-    assert.equal(childJob.request.route, 'worker');
-    assert.equal(childJob.route.name, 'worker');
-    assert.equal(childJob.route.model, 'worker');
-    const metadata = childJob.request.metadata?.agentknotDelegation as Record<string, unknown>;
+    const reloadedChildJob = await jobStore.get(childJob.id);
+    assert.ok(reloadedChildJob);
+    assert.equal(reloadedChildJob.request.route, 'worker');
+    assert.equal(reloadedChildJob.route.name, 'worker');
+    assert.equal(reloadedChildJob.route.model, 'worker');
+    const metadata = reloadedChildJob.request.metadata?.agentknotDelegation as Record<string, unknown>;
     const subtaskId = metadata.subtaskId;
     const plan: DelegationPlan | undefined = record.plan;
     assert.ok(plan);
@@ -378,7 +386,15 @@ test('OrchestrationService keeps shadow suggestions out of child route authority
 test('OrchestrationService suggest mode persists a plan without dispatching worker jobs', async () => {
   const workspace = await createGitWorkspace('agentknot-suggest-');
   const adapter = new PlannerAndWorkerAdapter(assessment);
-  const { jobStore, orchestrations } = createServices(adapter);
+  const routeSelection: RouteSelectionConfig = {
+    mode: 'shadow',
+    rules: [
+      { route: 'planner', taskKinds: ['test-gap-analysis'] },
+      { route: 'planner', complexities: ['medium'] },
+      { route: 'worker' },
+    ],
+  };
+  const { jobStore, orchestrations } = createServices(adapter, 2, 1, 2, routeSelection);
 
   const record = await orchestrations.run({
     prompt: 'Suggest a delegation plan.',
@@ -389,6 +405,13 @@ test('OrchestrationService suggest mode persists a plan without dispatching work
   assert.equal(record.status, 'succeeded');
   assert.equal(record.plan?.mode, 'suggest');
   assert.equal(record.plan?.willDispatch, false);
+  assert.deepEqual(
+    record.plan?.subtasks.map((subtask) => subtask.routeSelection),
+    [
+      { mode: 'shadow', suggestedRoute: 'planner', basis: 'rule', ruleIndex: 0 },
+      { mode: 'shadow', suggestedRoute: 'planner', basis: 'rule', ruleIndex: 1 },
+    ]
+  );
   assert.equal(record.result?.action, 'suggested');
   assert.deepEqual(record.children, []);
   assert.equal(adapter.workerRuns, 0);

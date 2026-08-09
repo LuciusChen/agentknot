@@ -18,6 +18,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - Controller-captured Git-derived repository-relative `changedFiles` evidence on newly captured worktree artifacts, including `[]` for an empty patch, with legacy artifacts remaining readable without the field.
 - Read-only artifact listing, SHA-256/size/base-commit verification, and bounded integrity-gated patch preview through TypeScript, CLI, and HTTP.
 - Opt-in `doctor --live --route NAME` diagnostics that perform one bounded real inference through the exact resolved route, without Job or artifact persistence; the repository promotion check covers Pi/OpenCode Go/Luna at `thinkingLevel: "max"`.
+- An explicit experimental `deepseek-flash` route through Pi/OpenCode Go at `thinkingLevel: "max"`; it passed a live probe and one isolated same-task A/B, but Luna/max remains the orchestration route and no automatic selection or fallback was added ([experiment 0017](postmortems/0017-deepseek-flash-route-ab.md)).
 - Canonical `GET /health/live` process liveness with an explicit not-checked storage/route/inference payload; `GET /health` remains an identical compatibility alias and HTTP readiness remains intentionally absent.
 - Deterministic Pi RPC conformance fixtures for split JSONL/UTF-8 input, malformed frames, premature exit, missing settlement, timeout, and cancellation.
 - Sanitized Pi `get_session_stats` metadata for successful normal jobs, including message/tool counts, token totals, cost, and optional context usage; unavailable statistics remain advisory.
@@ -37,6 +38,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 - README now includes a capability/status table that labels implemented and tested behavior as current, gates Pi profile experiments with repeated A/B evidence, and marks proposed and deferred features as unavailable.
 - The isolated `pi-readseek@0.9.10` profile remains unpromoted after its first same-task Luna/max trial materially increased token use, elapsed time, tool calls, and persisted record size despite producing a valid passing artifact ([experiment 0013](postmortems/0013-pi-readseek-profile-ab.md)).
 - Two isolated `pi-lean-ctx@3.9.18` Luna/max A/B pairs produced selected artifacts that passed upstream verification, but the profile remains unpromoted: a 39.0% token reduction on the larger task reversed into 36.2% more tokens and 45.7% more elapsed time on an independent smaller task ([experiment 0014](postmortems/0014-pi-lean-ctx-profile-ab.md)).
+- Shadow route-selection regression coverage now verifies that child-start events and reloaded child Jobs retain the actual default route, and that suggest mode retains shadow evidence without dispatching children.
 
 ### Fixed
 

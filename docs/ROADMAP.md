@@ -102,7 +102,7 @@ The shadow slice is evidence-only and does not change actual dispatch, fallback,
 Still outside this slice:
 
 - recursive delegation, dynamic replanning, dependencies between children, or model-chosen route changes;
-- automatic model/provider ranking or route switching, including any DeepSeek configuration; separate measured scorecards are required before shadow evidence can support a future automatic-selection proposal;
+- automatic model/provider ranking or route switching; the explicit experimental DeepSeek Flash/max leaf route remains outside dispatch and fallback, and repeated comparable trials are required before shadow evidence can support a future automatic-selection proposal;
 - restart resume, a durable capacity queue, leases, multi-process writers, or distributed concurrency;
 - automatic patch selection, application, commit, push, merge, deployment, or pull-request creation;
 - implicit interception of native controller conversations. Controllers must call the orchestration API.
@@ -125,6 +125,7 @@ Next evidence gate:
 - The narrower `pi-lean-ctx@3.9.18` profile passed source and supply-chain review and produced selected passing artifacts in two same-task Luna/max pairs. Its 39.0% token reduction on a larger implementation reversed into 36.2% more tokens and 45.7% more elapsed time on an independent smaller test task, so it did not clear the repeatability gate; see [experiment 0014](../postmortems/0014-pi-lean-ctx-profile-ab.md).
 - [x] Apply the profile promotion gate: neither reviewed candidate is a general dogfood profile, the repository and global Pi state remain unpolluted, and the minimal route remains formal.
 - Reopen profile work only with a new bounded hypothesis and a reliable selection rule that can avoid workloads where the profile regresses; keep task-dependent automatic selection deferred until that rule has evidence.
+- The explicit DeepSeek V4 Flash/max route passed a live probe and one same-task test-only A/B. It used 38.4% fewer Pi tokens and lower provider-reported cost than Luna/max, but took 23.5% longer and produced a larger patch; Luna's smaller patch was selected. Keep the candidate explicit-only until repeated task-class trials establish a reliable rule ([experiment 0017](../postmortems/0017-deepseek-flash-route-ab.md)).
 
 ### Runtime reconciliation correctness
 
