@@ -43,6 +43,7 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 
 ### Fixed
 
+- Leaf Job admission now persists the queued state and `job.queued` event in one create. Admission failure starts no worker; event, artifact-recording, and terminal-transition store failures surface as `JobPersistenceError` without worker retry, fabricated terminal state, or callback delivery, and unrecorded patch files are removed ([incident 0021](postmortems/0021-job-persistence-failure-boundaries.md)).
 - Callback-bookkeeping persistence failures no longer enter the worker execution failure path: a terminal result already persisted remains authoritative, callback delivery is not repeated, and completion exposes the store error instead of rewriting success as failure ([incident 0019](postmortems/0019-callback-bookkeeping-persistence-boundary.md)).
 - Planner prompts now require every delegated subtask to provide separate `title`, `kind`, `prompt`, and non-empty string-array `acceptanceCriteria` fields instead of relying on criteria embedded only in prompt text.
 - Read-oriented CLI commands no longer perform startup reconciliation or mutate persisted Job and Orchestration records; only execution-owning `run`, `orchestrate`, and valid `serve` invocations retain recovery, and invalid `serve` arguments fail before runtime construction ([postmortem 0010](postmortems/0010-read-only-cli-runtime-reconciliation.md)).

@@ -39,3 +39,7 @@ Durable retry, callback idempotency keys, signing, authentication, and restart-a
 ## Privacy and security review
 
 The reproduction uses an in-memory store and an invalid test URL handled by a fake fetch implementation. It records no credentials, external responses, prompts, patches, or user data.
+
+## Addenda
+
+2026-08-09: [Incident 0021](./0021-job-persistence-failure-boundaries.md) completed the separate admission, event, terminal, and artifact failure contracts. The unchecked item above is preserved as the historical state of this incident record.

@@ -222,6 +222,8 @@ Ignored dependencies and build output are not present in a detached worktree. Th
 
 `FileJobStore` writes a complete JSON snapshot to a unique temporary file with mode `0600` and atomically renames it over the job path. The orchestrator serializes append/save mutations per job so concurrent adapter event sources retain gap-free sequence numbers. It provides persistent audit snapshots under the assumptions of one AgentKnot process and a local filesystem with normal rename semantics.
 
+Leaf admission uses one `create` containing status `queued` and sequence-one `job.queued`; a create failure starts no worker. After admission, a failed event save rejects completion with `JobPersistenceError` classified as `event`, `artifact`, or `terminal`. It is a control-plane failure: it is never eligible for worker retry, never creates a substitute terminal event, and prevents callback delivery. The last successful store snapshot is authoritative and remains eligible for ordinary fail-without-resume startup reconciliation. If the failed save was the first record of a newly captured patch, AgentKnot removes that exact unrecorded patch and its managed worktree; an artifact already saved before later observer-evidence failure remains recorded.
+
 Every newly created leaf `JobRecord` has top-level `schemaVersion: 1`. When reading a file, `FileJobStore` treats an absent `schemaVersion` as legacy v1 and materializes `schemaVersion: 1` on the in-memory record returned by `get` or `list`; read-only access does not rewrite the snapshot. An explicit `schemaVersion` other than `1` fails with an unsupported-version error rather than defaulting to v1.
 
 Current persistence does not provide:
@@ -267,7 +269,7 @@ Every attempt increments `job.attempt`. In Git worktree mode, every retry starts
 
 For one job:
 
-1. The initial job snapshot is created before `job.queued` is appended.
+1. The initial `queued` job snapshot and sequence-one `job.queued` event are created atomically before worker execution.
 2. Event sequence numbers start at one and increase by one.
 3. An event is appended to the snapshot and the snapshot is saved before the live `onEvent` listener receives it.
 4. State fields are changed before the corresponding lifecycle event is saved.
@@ -275,6 +277,8 @@ For one job:
 6. A terminal event is saved before `completion` resolves.
 7. Artifact capture and cleanup happen before the attempt outcome is finalized.
 8. Callback bookkeeping happens after terminal execution and does not change execution status.
+
+An append is visible to a live observer only after its whole snapshot save succeeds. A failed save rolls back the unsaved event in process, rejects completion as `JobPersistenceError`, and leaves the last successful persisted snapshot authoritative. State mutations prepared for the failed event are not advertised as durable.
 
 The `onEvent` listener is awaited for ordering but is advisory. A rejection appends `job.observer.failed` with the observed sequence/type and error details; it does not retry or fail worker execution. Failure while persisting that observer-failure evidence remains a store failure.
 

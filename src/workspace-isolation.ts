@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rmdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -318,6 +318,19 @@ export class WorkspaceIsolationManager {
       baseCommit: isolated.baseCommit,
       changedFiles,
     };
+  }
+
+  async discardPatch(jobId: string, artifact: JobArtifact): Promise<void> {
+    if (!/^job_[A-Za-z0-9_-]+$/.test(jobId)) throw new Error(`Invalid artifact job id: ${jobId}`);
+    const directory = path.resolve(this.#artifactDirectory, jobId);
+    const expectedPath = path.join(directory, `attempt-${artifact.attempt}.patch`);
+    if (artifact.kind !== 'git-patch' || path.resolve(artifact.path) !== expectedPath) {
+      throw new Error(`Refusing to remove unmanaged artifact path: ${artifact.path}`);
+    }
+    await rm(expectedPath, { force: true });
+    await rmdir(directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTEMPTY') throw error;
+    });
   }
 
   async cleanup(isolated: IsolatedWorkspace): Promise<void> {

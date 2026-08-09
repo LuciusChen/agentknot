@@ -35,6 +35,24 @@ import type {
 
 export type JobEventListener = (event: JobEvent, job: JobRecord) => Promise<void> | void;
 
+export type JobPersistencePhase = 'admission' | 'event' | 'artifact' | 'terminal';
+
+export class JobPersistenceError extends Error {
+  readonly name = 'JobPersistenceError';
+
+  constructor(
+    readonly phase: JobPersistencePhase,
+    readonly eventType: JobEventType | undefined,
+    cause: unknown
+  ) {
+    const details = errorDetails(cause);
+    super(
+      `Job persistence failed during ${phase}${eventType === undefined ? '' : ` (${eventType})`}: ${details.message}`,
+      { cause }
+    );
+  }
+}
+
 export const ROUTE_DIAGNOSTIC_TIMEOUT_MS = 30_000;
 
 export interface RouteDiagnosticOptions {
@@ -408,8 +426,9 @@ export class Orchestrator {
     if (!adapter) throw new Error(`No adapter registered for worker "${route.worker}"`);
 
     const now = this.#now().toISOString();
+    const id = `job_${randomUUID()}`;
     const job: JobRecord = {
-      id: `job_${randomUUID()}`,
+      id,
       schemaVersion: 1,
       status: 'queued',
       request: normalized,
@@ -417,15 +436,28 @@ export class Orchestrator {
       createdAt: now,
       updatedAt: now,
       attempt: 0,
-      events: [],
+      events: [
+        {
+          sequence: 1,
+          jobId: id,
+          at: now,
+          type: 'job.queued',
+          data: { source: normalized.source ?? 'unknown' },
+        },
+      ],
       execution: structuredClone(this.#execution),
     };
     const controller = new AbortController();
-    await this.#store.create(job);
-    await this.#emit(job, 'job.queued', { source: normalized.source ?? 'unknown' });
+    try {
+      await this.#store.create(job);
+    } catch (error) {
+      throw new JobPersistenceError('admission', undefined, error);
+    }
+    await this.#notifyObserver(job, job.events[0]!);
 
     const execution = this.#execute(job, adapter, controller.signal, inspection).catch(
       async (error: unknown) => {
+        if (error instanceof JobPersistenceError) throw error;
         if (job.status !== 'failed' && job.status !== 'cancelled') {
           const details = errorDetails(error);
           job.status = controller.signal.aborted ? 'cancelled' : 'failed';
@@ -514,8 +546,26 @@ export class Orchestrator {
         if (isolated) {
           try {
             const artifact = await this.#workspaceIsolation.capturePatch(isolated, job.id, attempt);
+            const previousArtifacts = job.artifacts;
             job.artifacts = [...(job.artifacts ?? []), artifact];
-            await this.#emit(job, 'job.artifact', { ...artifact });
+            try {
+              await this.#emit(job, 'job.artifact', { ...artifact });
+            } catch (error) {
+              if (error instanceof JobPersistenceError && error.eventType === 'job.artifact') {
+                if (previousArtifacts === undefined) delete job.artifacts;
+                else job.artifacts = previousArtifacts;
+                try {
+                  await this.#workspaceIsolation.discardPatch(job.id, artifact);
+                } catch (cleanupError) {
+                  throw new JobPersistenceError(
+                    'artifact',
+                    'job.artifact',
+                    new AggregateError([error, cleanupError], 'Artifact persistence and cleanup failed')
+                  );
+                }
+              }
+              throw error;
+            }
           } catch (error) {
             if (failure === undefined) failure = error;
           } finally {
@@ -545,6 +595,8 @@ export class Orchestrator {
         return;
       }
 
+      if (failure instanceof JobPersistenceError) throw failure;
+
       const details = errorDetails(failure ?? new Error('Worker returned no result'));
       const retryable = !jobSignal.aborted && attempt < job.route.maxAttempts;
       job.error = { ...details, attempt, retryable };
@@ -565,6 +617,10 @@ export class Orchestrator {
 
   async #emit(job: JobRecord, type: JobEventType, data?: Record<string, unknown>): Promise<void> {
     const event = await this.#appendEvent(job, type, data);
+    await this.#notifyObserver(job, event);
+  }
+
+  async #notifyObserver(job: JobRecord, event: JobEvent): Promise<void> {
     if (!this.#onEvent) return;
     try {
       await this.#onEvent(structuredClone(event), structuredClone(job));
@@ -586,6 +642,7 @@ export class Orchestrator {
     let appended: JobEvent | undefined;
     const previous = this.#recordMutations.get(job.id) ?? Promise.resolve();
     const current = previous.then(async () => {
+      const previousUpdatedAt = job.updatedAt;
       appended = {
         sequence: job.events.length + 1,
         jobId: job.id,
@@ -595,7 +652,19 @@ export class Orchestrator {
       };
       job.events.push(appended);
       job.updatedAt = at;
-      await this.#store.save(job);
+      try {
+        await this.#store.save(job);
+      } catch (error) {
+        if (job.events.at(-1) === appended) job.events.pop();
+        job.updatedAt = previousUpdatedAt;
+        const phase: JobPersistencePhase =
+          type === 'job.artifact'
+            ? 'artifact'
+            : type === 'job.succeeded' || type === 'job.failed' || type === 'job.cancelled'
+              ? 'terminal'
+              : 'event';
+        throw new JobPersistenceError(phase, type, error);
+      }
     });
     this.#recordMutations.set(job.id, current);
     try {

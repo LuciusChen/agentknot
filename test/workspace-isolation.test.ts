@@ -7,9 +7,10 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 import type { AgentKnotConfig } from '../src/config.js';
-import { Orchestrator } from '../src/orchestrator.js';
+import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { MemoryJobStore } from '../src/store.js';
 import type {
+  JobStore,
   ResolvedRoute,
   WorkerAdapter,
   WorkerEventSink,
@@ -318,6 +319,52 @@ test('each retry starts from the same clean base commit', async () => {
   assert.match(secondPatch.toString(), /attempt-2\.txt/);
   assert.equal(await status(paths.root), '');
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+});
+
+test('artifact persistence failure is not retried and removes unrecorded patch evidence', async () => {
+  const paths = await repository();
+  const delegate = new MemoryJobStore();
+  let runs = 0;
+  let failed = false;
+  const store: JobStore = {
+    create: (job) => delegate.create(job),
+    save: async (job) => {
+      if (job.events.at(-1)?.type === 'job.artifact' && !failed) {
+        failed = true;
+        throw new Error('artifact persistence unavailable');
+      }
+      await delegate.save(job);
+    },
+    get: (id) => delegate.get(id),
+    list: () => delegate.list(),
+  };
+  const adapter = new (class extends TestAdapter {
+    async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+      runs += 1;
+      await writeFile(path.join(input.workspace, 'unrecorded.txt'), 'change\n');
+      return { output: 'worker succeeded' };
+    }
+  })();
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory, 2),
+    store,
+    adapters: new Map([['test', adapter]]),
+  });
+  const started = await orchestrator.start({ prompt: 'artifact failure', workspace: paths.root });
+
+  await assert.rejects(started.completion, (error) => {
+    assert.ok(error instanceof JobPersistenceError);
+    assert.equal(error.phase, 'artifact');
+    assert.equal(error.eventType, 'job.artifact');
+    return true;
+  });
+  const persisted = await delegate.get(started.job.id);
+  assert.equal(runs, 1);
+  assert.equal(persisted?.status, 'running');
+  assert.equal(persisted?.artifacts, undefined);
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+  assert.deepEqual(await readdir(path.join(paths.storage, 'artifacts')), []);
+  assert.equal(await status(paths.root), '');
 });
 
 test('concurrent jobs receive distinct managed worktrees', async () => {

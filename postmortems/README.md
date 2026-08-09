@@ -130,3 +130,6 @@ Incident records should also include severity, user/controller impact, immediate
 | [0016](./0016-shadow-route-selection.md) | Decision | Accepted | Keep route selection shadow-only until measured scorecards |
 | [0017](./0017-deepseek-flash-route-ab.md) | Experiment | Inconclusive | Keep DeepSeek Flash as an explicit candidate after one mixed A/B |
 | [0018](./0018-pi-concurrency-startup-ceiling.md) | Incident | Resolved | Do not treat direct Job bursts as orchestration capacity evidence |
+| [0019](./0019-callback-bookkeeping-persistence-boundary.md) | Incident | Resolved | Keep callback bookkeeping outside execution failure handling |
+| [0020](./0020-human-authored-active-route-selection.md) | Decision | Accepted | Apply only human-authored active route selection |
+| [0021](./0021-job-persistence-failure-boundaries.md) | Incident | Resolved | Keep Job persistence failures out of worker retry |

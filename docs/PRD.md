@@ -95,6 +95,7 @@ Version 0.0.1 currently implements:
 - deterministic mock and Pi RPC worker adapters;
 - OpenCode Go/Luna and xAI/Grok routes through Pi configuration;
 - file-backed or in-memory job snapshots and ordered events;
+- atomic leaf admission containing the queued snapshot and first event, with later persistence failures isolated from worker retry and terminal-result fabrication;
 - top-level `schemaVersion: 1` on new leaf Job and Orchestration records, with schema-less legacy-v1 file reads materialized in memory without rewriting and unsupported explicit versions rejected;
 - immediate execution with cooperative timeouts, retries, and cancellation, plus bounded exact-child supervision in the bundled Pi adapter;
 - reproducible Pi execution that disables ambient extension, skill, prompt-template, and theme discovery while preserving repository instructions and explicitly configured resources;
@@ -148,11 +149,13 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 3. For orchestration, AgentKnot snapshots the effective policy, asks the configured planner route for a strict read-only assessment, validates it, deterministically filters and caps it, optionally evaluates configured shadow or active rules using subtask kind and parent assessment complexity, and persists the plan before any child dispatch; the planner cannot name routes.
 4. An upstream or suggested decision returns without starting child jobs. An automatic decision submits each selected subtask through the ordinary Job API with depth-one provenance and bounded concurrency. Shadow keeps `dispatch.defaultRoute`; active uses the matched configured route or the conservative default, and both carry selection evidence, task kind, and parent complexity in structured child metadata.
 5. For a leaf job, the controller submits a `JobRequest` with a workspace, route, source identity, and optional callback.
-6. AgentKnot validates the request, snapshots the route, creates the job record, and records `job.queued`.
+6. AgentKnot validates the request and snapshots the route, then atomically creates the queued job record with `job.queued`; failure starts no worker.
 7. AgentKnot begins execution, prepares an isolated attempt when configured, and invokes the route's worker adapter.
 8. The adapter translates worker activity into normalized events while AgentKnot owns state, timeout, retry, cancellation, persistence, and cleanup.
 9. AgentKnot captures the terminal attempt artifact, builds the completion summary, and persists it before the terminal event is delivered.
 10. The controller inspects the parent/child evidence and explicitly decides whether to promote an artifact outside AgentKnot.
+
+If event, artifact-recording, or terminal persistence fails after admission, the leaf completion rejects as a control-plane persistence failure. It does not retry the worker, invent a failed terminal result, or deliver a terminal callback; the last successfully persisted snapshot remains authoritative and unrecorded patch evidence is removed.
 
 The current `queued` state is an admission event immediately followed by execution; it does not imply a capacity-aware scheduler.
 

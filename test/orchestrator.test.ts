@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import { createAdapters } from '../src/adapters/index.js';
 import type { AgentKnotConfig } from '../src/config.js';
-import { Orchestrator } from '../src/orchestrator.js';
+import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { FileJobStore, MemoryJobStore } from '../src/store.js';
 import type { JobStore, WorkerAdapter } from '../src/types.js';
 
@@ -19,6 +19,33 @@ const config: AgentKnotConfig = {
     mock: { worker: 'mock', provider: 'mock-provider', model: 'mock-model', maxAttempts: 1 },
   },
 };
+
+function failEventSave(delegate: MemoryJobStore, type: string): JobStore {
+  let failed = false;
+  return {
+    create: (job) => delegate.create(job),
+    save: async (job) => {
+      if (job.events.at(-1)?.type === type && !failed) {
+        failed = true;
+        throw new Error(`${type} persistence unavailable`);
+      }
+      await delegate.save(job);
+    },
+    get: (id) => delegate.get(id),
+    list: () => delegate.list(),
+  };
+}
+
+function assertPersistenceError(
+  error: unknown,
+  phase: JobPersistenceError['phase'],
+  eventType?: JobPersistenceError['eventType']
+): boolean {
+  assert.ok(error instanceof JobPersistenceError);
+  assert.equal(error.phase, phase);
+  assert.equal(error.eventType, eventType);
+  return true;
+}
 
 test('Orchestrator persists a complete evented job without knowing the controller vendor', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-orchestrator-'));
@@ -43,6 +70,125 @@ test('Orchestrator persists a complete evented job without knowing the controlle
     [1, 2, 3, 4, 5]
   );
   assert.equal((await store.get(job.id))?.status, 'succeeded');
+});
+
+test('Job admission atomically creates the queued event or starts no worker', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-admission-failure-'));
+  let runs = 0;
+  let admitted: Parameters<JobStore['create']>[0] | undefined;
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'ready' };
+    },
+    async run() {
+      runs += 1;
+      return { output: 'unexpected' };
+    },
+  };
+  const store: JobStore = {
+    async create(job) {
+      admitted = structuredClone(job);
+      throw new Error('admission persistence unavailable');
+    },
+    async save() {
+      throw new Error('unexpected save');
+    },
+    async get() {
+      return undefined;
+    },
+    async list() {
+      return [];
+    },
+  };
+  const orchestrator = new Orchestrator({
+    config,
+    store,
+    adapters: new Map([['mock', adapter]]),
+  });
+
+  await assert.rejects(
+    orchestrator.run({ prompt: 'admission failure', workspace }),
+    (error) => assertPersistenceError(error, 'admission')
+  );
+  assert.equal(runs, 0);
+  assert.equal(admitted?.status, 'queued');
+  assert.deepEqual(admitted?.events.map((event) => event.type), ['job.queued']);
+  assert.equal(admitted?.events[0]?.jobId, admitted?.id);
+});
+
+test('event persistence failure is not retried or rewritten as worker failure', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-event-store-failure-'));
+  const delegate = new MemoryJobStore();
+  let runs = 0;
+  let callbacks = 0;
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'ready' };
+    },
+    async run(_input, emit) {
+      runs += 1;
+      await emit('worker.started');
+      return { output: 'unexpected' };
+    },
+  };
+  const retryConfig = structuredClone(config);
+  retryConfig.routes.mock!.maxAttempts = 2;
+  const orchestrator = new Orchestrator({
+    config: retryConfig,
+    store: failEventSave(delegate, 'worker.started'),
+    adapters: new Map([['mock', adapter]]),
+    fetch: async () => {
+      callbacks += 1;
+      return new Response(null, { status: 204 });
+    },
+  });
+  const started = await orchestrator.start({
+    prompt: 'event failure',
+    workspace,
+    callbackUrl: 'https://controller.invalid/jobs',
+  });
+
+  await assert.rejects(started.completion, (error) =>
+    assertPersistenceError(error, 'event', 'worker.started')
+  );
+  const persisted = await delegate.get(started.job.id);
+  assert.equal(runs, 1);
+  assert.equal(callbacks, 0);
+  assert.equal(persisted?.status, 'running');
+  assert.deepEqual(persisted?.events.map((event) => event.type), ['job.queued', 'job.started']);
+});
+
+test('terminal persistence failure preserves the last good running snapshot', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-terminal-store-failure-'));
+  const delegate = new MemoryJobStore();
+  let runs = 0;
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'ready' };
+    },
+    async run() {
+      runs += 1;
+      return { output: 'worker succeeded' };
+    },
+  };
+  const orchestrator = new Orchestrator({
+    config,
+    store: failEventSave(delegate, 'job.succeeded'),
+    adapters: new Map([['mock', adapter]]),
+  });
+  const started = await orchestrator.start({ prompt: 'terminal failure', workspace });
+
+  await assert.rejects(started.completion, (error) =>
+    assertPersistenceError(error, 'terminal', 'job.succeeded')
+  );
+  const persisted = await delegate.get(started.job.id);
+  assert.equal(runs, 1);
+  assert.equal(persisted?.status, 'running');
+  assert.equal(persisted?.result, undefined);
+  assert.deepEqual(persisted?.events.map((event) => event.type), ['job.queued', 'job.started']);
 });
 
 test('Orchestrator sends the terminal job to an optional callback', async () => {

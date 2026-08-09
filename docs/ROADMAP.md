@@ -77,7 +77,7 @@ Make leaf-job semantics and the bounded delegation slice reliable enough that a 
 - [x] Make live event-listener failure advisory so observer failure cannot accidentally retry or fail worker execution.
 - Define and test persistence-failure behavior at admission, event append, terminal transition, artifact recording, and callback bookkeeping.
   - [x] Keep callback-bookkeeping persistence outside the execution failure path: attempt delivery once, preserve the already-persisted terminal result, never redeliver, and reject completion with the store error when its delivery state cannot be saved ([incident 0019](../postmortems/0019-callback-bookkeeping-persistence-boundary.md)).
-  - [ ] Define the remaining admission, event-append, terminal-transition, and artifact-recording failure boundaries without treating store failures as worker failures.
+  - [x] Atomically admit `queued` with `job.queued`; classify event, artifact-recording, and terminal-transition save failures as control-plane persistence errors without worker retry, substitute terminal state, or callback delivery; remove unrecorded patches and retain the last good snapshot for restart reconciliation ([incident 0021](../postmortems/0021-job-persistence-failure-boundaries.md)).
 - On startup, detect stale nonterminal records and deterministically mark or reconcile them; resumable execution is not required in this stage.
 - Define the supported single-process concurrency model and reject unsupported multi-process writers clearly.
 - Bound event, raw worker data, stderr, result, callback payload, and record growth.
