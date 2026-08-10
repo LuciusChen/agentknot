@@ -11,7 +11,54 @@ import type {
 
 const HTTP_OPERATION_TIMEOUT_MS = 10_000;
 const MAX_HTTP_RESPONSE_BYTES = 17 * 1024 * 1024;
-const POLL_INTERVAL_MS = 100;
+const WAIT_RETRY_DELAY_MS = 1_000;
+const WAIT_RECONNECT_ATTEMPTS = 3;
+
+interface WaitActivity {
+  readonly sequence: number;
+  readonly at: string;
+  readonly type: string;
+}
+
+interface WaitChildProgress {
+  readonly subtaskId: string;
+  readonly jobId: string;
+  readonly status: string;
+  readonly route?: string;
+  readonly lastActivity?: WaitActivity;
+}
+
+export type AgentKnotWaitProgress =
+  | {
+      readonly schemaVersion: 1;
+      readonly kind: 'job';
+      readonly id: string;
+      readonly status: string;
+      readonly updatedAt: string;
+      readonly route: string;
+      readonly attempt?: number;
+      readonly lastActivity?: WaitActivity;
+    }
+  | {
+      readonly schemaVersion: 1;
+      readonly kind: 'orchestration';
+      readonly id: string;
+      readonly status: string;
+      readonly phase: string;
+      readonly updatedAt: string;
+      readonly lastActivity?: WaitActivity;
+      readonly children: readonly WaitChildProgress[];
+    };
+
+export type AgentKnotWaitUpdate =
+  | { readonly connectivity: 'connected'; readonly progress: AgentKnotWaitProgress }
+  | {
+      readonly connectivity: 'disconnected';
+      readonly id: string;
+      readonly attempt: number;
+      readonly maxAttempts: number;
+      readonly message: string;
+    };
 
 export interface AgentKnotHealthResponse {
   readonly ok: true;
@@ -79,8 +126,35 @@ function terminal(status: string): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'cancelled';
 }
 
-function delay(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function waitProgress(value: unknown, kind: AgentKnotWaitProgress['kind'], id: string): AgentKnotWaitProgress {
+  const progress = asObject(value, `${kind} wait response.wait`);
+  if (
+    progress.schemaVersion !== 1 ||
+    progress.kind !== kind ||
+    progress.id !== id ||
+    typeof progress.status !== 'string' ||
+    typeof progress.updatedAt !== 'string'
+  ) {
+    throw new AgentKnotHttpClientError(`${kind} wait response.wait is invalid`);
+  }
+  if (kind === 'job') {
+    if (typeof progress.route !== 'string') {
+      throw new AgentKnotHttpClientError('job wait response.wait.route must be a string');
+    }
+  } else if (typeof progress.phase !== 'string' || !Array.isArray(progress.children)) {
+    throw new AgentKnotHttpClientError('orchestration wait response.wait progress is invalid');
+  }
+  return progress as unknown as AgentKnotWaitProgress;
+}
+
+function retryableTransportError(error: unknown): error is AgentKnotHttpClientError {
+  return error instanceof AgentKnotHttpClientError &&
+    error.status === undefined &&
+    error.message.startsWith('AgentKnot server request failed:');
 }
 
 export class AgentKnotHttpClient {
@@ -214,17 +288,43 @@ export class AgentKnotHttpClient {
     return body.orchestrations as OrchestrationRecord[];
   }
 
-  async waitForOrchestration(initial: OrchestrationRecord): Promise<OrchestrationRecord> {
-    let record = initial;
-    while (!terminal(record.status)) {
-      await delay();
-      const current = await this.getOrchestration(record.id);
-      if (current === undefined) {
-        throw new AgentKnotHttpClientError(`Orchestration disappeared from server: ${record.id}`);
+  async waitForOrchestration(
+    initial: OrchestrationRecord,
+    onUpdate?: (update: AgentKnotWaitUpdate) => void
+  ): Promise<OrchestrationRecord> {
+    if (terminal(initial.status)) return initial;
+    let reconnectAttempts = 0;
+    while (true) {
+      try {
+        const body = asObject(
+          await this.#request(`/v1/orchestrations/${encodeURIComponent(initial.id)}/wait`),
+          'orchestration wait response'
+        );
+        reconnectAttempts = 0;
+        if (body.orchestration !== undefined) {
+          return asObject(
+            body.orchestration,
+            'orchestration wait response.orchestration'
+          ) as unknown as OrchestrationRecord;
+        }
+        onUpdate?.({
+          connectivity: 'connected',
+          progress: waitProgress(body.wait, 'orchestration', initial.id),
+        });
+      } catch (error) {
+        if (!retryableTransportError(error)) throw error;
+        reconnectAttempts += 1;
+        onUpdate?.({
+          connectivity: 'disconnected',
+          id: initial.id,
+          attempt: reconnectAttempts,
+          maxAttempts: WAIT_RECONNECT_ATTEMPTS,
+          message: error.message,
+        });
+        if (reconnectAttempts >= WAIT_RECONNECT_ATTEMPTS) throw error;
+        await delay(WAIT_RETRY_DELAY_MS);
       }
-      record = current;
     }
-    return record;
   }
 
   async cancelOrchestration(id: string): Promise<void> {
@@ -268,15 +368,40 @@ export class AgentKnotHttpClient {
     return body as unknown as JobList;
   }
 
-  async waitForJob(initial: JobRecord): Promise<JobRecord> {
-    let record = initial;
-    while (!terminal(record.status)) {
-      await delay();
-      const current = await this.getJob(record.id);
-      if (current === undefined) throw new AgentKnotHttpClientError(`Job disappeared from server: ${record.id}`);
-      record = current;
+  async waitForJob(
+    initial: JobRecord,
+    onUpdate?: (update: AgentKnotWaitUpdate) => void
+  ): Promise<JobRecord> {
+    if (terminal(initial.status)) return initial;
+    let reconnectAttempts = 0;
+    while (true) {
+      try {
+        const body = asObject(
+          await this.#request(`/v1/jobs/${encodeURIComponent(initial.id)}/wait`),
+          'job wait response'
+        );
+        reconnectAttempts = 0;
+        if (body.job !== undefined) {
+          return asObject(body.job, 'job wait response.job') as unknown as JobRecord;
+        }
+        onUpdate?.({
+          connectivity: 'connected',
+          progress: waitProgress(body.wait, 'job', initial.id),
+        });
+      } catch (error) {
+        if (!retryableTransportError(error)) throw error;
+        reconnectAttempts += 1;
+        onUpdate?.({
+          connectivity: 'disconnected',
+          id: initial.id,
+          attempt: reconnectAttempts,
+          maxAttempts: WAIT_RECONNECT_ATTEMPTS,
+          message: error.message,
+        });
+        if (reconnectAttempts >= WAIT_RECONNECT_ATTEMPTS) throw error;
+        await delay(WAIT_RETRY_DELAY_MS);
+      }
     }
-    return record;
   }
 
   async cancelJob(id: string): Promise<void> {

@@ -37,3 +37,11 @@ The deleted cache path was recreated as a local compatibility symlink to the new
 ## Non-goals
 
 This incident does not add a bundled CLI, a stable global hook dispatcher, automatic controller restart, or control over Codex's cache retention policy.
+
+## Addenda
+
+### 2026-08-10: reinstall still removes the active root
+
+While deploying cachebuster `0.1.0+codex.20260810142849`, `codex plugin add agentknot@agentknot` again removed the previously installed directory `0.1.0+codex.20260810195625`. Existing compatibility links still ended at that now-missing name, and two live Codex processes remained. The missing path was detected before the next hook invocation and restored as an exact symlink to the newly validated package; resolution through the old root and the installed status message were then verified.
+
+The operational rule is therefore stronger than “prefer preservation”: before reinstall, record every live or current installed root; immediately afterward, verify that each still resolves and recreate only the exact missing compatible names as links to the new package. Do not assume the Codex installer retains them.

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,12 +10,13 @@ import { promisify } from 'node:util';
 
 import { createAdapters } from '../src/adapters/index.js';
 import type { AgentKnotConfig } from '../src/config.js';
-import { AgentKnotHttpClient } from '../src/http-client.js';
+import { AgentKnotHttpClient, type AgentKnotWaitUpdate } from '../src/http-client.js';
 import { createAgentKnotHttpServer } from '../src/http-server.js';
 import type { AgentKnotHttpRuntime } from '../src/http-server.js';
 import { buildJobList, MAX_JOB_LIST_RESPONSE_BYTES } from '../src/job-list.js';
 import { OrchestrationService } from '../src/orchestration.js';
 import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
+import type { OrchestrationRecord } from '../src/orchestration-types.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { AgentKnotRuntime } from '../src/runtime.js';
 import { MemoryJobStore } from '../src/store.js';
@@ -116,6 +118,72 @@ test('HTTP liveness endpoints are identical, leave readiness absent, and do not 
   }
 });
 
+test('HTTP client distinguishes disconnects and reconnects only to the same admitted job', async () => {
+  const now = new Date().toISOString();
+  const admitted: JobRecord = {
+    schemaVersion: 1,
+    id: 'job_disconnect_test',
+    status: 'running',
+    request: { prompt: 'bounded test', workspace: '/tmp/test' },
+    route: {
+      name: 'mock',
+      worker: 'mock',
+      provider: 'mock',
+      model: 'mock',
+      requiredEnv: [],
+      maxAttempts: 1,
+      timeoutMs: 30_000,
+    },
+    createdAt: now,
+    updatedAt: now,
+    attempt: 1,
+    events: [],
+  };
+  let admissions = 0;
+  const waitPaths: string[] = [];
+  const server = createServer((request, response) => {
+    request.resume();
+    if (request.method === 'POST' && request.url === '/v1/jobs') {
+      admissions += 1;
+      response.writeHead(202, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ job: admitted }));
+      return;
+    }
+    if (request.url === `/v1/jobs/${admitted.id}/wait`) {
+      waitPaths.push(request.url);
+      request.socket.destroy();
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string');
+  const client = new AgentKnotHttpClient(`http://127.0.0.1:${address.port}`);
+  const updates: AgentKnotWaitUpdate[] = [];
+  try {
+    const initial = await client.startJob(admitted.request);
+    await assert.rejects(client.waitForJob(initial, (update) => updates.push(update)), /fetch failed/);
+    assert.equal(admissions, 1);
+    assert.deepEqual(waitPaths, Array.from({ length: 3 }, () => `/v1/jobs/${admitted.id}/wait`));
+    assert.deepEqual(
+      updates.map((update) =>
+        update.connectivity === 'disconnected' ? [update.connectivity, update.attempt] : [update.connectivity]
+      ),
+      [
+        ['disconnected', 1],
+        ['disconnected', 2],
+        ['disconnected', 3],
+      ]
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('HTTP API accepts work from a vendor-neutral controller and exposes the result', async () => {
   const config: AgentKnotConfig = {
     version: 1,
@@ -130,6 +198,8 @@ test('HTTP API accepts work from a vendor-neutral controller and exposes the res
     adapters: createAdapters(config),
   });
   const http = createAgentKnotHttpServer(orchestrator);
+  const requestedPaths: string[] = [];
+  http.server.on('request', (request) => requestedPaths.push(request.url ?? ''));
   const address = await http.listen(0);
   const baseUrl = `http://${address.host}:${address.port}`;
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-http-'));
@@ -141,16 +211,17 @@ test('HTTP API accepts work from a vendor-neutral controller and exposes the res
       body: JSON.stringify({ prompt: 'http task', workspace, source: 'codex' }),
     });
     assert.equal(createdResponse.status, 202);
-    const created = (await createdResponse.json()) as { job: { id: string } };
-
-    let status = 'queued';
-    for (let attempt = 0; attempt < 20 && status !== 'succeeded'; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      const response = await fetch(`${baseUrl}/v1/jobs/${created.job.id}`);
-      const body = (await response.json()) as { job: { status: string } };
-      status = body.job.status;
-    }
-    assert.equal(status, 'succeeded');
+    const created = (await createdResponse.json()) as { job: JobRecord };
+    const terminal = await new AgentKnotHttpClient(baseUrl).waitForJob(created.job);
+    assert.equal(terminal.status, 'succeeded');
+    assert.deepEqual(
+      requestedPaths.filter((requestedPath) => requestedPath === `/v1/jobs/${created.job.id}/wait`),
+      [`/v1/jobs/${created.job.id}/wait`]
+    );
+    assert.equal(
+      requestedPaths.filter((requestedPath) => requestedPath === `/v1/jobs/${created.job.id}`).length,
+      0
+    );
   } finally {
     await http.close();
   }
@@ -434,6 +505,8 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
     store: new MemoryOrchestrationStore(),
   });
   const http = createAgentKnotHttpServer(new AgentKnotRuntime(jobs, orchestrations));
+  const requestedPaths: string[] = [];
+  http.server.on('request', (request) => requestedPaths.push(request.url ?? ''));
   const address = await http.listen(0);
   const baseUrl = `http://${address.host}:${address.port}`;
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-http-orchestration-'));
@@ -450,16 +523,22 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
       body: JSON.stringify({ prompt: 'Coordinate this task.', workspace, source: 'claude' }),
     });
     assert.equal(createdResponse.status, 202);
-    const created = (await createdResponse.json()) as { orchestration: { id: string } };
-
-    let terminal: { status: string; result?: { action: string } } | undefined;
-    for (let attempt = 0; attempt < 20 && terminal?.status !== 'succeeded'; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      const response = await fetch(`${baseUrl}/v1/orchestrations/${created.orchestration.id}`);
-      terminal = ((await response.json()) as { orchestration: typeof terminal }).orchestration;
-    }
-    assert.equal(terminal?.status, 'succeeded');
-    assert.equal(terminal?.result?.action, 'upstream');
+    const created = (await createdResponse.json()) as { orchestration: OrchestrationRecord };
+    const terminal = await new AgentKnotHttpClient(baseUrl).waitForOrchestration(created.orchestration);
+    assert.equal(terminal.status, 'succeeded');
+    assert.equal(terminal.result?.action, 'upstream');
+    assert.deepEqual(
+      requestedPaths.filter(
+        (requestedPath) => requestedPath === `/v1/orchestrations/${created.orchestration.id}/wait`
+      ),
+      [`/v1/orchestrations/${created.orchestration.id}/wait`]
+    );
+    assert.equal(
+      requestedPaths.filter(
+        (requestedPath) => requestedPath === `/v1/orchestrations/${created.orchestration.id}`
+      ).length,
+      0
+    );
 
     const eventsResponse = await fetch(
       `${baseUrl}/v1/orchestrations/${created.orchestration.id}/events`

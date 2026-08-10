@@ -19,7 +19,7 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" codex '$agentknot-delegate'",
             "timeout": 3660,
-            "statusMessage": "Running AgentKnot automatic delegation",
+            "statusMessage": "AgentKnot is planning, running workers, and verifying; expand for live progress",
             "additionalContextLimit": 18000
           }
         ]

@@ -62,12 +62,25 @@ function block(reason) {
   );
 }
 
-async function run(args, cwd) {
-  return execFileAsync('agentknot', args, {
-    cwd,
-    env: process.env,
-    encoding: 'utf8',
-    maxBuffer: MAX_BUFFER_BYTES,
+function run(args, cwd, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = execFile('agentknot', args, {
+      cwd,
+      env: process.env,
+      encoding: 'utf8',
+      maxBuffer: MAX_BUFFER_BYTES,
+    }, (error, stdout, stderr) => {
+      if (error !== null) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+    if (options.forwardStderr === true) {
+      child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
+    }
   });
 }
 
@@ -415,11 +428,13 @@ try {
         '--delegation',
         'inherit',
         '--handoff-json',
+        '--progress',
         '--prompt',
         event.prompt,
         ...connectionArgs,
       ],
-      workspace
+      workspace,
+      { forwardStderr: true }
     ));
   } catch (error) {
     handoffOutput = commandFailureStdout(error);

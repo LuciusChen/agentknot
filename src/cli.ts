@@ -2,7 +2,7 @@
 
 import process from 'node:process';
 
-import { AgentKnotHttpClient } from './http-client.js';
+import { AgentKnotHttpClient, type AgentKnotWaitUpdate } from './http-client.js';
 import { createAgentKnotHttpServer } from './http-server.js';
 import { buildJobList } from './job-list.js';
 import {
@@ -87,6 +87,7 @@ Run options:
   --callback URL      POST the terminal Job record to this URL
   --json              Print only the final Job record as JSON
   --events            Stream every event as JSONL
+  --progress          Print compact remote wait progress to stderr
 
 Orchestrate options:
   --prompt TEXT       Goal instead of positional text
@@ -96,6 +97,7 @@ Orchestrate options:
   --suggest           Alias for --delegation suggest
   --json              Print the terminal orchestration record as JSON
   --handoff-json      Print compact terminal/controller handoff JSON
+  --progress          Print compact remote wait progress to stderr
 
 Doctor options:
   --route NAME        Exact configured route to diagnose
@@ -272,6 +274,48 @@ function printEvent(event: JobEvent, json: boolean, events: boolean): void {
   } else if (event.type.startsWith('job.')) {
     process.stderr.write(`[${event.type}] ${event.jobId}\n`);
   }
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
+}
+
+function createWaitProgressReporter(enabled: boolean): (update: AgentKnotWaitUpdate) => void {
+  let previousFingerprint = '';
+  let previousPrintedAt = 0;
+  return (update) => {
+    if (!enabled) return;
+    const now = Date.now();
+    if (update.connectivity === 'disconnected') {
+      process.stderr.write(
+        `[agentknot] disconnected id=${update.id} reconnect=${update.attempt}/${update.maxAttempts}\n`
+      );
+      previousFingerprint = '';
+      previousPrintedAt = now;
+      return;
+    }
+    const progress = update.progress;
+    const activities = progress.kind === 'job'
+      ? [progress.lastActivity]
+      : [progress.lastActivity, ...progress.children.map((child) => child.lastActivity)];
+    const lastActivity = activities
+      .filter((activity): activity is NonNullable<typeof activity> => activity !== undefined)
+      .sort((left, right) => Date.parse(right.at) - Date.parse(left.at))[0];
+    const phase = progress.kind === 'job' ? progress.status : progress.phase;
+    const children = progress.kind === 'orchestration'
+      ? ` children=${progress.children.map((child) => `${child.status}:${child.route ?? 'unknown'}`).join(',') || 'none'}`
+      : ` route=${progress.route}`;
+    const activity = lastActivity === undefined
+      ? ' last=none'
+      : ` last=${lastActivity.type} age=${formatElapsed(now - Date.parse(lastActivity.at))}`;
+    const fingerprint = `${progress.kind}|${phase}|${children}|${lastActivity?.sequence ?? 0}`;
+    if (fingerprint === previousFingerprint && now - previousPrintedAt < 15_000) return;
+    process.stderr.write(`[agentknot] connected id=${progress.id} phase=${phase}${children}${activity}\n`);
+    previousFingerprint = fingerprint;
+    previousPrintedAt = now;
+  };
 }
 
 async function orchestrationHandoff(
@@ -541,6 +585,7 @@ async function main(argv: string[]): Promise<void> {
     const promptOption = takeOption(args, '--prompt');
     const json = takeFlag(args, '--json');
     const events = takeFlag(args, '--events');
+    const progress = takeFlag(args, '--progress');
     if (args.some((value) => value.startsWith('--'))) throw new Error(`Unknown option: ${args.join(' ')}`);
     const prompt = promptOption ?? args.join(' ');
     const request: JobRequest = {
@@ -553,8 +598,9 @@ async function main(argv: string[]): Promise<void> {
     if (remote !== undefined) {
       if (events) throw new Error('--events is not available with a selected server; inspect persisted events');
       const initial = await remote.startJob(request);
+      if (progress) process.stderr.write(`[agentknot] connected id=${initial.id} phase=${initial.status}\n`);
       const stopCancellation = cancelOnTermination(() => remote.cancelJob(initial.id));
-      const job = await remote.waitForJob(initial).finally(stopCancellation);
+      const job = await remote.waitForJob(initial, createWaitProgressReporter(progress)).finally(stopCancellation);
       if (!json) process.stdout.write(`\n${job.id}\t${job.status}\n`);
       else process.stdout.write(`${JSON.stringify(job, null, 2)}\n`);
       if (job.status !== 'succeeded') process.exitCode = 1;
@@ -591,6 +637,7 @@ async function main(argv: string[]): Promise<void> {
     const suggest = takeFlag(args, '--suggest');
     const json = takeFlag(args, '--json');
     const handoffJson = takeFlag(args, '--handoff-json');
+    const progress = takeFlag(args, '--progress');
     if (json && handoffJson) throw new Error('--json and --handoff-json cannot be used together');
     if (suggest && delegationOption !== undefined) {
       throw new Error('--suggest and --delegation cannot be used together');
@@ -611,8 +658,11 @@ async function main(argv: string[]): Promise<void> {
     };
     if (remote !== undefined) {
       const initial = await remote.startOrchestration(request);
+      if (progress) process.stderr.write(`[agentknot] connected id=${initial.id} phase=${initial.status}\n`);
       const stopCancellation = cancelOnTermination(() => remote.cancelOrchestration(initial.id));
-      const orchestration = await remote.waitForOrchestration(initial).finally(stopCancellation);
+      const orchestration = await remote
+        .waitForOrchestration(initial, createWaitProgressReporter(progress))
+        .finally(stopCancellation);
       const handoff = handoffJson
         ? await orchestrationHandoff(remote, orchestration)
         : undefined;

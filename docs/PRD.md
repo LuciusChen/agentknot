@@ -55,6 +55,7 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 10. Optionally obtain controller-owned test evidence for one bounded patch without first applying it to the supplied source workspace.
 11. Use one local AgentKnot execution owner concurrently from multiple upstream controller sessions without sharing file-store write authority with those clients.
 12. Start one exact `127.0.0.1` AgentKnot server once, then let later CLI, Codex, and Claude sessions discover it without shell-profile edits or repeated server flags while retaining deliberate local/server overrides.
+13. Wait for delegated work with visible compact phase/activity evidence, distinguish an active worker from a lost middleware connection, and never resubmit the task merely because a client reconnects.
 
 ## Product principles
 
@@ -69,6 +70,8 @@ A route resolves worker, provider, model, thinking level, timeout, and retry set
 ### Records first, live signals second
 
 The durable job record and its ordered events are the authority. Streaming, callbacks, dashboards, or notifications are delivery conveniences and must not become the only copy of state.
+
+Repository analysis must also remain bounded at admission: unless exhaustive coverage is explicitly requested, the planner and worker contract names the execution workspace, references, exact scope, and non-goals, then returns only a small decision-relevant evidence set rather than an inventory or source restatement.
 
 ### Honest capabilities
 

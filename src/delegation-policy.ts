@@ -125,6 +125,7 @@ export function buildPlannerPrompt(request: OrchestrationRequest, config: Delega
     'Delegation and parallelism are separate decisions. A single bounded eligible task may be delegated as exactly one nonparallel subtask with "parallelizable":false; lack of a useful split alone must not cause a "do-not-delegate" recommendation.',
     'A bounded task in a preferred delegatable kind that is expected to create or modify a repository file must receive a "delegate" recommendation even when it is small, low-complexity, or nonparallel; task size and generic handoff/review overhead alone are not reasons to retain deliverable-producing work upstream.',
     'A concrete repository investigation that must search, compare, or interpret project content and return independently verifiable findings is a "repository-analysis" deliverable and must receive a "delegate" recommendation even when it is read-only, low-complexity, or nonparallel.',
+    'For every "repository-analysis" subtask, name the execution workspace, any referenced repository or "none", the exact files/components to inspect, and explicit non-goals. Request only decision-relevant deltas: at most five findings and 4000 characters, each backed by concise path/line evidence and impact. Do not request a repository inventory, exhaustive source summary, or restatement of inspected material unless the user explicitly asks for one.',
     'Keep only genuinely trivial read-only inspection or direct-answer work upstream, such as retrieving one explicit fact from one already identified location; do not retain evidence-producing repository analysis merely because it creates no patch. If work stays upstream, state that boundary rather than citing the lack of a parallel split.',
     'Optimize for useful parallelism, not the largest task count. Mark parallelizable true only when subtasks have no execution-order dependency and their expected write scopes do not overlap.',
     'Each parallel subtask prompt must name its bounded file or component scope, explicit non-goals, and acceptance criteria. If work must share a contract or edit the same files, keep it in one subtask or mark the plan non-parallel.',
@@ -136,6 +137,8 @@ export function buildPlannerPrompt(request: OrchestrationRequest, config: Delega
     'Return the assessment object as JSON only with exactly this shape and no markdown fence. If a later transport instruction requires a marked completion-report suffix, put that suffix on the next line; it is the only permitted text outside the assessment object:',
     '{"schemaVersion":1,"recommendation":"delegate|do-not-delegate","complexity":"low|medium|high","parallelizable":true|false,"taskKinds":["kind"],"reasoning":"short explanation","subtasks":[{"title":"short title","kind":"kind","prompt":"self-contained bounded instruction","acceptanceCriteria":["objective check"]}]}',
     'Use an empty subtasks array only when the work must remain upstream, cannot be bounded for a worker, or is a genuinely trivial direct lookup of one explicit fact from one already identified location; never use it merely because the work is read-only, creates no patch, is small, or cannot be split. Do not wrap the assessment JSON in commentary.',
+    '',
+    `Execution workspace: ${request.workspace}`,
     '',
     'Task:',
     request.prompt,
@@ -154,20 +157,32 @@ export function skippedTaskAssessment(reasoning: string): TaskAssessment {
   };
 }
 
-function executionPrompt(parentPrompt: string, subtask: AssessedSubtask): string {
+function executionPrompt(request: OrchestrationRequest, subtask: AssessedSubtask): string {
+  const repositoryAnalysisBoundary = subtask.kind === 'repository-analysis'
+    ? [
+        '',
+        'Repository-analysis boundary:',
+        `- Execution workspace: ${request.workspace}`,
+        '- Treat other repositories as read-only references unless the subtask explicitly names them as an edit target.',
+        '- Return only decision-relevant deltas: at most five findings and 4000 characters total.',
+        '- For each finding, provide only the concise path/line evidence needed to support its impact.',
+        '- Do not inventory the repository, restate source material, or broaden the requested scope.',
+      ]
+    : [];
   return [
     'You are executing one bounded subtask selected by AgentKnot.',
     'Do not recursively delegate. Do not commit, push, merge, or apply artifacts to another workspace.',
     'Stay within the subtask\'s stated file/component scope. Report any necessary out-of-scope or overlapping change instead of silently broadening the edit.',
     '',
     'Parent task:',
-    parentPrompt,
+    request.prompt,
     '',
     `Subtask: ${subtask.title}`,
     subtask.prompt,
     '',
     'Acceptance criteria:',
     ...subtask.acceptanceCriteria.map((criterion) => `- ${criterion}`),
+    ...repositoryAnalysisBoundary,
     '',
     'Run relevant checks and report files changed, checks run, and remaining risks.',
   ].join('\n');
@@ -280,7 +295,7 @@ export function composeDelegationPlan(
           selectionEvidence?.mode === 'active'
             ? selectionEvidence.selectedRoute
             : config.dispatch.defaultRoute,
-        executionPrompt: executionPrompt(request.prompt, subtask),
+        executionPrompt: executionPrompt(request, subtask),
         ...(selectionEvidence === undefined ? {} : { routeSelection: selectionEvidence }),
       };
     });

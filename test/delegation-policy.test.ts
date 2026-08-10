@@ -83,6 +83,10 @@ test('planner instructions delegate bounded repository deliverables and evidence
   assert.match(prompt, /even when it is read-only, low-complexity, or nonparallel/);
   assert.match(prompt, /retrieving one explicit fact from one already identified location/);
   assert.match(prompt, /do not retain evidence-producing repository analysis merely because it creates no patch/);
+  assert.match(prompt, /Execution workspace: \/tmp\/project/);
+  assert.match(prompt, /any referenced repository or "none"/);
+  assert.match(prompt, /at most five findings and 4000 characters/);
+  assert.match(prompt, /Do not request a repository inventory, exhaustive source summary/);
   assert.match(prompt, /"parallelizable":true\|false/);
   assert.match(prompt, /Use an empty subtasks array only when the work must remain upstream, cannot be bounded/);
   assert.match(prompt, /genuinely trivial direct lookup of one explicit fact from one already identified location/);
@@ -327,6 +331,10 @@ test('small low-complexity repository work is delegated once and selected by the
     analysisPlan.subtasks.map((subtask) => [subtask.kind, subtask.route, subtask.routeSelection?.basis]),
     [['repository-analysis', 'deepseek-flash', 'rule']]
   );
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Repository-analysis boundary:/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Execution workspace: \/tmp\/project/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /at most five findings and 4000 characters/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Do not inventory the repository/);
 });
 
 test('composeDelegationPlan deterministically applies allowlists, keep-upstream rules, caps, and suggest mode', () => {

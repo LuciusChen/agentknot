@@ -225,7 +225,7 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
       type: 'command',
       command: `node "\${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs" ${integration.controller} '${integration.explicitInvocation}'`,
       timeout: 3660,
-      statusMessage: 'Running AgentKnot automatic delegation',
+      statusMessage: 'AgentKnot is planning, running workers, and verifying; expand for live progress',
       additionalContextLimit: 18000,
     });
     assert.deepEqual(hook.hooks?.SessionEnd, [
@@ -246,6 +246,8 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     assert.match(hookScript, /artifact-preview/);
     assert.match(hookScript, /AGENTKNOT_SERVER_URL/);
     assert.match(hookScript, /'--server'/);
+    assert.match(hookScript, /'--progress'/);
+    assert.match(hookScript, /forwardStderr: true/);
     assert.match(hookScript, /'inherit'/);
     assert.doesNotMatch(hookScript, /git\s+(?:apply|am|commit|push|merge)\b/);
     if (integration.agentMetadata !== undefined) {
@@ -806,6 +808,7 @@ for (const integration of integrations) {
         '--delegation',
         'inherit',
         '--handoff-json',
+        '--progress',
         '--prompt',
         prompt,
         '--server',
@@ -862,6 +865,7 @@ for (const integration of integrations) {
         '--delegation',
         'inherit',
         '--handoff-json',
+        '--progress',
         '--prompt',
         prompt,
         '--config',
@@ -969,6 +973,7 @@ for (const integration of integrations) {
         '--delegation',
         'inherit',
         '--handoff-json',
+        '--progress',
         '--prompt',
         prompt,
         '--server',
@@ -1032,6 +1037,7 @@ for (const integration of integrations) {
         '--delegation',
         'inherit',
         '--handoff-json',
+        '--progress',
         '--prompt',
         prompt,
         '--config',
@@ -1094,6 +1100,7 @@ for (const integration of integrations) {
         '--delegation',
         'inherit',
         '--handoff-json',
+        '--progress',
         '--prompt',
         prompt,
         '--config',

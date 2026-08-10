@@ -18,6 +18,7 @@ import type {
 import type { JobRecord } from './types.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
+const WAIT_HEARTBEAT_MS = 5_000;
 const LIVE_HEALTH_RESPONSE = {
   ok: true,
   service: 'agentknot',
@@ -37,6 +38,92 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
     'cache-control': 'no-store',
   });
   response.end(data);
+}
+
+function terminal(status: string): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
+}
+
+async function completionOrHeartbeat<T>(completion: Promise<T>): Promise<T | undefined> {
+  let timer: number | undefined;
+  try {
+    return await Promise.race([
+      completion,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(resolve, WAIT_HEARTBEAT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function compactJobProgress(job: JobRecord): object {
+  const lastEvent = job.events.at(-1);
+  return {
+    schemaVersion: 1,
+    kind: 'job',
+    id: job.id,
+    status: job.status,
+    updatedAt: job.updatedAt,
+    route: job.route.name,
+    attempt: job.attempt,
+    ...(lastEvent === undefined
+      ? {}
+      : {
+          lastActivity: {
+            sequence: lastEvent.sequence,
+            at: lastEvent.at,
+            type: lastEvent.type,
+          },
+        }),
+  };
+}
+
+async function compactOrchestrationProgress(
+  runtime: AgentKnotHttpRuntime,
+  orchestration: OrchestrationRecord
+): Promise<object> {
+  const children = await Promise.all(
+    orchestration.children.map(async (child) => {
+      const job = await runtime.get(child.jobId);
+      const lastEvent = job?.events.at(-1);
+      return {
+        subtaskId: child.subtaskId,
+        jobId: child.jobId,
+        status: job?.status ?? child.status,
+        ...(child.route === undefined ? {} : { route: child.route.name }),
+        ...(lastEvent === undefined
+          ? {}
+          : {
+              lastActivity: {
+                sequence: lastEvent.sequence,
+                at: lastEvent.at,
+                type: lastEvent.type,
+              },
+            }),
+      };
+    })
+  );
+  const lastEvent = orchestration.events.at(-1);
+  return {
+    schemaVersion: 1,
+    kind: 'orchestration',
+    id: orchestration.id,
+    status: orchestration.status,
+    phase: orchestration.status,
+    updatedAt: orchestration.updatedAt,
+    ...(lastEvent === undefined
+      ? {}
+      : {
+          lastActivity: {
+            sequence: lastEvent.sequence,
+            at: lastEvent.at,
+            type: lastEvent.type,
+          },
+        }),
+    children,
+  };
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
@@ -272,7 +359,7 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
         return;
       }
 
-      const match = /^\/v1\/jobs\/([a-zA-Z0-9_-]+)(?:\/(events|cancel))?$/.exec(pathname);
+      const match = /^\/v1\/jobs\/([a-zA-Z0-9_-]+)(?:\/(events|cancel|wait))?$/.exec(pathname);
       if (match) {
         const id = match[1];
         const action = match[2];
@@ -295,6 +382,36 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
           sendJson(response, 200, { events: job.events });
           return;
         }
+        if (method === 'GET' && action === 'wait') {
+          const job = await runtime.get(id);
+          if (!job) {
+            sendJson(response, 404, { error: 'Job not found' });
+            return;
+          }
+          if (terminal(job.status)) {
+            sendJson(response, 200, { job });
+            return;
+          }
+          const active = activeJobs.get(id);
+          if (!active) {
+            sendJson(response, 409, { error: 'Job is not active on this server' });
+            return;
+          }
+          const completed = await completionOrHeartbeat(active.completion);
+          if (completed !== undefined) {
+            sendJson(response, 200, { job: completed });
+            return;
+          }
+          const current = await runtime.get(id);
+          if (!current) {
+            sendJson(response, 404, { error: 'Job not found' });
+            return;
+          }
+          sendJson(response, terminal(current.status) ? 200 : 202, terminal(current.status)
+            ? { job: current }
+            : { wait: compactJobProgress(current) });
+          return;
+        }
         if (method === 'POST' && action === 'cancel') {
           const active = activeJobs.get(id);
           if (!active) {
@@ -308,7 +425,7 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
       }
 
       const orchestrationMatch =
-        /^\/v1\/orchestrations\/([a-zA-Z0-9_-]+)(?:\/(events|cancel))?$/.exec(pathname);
+        /^\/v1\/orchestrations\/([a-zA-Z0-9_-]+)(?:\/(events|cancel|wait))?$/.exec(pathname);
       if (orchestrationMatch) {
         const id = orchestrationMatch[1];
         const action = orchestrationMatch[2];
@@ -333,6 +450,36 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
             return;
           }
           sendJson(response, 200, { events: orchestration.events });
+          return;
+        }
+        if (method === 'GET' && action === 'wait') {
+          const orchestration = await runtime.getOrchestration(id);
+          if (!orchestration) {
+            sendJson(response, 404, { error: 'Orchestration not found' });
+            return;
+          }
+          if (terminal(orchestration.status)) {
+            sendJson(response, 200, { orchestration });
+            return;
+          }
+          const active = activeOrchestrations.get(id);
+          if (!active) {
+            sendJson(response, 409, { error: 'Orchestration is not active on this server' });
+            return;
+          }
+          const completed = await completionOrHeartbeat(active.completion);
+          if (completed !== undefined) {
+            sendJson(response, 200, { orchestration: completed });
+            return;
+          }
+          const current = await runtime.getOrchestration(id);
+          if (!current) {
+            sendJson(response, 404, { error: 'Orchestration not found' });
+            return;
+          }
+          sendJson(response, terminal(current.status) ? 200 : 202, terminal(current.status)
+            ? { orchestration: current }
+            : { wait: await compactOrchestrationProgress(runtime, current) });
           return;
         }
         if (method === 'POST' && action === 'cancel') {
