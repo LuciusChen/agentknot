@@ -165,6 +165,8 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     assert.match(body, /--handoff-json/);
     assert.match(body, /--workspace[\s\S]*git rev-parse --show-toplevel/);
     assert.match(body, /compact terminal JSON handoff/);
+    assert.match(body, /controller-owned `artifactValidation`/);
+    assert.match(body, /not the later integrated workspace/);
     assert.match(body, /do not poll processes, relist full records, or repeat artifact verification/);
     assert.match(body, /Do not independently repeat the delegated repository work/);
     assert.match(body, /artifact-preview/);
@@ -234,6 +236,13 @@ test('controller hook runs configured automatic delegation before the model and 
     status: 'succeeded',
     plan: { decision: 'delegate', willDispatch: true, reasoning: 'Bounded audit.' },
     children: [{ jobId: 'job_test', status: 'succeeded', output: childOutput }],
+    qualityReview: { status: 'completed', verdict: 'accept', findings: [] },
+    artifactValidation: {
+      status: 'completed',
+      outcome: 'passed',
+      command: { argv: ['npm', 'test'], outcome: 'passed', stdoutTail: '5/5 passed' },
+      cleanup: 'cleaned',
+    },
     artifacts: [
       { jobId: 'job_test', status: 'verified', valid: true, attempts: [{ attempt: 1, size: 24, valid: true }] },
     ],
@@ -259,6 +268,8 @@ test('controller hook runs configured automatic delegation before the model and 
   assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
   assert.match(output.hookSpecificOutput.additionalContext, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
   assert.match(output.hookSpecificOutput.additionalContext, /One mismatch found/);
+  assert.match(output.hookSpecificOutput.additionalContext, /artifactValidation/);
+  assert.match(output.hookSpecificOutput.additionalContext, /5\/5 passed/);
   assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /truncated by controller hook/);
   assert.match(output.hookSpecificOutput.additionalContext, /diff --git a\/a b\/a/);
 

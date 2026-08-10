@@ -4,7 +4,16 @@ import { lstat, mkdir, readFile, rename, rmdir, rm, stat, writeFile } from 'node
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import type { AgentKnotConfig, WorkspaceIsolationConfig } from './config.js';
+import {
+  MAX_ARTIFACT_VALIDATION_PATCH_BYTES,
+  runArtifactValidationCommand,
+  type ArtifactValidationExecution,
+} from './artifact-validation.js';
+import type {
+  AgentKnotConfig,
+  ArtifactValidationConfig,
+  WorkspaceIsolationConfig,
+} from './config.js';
 import type {
   JobArtifact,
   JobArtifactVerification,
@@ -81,6 +90,37 @@ async function git(args: string[], cwd: string, binary = false): Promise<GitOutp
     const stderr = details.stderr === undefined ? '' : outputText(details.stderr).trim();
     throw new Error(`git ${args.join(' ')} failed${stderr ? `: ${stderr}` : ''}`, { cause: error });
   }
+}
+
+async function gitWithInput(args: string[], cwd: string, input: Buffer): Promise<GitOutput> {
+  return new Promise<GitOutput>((resolve, reject) => {
+    const child = execFile(
+      'git',
+      args,
+      { cwd, encoding: 'buffer', maxBuffer: MAX_GIT_OUTPUT },
+      (error, stdout, stderr) => {
+        if (error) {
+          const details = outputText(stderr).trim();
+          reject(
+            new Error(`git ${args.join(' ')} failed${details ? `: ${details}` : ''}`, {
+              cause: error,
+            })
+          );
+          return;
+        }
+        resolve({ stdout, stderr });
+      }
+    );
+    if (child.stdin === null) {
+      child.kill();
+      reject(new Error(`git ${args.join(' ')} failed: stdin is unavailable`));
+      return;
+    }
+    child.stdin.on('error', () => {
+      // The callback reports the authoritative Git outcome, including an early exit.
+    });
+    child.stdin.end(input);
+  });
 }
 
 function resolvedIsolation(config: AgentKnotConfig): WorkspaceIsolationConfig {
@@ -164,6 +204,115 @@ export class WorkspaceIsolationManager {
       maxBytes: MAX_ARTIFACT_PREVIEW_BYTES,
       verification: inspected.verification,
     };
+  }
+
+  async validateArtifact(
+    jobId: string,
+    workspace: string,
+    artifact: JobArtifact,
+    config: ArtifactValidationConfig,
+    signal: AbortSignal
+  ): Promise<ArtifactValidationExecution> {
+    if (artifact.size < 1 || artifact.size > MAX_ARTIFACT_VALIDATION_PATCH_BYTES) {
+      return {
+        status: 'unavailable',
+        reason: 'artifact-invalid',
+        cleanup: 'not-started',
+      };
+    }
+    let inspection: WorkspaceInspection;
+    try {
+      inspection = await this.inspect(workspace);
+    } catch (error) {
+      return {
+        status: 'unavailable',
+        reason:
+          error instanceof Error && error.message.startsWith('Workspace repository is not clean:')
+            ? 'source-dirty'
+            : 'validation-start-failed',
+        cleanup: 'not-started',
+        error,
+      };
+    }
+
+    const inspected = await this.#inspectArtifact(jobId, artifact, {
+      repositoryAvailable: true,
+      actualHead: inspection.baseCommit,
+    });
+    if (!inspected.verification.valid || inspected.bytes === null) {
+      return {
+        status: 'unavailable',
+        reason: 'artifact-invalid',
+        cleanup: 'not-started',
+      };
+    }
+    if (signal.aborted) {
+      return {
+        status: 'unavailable',
+        reason: 'parent-cancelled',
+        cleanup: 'not-started',
+      };
+    }
+
+    let isolated: IsolatedWorkspace;
+    try {
+      isolated = await this.create(inspection, jobId, artifact.attempt);
+    } catch (error) {
+      return {
+        status: 'unavailable',
+        reason: 'validation-start-failed',
+        cleanup: 'not-confirmed',
+        error,
+      };
+    }
+
+    let outcome: ArtifactValidationExecution | undefined;
+    try {
+      try {
+        await gitWithInput(['apply', '--check', '--binary', '-'], isolated.managedPath, inspected.bytes);
+        await gitWithInput(['apply', '--binary', '-'], isolated.managedPath, inspected.bytes);
+      } catch (error) {
+        outcome = {
+          status: 'unavailable',
+          reason: 'patch-apply-failed',
+          cleanup: 'cleaned',
+          error,
+        };
+      }
+
+      if (outcome === undefined) {
+        const command = await runArtifactValidationCommand(config, isolated.path, signal);
+        outcome =
+          command.outcome === 'cancelled'
+            ? {
+                status: 'unavailable',
+                reason: 'parent-cancelled',
+                cleanup: 'cleaned',
+                command,
+              }
+            : { status: 'completed', command, cleanup: 'cleaned' };
+      }
+    } catch (error) {
+      outcome = {
+        status: 'unavailable',
+        reason: 'validation-start-failed',
+        cleanup: 'cleaned',
+        error,
+      };
+    } finally {
+      try {
+        await this.cleanup(isolated);
+      } catch (error) {
+        outcome = {
+          status: 'unavailable',
+          reason: 'cleanup-failed',
+          cleanup: 'failed',
+          ...(outcome?.command === undefined ? {} : { command: outcome.command }),
+          error,
+        };
+      }
+    }
+    return outcome as ArtifactValidationExecution;
   }
 
   async #inspectArtifact(

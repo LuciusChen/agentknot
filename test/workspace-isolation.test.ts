@@ -200,6 +200,89 @@ test('artifact inspection reports integrity and base evidence without mutating t
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
 });
 
+test('artifact validation applies the recorded patch only in a disposable worktree', async () => {
+  const paths = await repository();
+  const adapter = new (class extends TestAdapter {
+    async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+      await writeFile(path.join(input.workspace, 'validated.txt'), 'validated\n');
+      return { output: 'patch ready' };
+    }
+  })();
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory),
+    store: new MemoryJobStore(),
+    adapters: new Map([['test', adapter]]),
+  });
+  const job = await orchestrator.run({
+    prompt: 'produce validation artifact',
+    workspace: path.join(paths.root, 'nested'),
+  });
+  const sourceHead = (await git(paths.root, 'rev-parse', 'HEAD')).trim();
+
+  const result = await orchestrator.validateArtifact(
+    job.id,
+    1,
+    {
+      argv: [
+        process.execPath,
+        '-e',
+        "const fs=require('node:fs'); if(fs.readFileSync('validated.txt','utf8')!=='validated\\n') process.exit(9); console.log('validation passed')",
+      ],
+      timeoutMs: 1_000,
+      maxOutputBytes: 1_024,
+    },
+    new AbortController().signal
+  );
+
+  assert.equal(result?.status, 'completed');
+  if (result?.status !== 'completed') assert.fail('validation should complete');
+  assert.equal(result.command.outcome, 'passed');
+  assert.equal(result.command.stdout, 'validation passed\n');
+  assert.equal(result.cleanup, 'cleaned');
+  assert.equal((await git(paths.root, 'rev-parse', 'HEAD')).trim(), sourceHead);
+  assert.equal(await status(paths.root), '');
+  await assert.rejects(readFile(path.join(paths.root, 'nested', 'validated.txt')));
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+});
+
+test('artifact validation refuses a dirty source before command execution', async () => {
+  const paths = await repository();
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory),
+    store: new MemoryJobStore(),
+    adapters: new Map([
+      [
+        'test',
+        new (class extends TestAdapter {
+          async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+            await writeFile(path.join(input.workspace, 'candidate.txt'), 'candidate\n');
+            return { output: 'patch ready' };
+          }
+        })(),
+      ],
+    ]),
+  });
+  const job = await orchestrator.run({ prompt: 'produce artifact', workspace: paths.root });
+  await writeFile(path.join(paths.root, 'dirty.txt'), 'dirty\n');
+
+  const result = await orchestrator.validateArtifact(
+    job.id,
+    1,
+    {
+      argv: [process.execPath, '-e', 'process.exit(99)'],
+      timeoutMs: 1_000,
+      maxOutputBytes: 1_024,
+    },
+    new AbortController().signal
+  );
+
+  assert.equal(result?.status, 'unavailable');
+  if (result?.status !== 'unavailable') assert.fail('validation should be unavailable');
+  assert.equal(result.reason, 'source-dirty');
+  assert.equal(result.cleanup, 'not-started');
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+});
+
 test('artifact inspection reports missing managed files without exposing preview content', async () => {
   const paths = await repository();
   const orchestrator = new Orchestrator({

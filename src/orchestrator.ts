@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { AgentKnotConfig } from './config.js';
+import type { AgentKnotConfig, ArtifactValidationConfig } from './config.js';
 import { resolveRoute } from './config.js';
 import { isExecutorProcessAlive } from './execution.js';
+import type { ArtifactValidationExecution } from './artifact-validation.js';
 import {
   capturedChangedFilesSummary,
   workerReportedSummary,
@@ -381,6 +382,28 @@ export class Orchestrator {
       encoding: 'utf-8',
       ...preview,
     };
+  }
+
+  async validateArtifact(
+    id: string,
+    attempt: number,
+    config: ArtifactValidationConfig,
+    signal: AbortSignal
+  ): Promise<ArtifactValidationExecution | undefined> {
+    if (!Number.isSafeInteger(attempt) || attempt < 1) {
+      throw new Error('Artifact attempt must be a positive integer');
+    }
+    const job = await this.#store.get(id);
+    if (!job) return undefined;
+    const artifact = (job.artifacts ?? []).find((candidate) => candidate.attempt === attempt);
+    if (!artifact) return undefined;
+    return this.#workspaceIsolation.validateArtifact(
+      job.id,
+      job.request.workspace,
+      artifact,
+      config,
+      signal
+    );
   }
 
   async reconcileInterruptedJobs(options: { exclusiveOwner?: boolean } = {}): Promise<JobRecord[]> {

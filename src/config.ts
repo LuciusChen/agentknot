@@ -88,6 +88,12 @@ export interface QualityReviewConfig {
   complexities: RouteSelectionComplexity[];
 }
 
+export interface ArtifactValidationConfig {
+  argv: string[];
+  timeoutMs: number;
+  maxOutputBytes: number;
+}
+
 export const DELEGATION_FALLBACKS = ['upstream', 'fail'] as const;
 export type DelegationFallback = (typeof DELEGATION_FALLBACKS)[number];
 
@@ -112,6 +118,8 @@ export interface DelegationConfig {
   };
   /** Omission disables the advisory post-artifact quality review. */
   qualityReview?: QualityReviewConfig;
+  /** Omission leaves artifact validation policy unset. */
+  artifactValidation?: ArtifactValidationConfig;
   fallback: DelegationFallback;
 }
 
@@ -155,6 +163,14 @@ function assertKnownKeys(value: Record<string, unknown>, keys: readonly string[]
   const unknown = Object.keys(value).filter((key) => !allowed.has(key));
   if (unknown.length > 0) {
     throw new Error(`${label} contains unknown fields: ${unknown.join(', ')}`);
+  }
+}
+
+function assertExactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
+  assertKnownKeys(value, keys, label);
+  const missing = keys.filter((key) => !Object.hasOwn(value, key));
+  if (missing.length > 0) {
+    throw new Error(`${label} is missing required fields: ${missing.join(', ')}`);
   }
 }
 
@@ -334,6 +350,35 @@ function parseRouteSelection(
   return value.mode === 'active' ? { mode: 'active', rules } : { mode: 'shadow', rules };
 }
 
+function parseArtifactValidation(value: unknown): ArtifactValidationConfig {
+  const label = 'config.delegation.artifactValidation';
+  assertRecord(value, label);
+  assertExactKeys(value, ['argv', 'timeoutMs', 'maxOutputBytes'], label);
+  if (
+    !Array.isArray(value.argv) ||
+    value.argv.length < 1 ||
+    value.argv.length > 32 ||
+    !Array.from(value.argv).every((item) => typeof item === 'string' && item.trim() !== '')
+  ) {
+    throw new Error(`${label}.argv must be an array of 1-32 non-empty strings`);
+  }
+  if (!Number.isInteger(value.timeoutMs) || Number(value.timeoutMs) < 1 || Number(value.timeoutMs) > 300_000) {
+    throw new Error(`${label}.timeoutMs must be an integer between 1 and 300000`);
+  }
+  if (
+    !Number.isInteger(value.maxOutputBytes) ||
+    Number(value.maxOutputBytes) < 1 ||
+    Number(value.maxOutputBytes) > 65_536
+  ) {
+    throw new Error(`${label}.maxOutputBytes must be an integer between 1 and 65536`);
+  }
+  return {
+    argv: [...value.argv] as string[],
+    timeoutMs: Number(value.timeoutMs),
+    maxOutputBytes: Number(value.maxOutputBytes),
+  };
+}
+
 function parseQualityReview(
   value: unknown,
   routes: Record<string, RouteConfig>
@@ -421,6 +466,10 @@ function parseDelegation(
     value.qualityReview === undefined
       ? undefined
       : parseQualityReview(value.qualityReview, routes);
+  const artifactValidation =
+    value.artifactValidation === undefined
+      ? undefined
+      : parseArtifactValidation(value.artifactValidation);
 
   if (value.policy !== undefined) assertRecord(value.policy, 'config.delegation.policy');
   const policy = (value.policy ?? {}) as Record<string, unknown>;
@@ -452,6 +501,7 @@ function parseDelegation(
       ),
     },
     ...(qualityReview === undefined ? {} : { qualityReview }),
+    ...(artifactValidation === undefined ? {} : { artifactValidation }),
     fallback: (value.fallback as DelegationFallback | undefined) ?? 'upstream',
   };
 }

@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { DelegationConfig } from './config.js';
+import { MAX_ARTIFACT_VALIDATION_PATCH_BYTES } from './artifact-validation.js';
 import { isExecutorProcessAlive } from './execution.js';
 import { assertJsonMetadata } from './metadata.js';
 import {
@@ -27,7 +28,9 @@ import {
 } from './delegation-policy.js';
 import type {
   AgentKnotDelegationMetadata,
+  ArtifactValidationIdentity,
   DelegationPlan,
+  OrchestrationArtifactValidation,
   OrchestrationArtifactReview,
   OrchestrationChild,
   OrchestrationEvent,
@@ -60,6 +63,11 @@ interface SemaphoreWaiter {
   reject: (error: unknown) => void;
   signal: AbortSignal;
   onAbort: () => void;
+}
+
+interface PersistedRecordMutation {
+  apply: () => void;
+  rollback: () => void;
 }
 
 class Semaphore {
@@ -150,6 +158,7 @@ export class OrchestrationService {
   readonly #now: () => Date;
   readonly #runtimeId = randomUUID();
   readonly #dispatchSlots: Semaphore;
+  readonly #artifactValidationSlots = new Semaphore(1);
   readonly #recordMutations = new Map<string, Promise<void>>();
 
   constructor(options: OrchestrationServiceOptions) {
@@ -220,6 +229,19 @@ export class OrchestrationService {
         await this.#appendEvent(record, 'orchestration.review.unavailable', {
           reviewerJobId: record.qualityReview.reviewerJobId,
           reason: record.qualityReview.reason,
+        });
+      }
+      if (record.artifactValidation?.status === 'pending') {
+        record.artifactValidation = {
+          status: 'unavailable',
+          childJobId: record.artifactValidation.childJobId,
+          artifact: record.artifactValidation.artifact,
+          reason: 'runtime-restart',
+          cleanup: 'not-confirmed',
+        };
+        await this.#appendEvent(record, 'orchestration.artifact-validation.unavailable', {
+          childJobId: record.artifactValidation.childJobId,
+          reason: record.artifactValidation.reason,
         });
       }
       await this.#appendEvent(
@@ -332,6 +354,9 @@ export class OrchestrationService {
       if (record.policy.qualityReview !== undefined) {
         await this.#skipQualityReview(record, 'not-delegated');
       }
+      if (record.policy.artifactValidation !== undefined) {
+        await this.#skipArtifactValidation(record, 'not-delegated');
+      }
       record.status = 'succeeded';
       record.completedAt = this.#now().toISOString();
       record.result = {
@@ -361,7 +386,14 @@ export class OrchestrationService {
     throwIfAborted(signal);
 
     const artifactReview = await this.#reviewChildArtifacts(record.children);
-    await this.#runQualityReview(record, signal);
+    const postChild = await Promise.allSettled([
+      this.#runQualityReview(record, signal),
+      this.#runArtifactValidation(record, signal),
+    ]);
+    const rejected = postChild.find(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected'
+    );
+    if (rejected !== undefined) throw rejected.reason;
     throwIfAborted(signal);
 
     record.result = {
@@ -461,28 +493,219 @@ export class OrchestrationService {
     };
   }
 
+  async #skipArtifactValidation(
+    record: OrchestrationRecord,
+    reason: Extract<OrchestrationArtifactValidation, { status: 'skipped' }>['reason']
+  ): Promise<void> {
+    if (record.policy.artifactValidation === undefined) return;
+    await this.#setEvidenceAndAppend(
+      record,
+      'artifactValidation',
+      { status: 'skipped', reason },
+      'orchestration.artifact-validation.skipped',
+      { reason }
+    );
+  }
+
+  async #unavailableArtifactValidation(
+    record: OrchestrationRecord,
+    value: Omit<Extract<OrchestrationArtifactValidation, { status: 'unavailable' }>, 'status'>
+  ): Promise<void> {
+    await this.#setEvidenceAndAppend(
+      record,
+      'artifactValidation',
+      { status: 'unavailable', ...value },
+      'orchestration.artifact-validation.unavailable',
+      {
+        reason: value.reason,
+        cleanup: value.cleanup,
+        ...(value.childJobId === undefined ? {} : { childJobId: value.childJobId }),
+        ...(value.command === undefined
+          ? {}
+          : { commandOutcome: value.command.outcome, exitCode: value.command.exitCode }),
+        ...(value.error === undefined ? {} : { error: value.error }),
+      }
+    );
+  }
+
+  async #runArtifactValidation(
+    record: OrchestrationRecord,
+    signal: AbortSignal
+  ): Promise<void> {
+    const config = record.policy.artifactValidation;
+    const plan = record.plan;
+    if (config === undefined || plan === undefined) return;
+    if (record.children.length !== 1 || plan.subtasks.length !== 1) {
+      await this.#skipArtifactValidation(record, 'child-count-not-one');
+      return;
+    }
+    const child = record.children[0]!;
+    if (child.status !== 'succeeded') {
+      await this.#skipArtifactValidation(record, 'child-not-succeeded');
+      return;
+    }
+    const childJob = await this.#jobs.get(child.jobId);
+    if (!childJob || childJob.status !== 'succeeded' || !childJob.result) {
+      await this.#skipArtifactValidation(record, 'child-job-unavailable');
+      return;
+    }
+    const verification = await this.#jobs.verifyArtifacts(child.jobId);
+    if (!verification || verification.artifacts.length !== 1) {
+      await this.#skipArtifactValidation(record, 'artifact-count-not-one');
+      return;
+    }
+    const verified = verification.artifacts[0]!;
+    if (!verification.valid || !verified.valid) {
+      await this.#skipArtifactValidation(record, 'artifact-invalid');
+      return;
+    }
+    if (verified.artifact.size === 0) {
+      await this.#skipArtifactValidation(record, 'artifact-empty');
+      return;
+    }
+    if (verified.artifact.size > MAX_ARTIFACT_VALIDATION_PATCH_BYTES) {
+      await this.#skipArtifactValidation(record, 'artifact-too-large');
+      return;
+    }
+
+    const artifact: ArtifactValidationIdentity = {
+      attempt: verified.artifact.attempt,
+      size: verified.artifact.size,
+      sha256: verified.artifact.sha256,
+      baseCommit: verified.artifact.baseCommit,
+    };
+    await this.#setEvidenceAndAppend(
+      record,
+      'artifactValidation',
+      { status: 'pending', childJobId: child.jobId, artifact },
+      'orchestration.artifact-validation.started',
+      { childJobId: child.jobId, artifact }
+    );
+
+    let releaseSlot: () => void;
+    try {
+      releaseSlot = await this.#artifactValidationSlots.acquire(signal);
+    } catch (error) {
+      if (!signal.aborted) throw error;
+      await this.#unavailableArtifactValidation(record, {
+        childJobId: child.jobId,
+        artifact,
+        reason: 'parent-cancelled',
+        cleanup: 'not-started',
+      });
+      throwIfAborted(signal);
+      return;
+    }
+
+    let execution: Awaited<ReturnType<Orchestrator['validateArtifact']>>;
+    try {
+      execution = await this.#jobs.validateArtifact(
+        child.jobId,
+        verified.artifact.attempt,
+        config,
+        signal
+      );
+    } catch (error) {
+      await this.#unavailableArtifactValidation(record, {
+        childJobId: child.jobId,
+        artifact,
+        reason: signal.aborted ? 'parent-cancelled' : 'validation-start-failed',
+        cleanup: 'not-confirmed',
+        error: errorDetails(error),
+      });
+      throwIfAborted(signal);
+      return;
+    } finally {
+      releaseSlot();
+    }
+
+    if (execution === undefined) {
+      await this.#unavailableArtifactValidation(record, {
+        childJobId: child.jobId,
+        artifact,
+        reason: 'validation-start-failed',
+        cleanup: 'not-started',
+      });
+      return;
+    }
+    if (signal.aborted) {
+      await this.#unavailableArtifactValidation(record, {
+        childJobId: child.jobId,
+        artifact,
+        reason: 'parent-cancelled',
+        cleanup: execution.cleanup,
+        ...(execution.command === undefined ? {} : { command: execution.command }),
+      });
+      throwIfAborted(signal);
+      return;
+    }
+    if (execution.status === 'unavailable') {
+      await this.#unavailableArtifactValidation(record, {
+        childJobId: child.jobId,
+        artifact,
+        reason: execution.reason,
+        cleanup: execution.cleanup,
+        ...(execution.command === undefined ? {} : { command: execution.command }),
+        ...(execution.error === undefined ? {} : { error: errorDetails(execution.error) }),
+      });
+      return;
+    }
+
+    const outcome = execution.command.outcome === 'passed' ? 'passed' : 'failed';
+    await this.#setEvidenceAndAppend(
+      record,
+      'artifactValidation',
+      {
+        status: 'completed',
+        childJobId: child.jobId,
+        artifact,
+        outcome,
+        command: execution.command,
+        cleanup: 'cleaned',
+      },
+      'orchestration.artifact-validation.completed',
+      {
+        childJobId: child.jobId,
+        outcome,
+        commandOutcome: execution.command.outcome,
+        exitCode: execution.command.exitCode,
+        durationMs: execution.command.durationMs,
+      }
+    );
+  }
+
   async #skipQualityReview(
     record: OrchestrationRecord,
     reason: Extract<OrchestrationQualityReview, { status: 'skipped' }>['reason']
   ): Promise<void> {
     const route = record.policy.qualityReview?.route;
     if (route === undefined) return;
-    record.qualityReview = { status: 'skipped', route, reason };
-    await this.#appendEvent(record, 'orchestration.review.skipped', { route, reason });
+    await this.#setEvidenceAndAppend(
+      record,
+      'qualityReview',
+      { status: 'skipped', route, reason },
+      'orchestration.review.skipped',
+      { route, reason }
+    );
   }
 
   async #unavailableQualityReview(
     record: OrchestrationRecord,
     value: Omit<Extract<OrchestrationQualityReview, { status: 'unavailable' }>, 'status'>
   ): Promise<void> {
-    record.qualityReview = { status: 'unavailable', ...value };
-    await this.#appendEvent(record, 'orchestration.review.unavailable', {
-      route: value.route,
-      reason: value.reason,
-      ...(value.childJobId === undefined ? {} : { childJobId: value.childJobId }),
-      ...(value.reviewerJobId === undefined ? {} : { reviewerJobId: value.reviewerJobId }),
-      ...(value.error === undefined ? {} : { error: value.error }),
-    });
+    await this.#setEvidenceAndAppend(
+      record,
+      'qualityReview',
+      { status: 'unavailable', ...value },
+      'orchestration.review.unavailable',
+      {
+        route: value.route,
+        reason: value.reason,
+        ...(value.childJobId === undefined ? {} : { childJobId: value.childJobId }),
+        ...(value.reviewerJobId === undefined ? {} : { reviewerJobId: value.reviewerJobId }),
+        ...(value.error === undefined ? {} : { error: value.error }),
+      }
+    );
   }
 
   async #runQualityReview(record: OrchestrationRecord, signal: AbortSignal): Promise<void> {
@@ -594,20 +817,24 @@ export class OrchestrationService {
       return;
     }
 
-    record.qualityReview = {
-      status: 'pending',
-      route: config.route,
-      childJobId: child.jobId,
-      reviewerJobId: started.job.id,
-    };
     try {
-      await this.#appendEvent(record, 'orchestration.review.started', {
-        route: config.route,
-        childJobId: child.jobId,
-        reviewerJobId: started.job.id,
-      });
+      await this.#setEvidenceAndAppend(
+        record,
+        'qualityReview',
+        {
+          status: 'pending',
+          route: config.route,
+          childJobId: child.jobId,
+          reviewerJobId: started.job.id,
+        },
+        'orchestration.review.started',
+        {
+          route: config.route,
+          childJobId: child.jobId,
+          reviewerJobId: started.job.id,
+        }
+      );
     } catch (error) {
-      delete record.qualityReview;
       started.cancel();
       await started.completion;
       releaseSlot();
@@ -652,22 +879,27 @@ export class OrchestrationService {
     }
     try {
       const review = parseQualityReview(reviewerJob.result.output);
-      record.qualityReview = {
-        status: 'completed',
-        route: config.route,
-        childJobId: child.jobId,
-        reviewerJobId: reviewerJob.id,
-        verdict: review.verdict,
-        summary: review.summary,
-        findings: review.findings,
-      };
-      await this.#appendEvent(record, 'orchestration.review.completed', {
-        route: config.route,
-        childJobId: child.jobId,
-        reviewerJobId: reviewerJob.id,
-        verdict: review.verdict,
-        findingCount: review.findings.length,
-      });
+      await this.#setEvidenceAndAppend(
+        record,
+        'qualityReview',
+        {
+          status: 'completed',
+          route: config.route,
+          childJobId: child.jobId,
+          reviewerJobId: reviewerJob.id,
+          verdict: review.verdict,
+          summary: review.summary,
+          findings: review.findings,
+        },
+        'orchestration.review.completed',
+        {
+          route: config.route,
+          childJobId: child.jobId,
+          reviewerJobId: reviewerJob.id,
+          verdict: review.verdict,
+          findingCount: review.findings.length,
+        }
+      );
     } catch (error) {
       await this.#unavailableQualityReview(record, {
         route: config.route,
@@ -889,12 +1121,14 @@ export class OrchestrationService {
     record: OrchestrationRecord,
     type: OrchestrationEventType,
     data?: Record<string, unknown>,
-    at = this.#now().toISOString()
+    at = this.#now().toISOString(),
+    mutation?: PersistedRecordMutation
   ): Promise<OrchestrationEvent> {
     let appended: OrchestrationEvent | undefined;
     const previous = this.#recordMutations.get(record.id) ?? Promise.resolve();
     const current = previous.then(async () => {
       const previousUpdatedAt = record.updatedAt;
+      mutation?.apply();
       const event: OrchestrationEvent = {
         sequence: record.events.length + 1,
         orchestrationId: record.id,
@@ -909,6 +1143,7 @@ export class OrchestrationService {
         await this.#store.save(record);
       } catch (error) {
         if (record.events.at(-1) === event) record.events.pop();
+        mutation?.rollback();
         record.updatedAt = previousUpdatedAt;
         throw error;
       }
@@ -920,5 +1155,27 @@ export class OrchestrationService {
       if (this.#recordMutations.get(record.id) === current) this.#recordMutations.delete(record.id);
     }
     return appended as OrchestrationEvent;
+  }
+
+  async #setEvidenceAndAppend<K extends 'qualityReview' | 'artifactValidation'>(
+    record: OrchestrationRecord,
+    field: K,
+    value: OrchestrationRecord[K],
+    type: OrchestrationEventType,
+    data: Record<string, unknown>
+  ): Promise<void> {
+    let hadPrevious = false;
+    let previous: OrchestrationRecord[K];
+    await this.#appendEvent(record, type, data, this.#now().toISOString(), {
+      apply: () => {
+        hadPrevious = Object.hasOwn(record, field);
+        previous = record[field];
+        record[field] = value;
+      },
+      rollback: () => {
+        if (hadPrevious) record[field] = previous;
+        else delete record[field];
+      },
+    });
   }
 }

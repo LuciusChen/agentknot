@@ -52,6 +52,7 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 7. Diagnose why a job failed without exposing provider credentials.
 8. Submit one goal and have the same policy decide whether to keep it upstream, suggest a split, or dispatch bounded child jobs regardless of controller vendor.
 9. Optionally ask a separately configured route to review one bounded patch before the controller makes the final acceptance decision.
+10. Optionally obtain controller-owned test evidence for one bounded patch without first applying it to the supplied source workspace.
 
 ## Product principles
 
@@ -81,6 +82,8 @@ In Git worktree mode, attempts run away from the caller's working tree and retur
 
 An optional advisory reviewer may inspect bounded verified patch evidence in a separate depth-one Job. Its strict verdict is evidence, not acceptance authority: it cannot mutate the artifact, start a repair loop, promote the patch, or replace controller validation.
 
+An optional trusted local validation policy may apply exactly one bounded verified patch to a second disposable worktree and execute one explicit shell-free command there. The resulting command and cleanup record is controller-owned evidence, not a worker claim or promotion decision; failure remains advisory and the source workspace stays unchanged.
+
 ### Minimal core, replaceable edges
 
 Worker-specific process and protocol behavior belongs in worker adapters. Orchestration policy belongs in the core. Features that do not strengthen the execution handoff should remain outside the core.
@@ -108,6 +111,7 @@ Version 0.0.1 currently implements:
 - sanitized per-job Pi session statistics for measuring message/tool counts, token use, cost, and context use without retaining session paths, identifiers, or raw responses;
 - a read-only CLI and TypeScript usage projection over persisted terminal evidence, with exact available downstream token/cost aggregation, explicit cache-read and route-selection hit formulas, partial/unavailable coverage, and no fabricated controller usage or upstream/downstream proportion;
 - optional route-neutral advisory quality review for one successful child and one bounded valid patch, selected by configured parent complexities and a configured single-attempt reviewer route, with strict verdict/findings, explicit skipped/unavailable states, no repair or promotion, and controller disposition left unpersisted;
+- optional controller-owned artifact validation for one successful child and one bounded valid patch, using one configured shell-free argument vector in a fresh disposable worktree, with bounded command/cleanup evidence and no change to child/parent success or artifact promotion;
 - one-shot completion callbacks to trusted URLs, with callback-bookkeeping persistence isolated from the terminal execution result and no automatic redelivery;
 - direct-workspace compatibility mode and Git worktree attempt isolation;
 - per-attempt Git patch artifacts with base commit, size, and SHA-256;
@@ -168,8 +172,9 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 9. AgentKnot captures the terminal attempt artifact, builds the completion summary, and persists it before the terminal event is delivered.
 10. For delegated work, AgentKnot compares each child's controller-captured terminal paths. Exact paths owned by multiple children are persisted as potential integration conflicts; missing evidence makes the review incomplete. This does not replace artifact integrity/base verification or prove semantic compatibility.
 11. When optional quality-review policy selects the parent complexity and exactly one successful child has exactly one bounded valid non-empty patch, AgentKnot starts the configured reviewer route once in a fresh depth-one Job. The reviewer receives the goal, acceptance criteria, verified artifact identity and patch, plus labeled-unverified worker claims, and returns bounded advisory evidence. Ineligible, failed, malformed, cancelled, or restart-interrupted review remains explicit and never silently becomes acceptance.
-12. The controller verifies and previews the selected child artifacts, considers overlap and optional reviewer evidence, and deliberately accepts, modifies, or rejects the artifact or child set upstream. That decision does not mutate Job/Orchestration state and is not currently persisted by AgentKnot.
-13. Only after acceptance may the controller perform a separate explicit promotion in its own repository workflow. AgentKnot does not automatically apply, commit, merge, or push artifacts.
+12. When optional artifact-validation policy is configured for the same one-child/one-patch shape, AgentKnot independently rechecks the recorded artifact and clean base, applies it only in a second disposable worktree, and executes exactly one configured argument vector there. Validation and optional review run concurrently; pass, failure, timeout, output limit, cancellation, startup failure, and cleanup are explicit evidence and never rewrite child or parent success.
+13. The controller verifies and previews the selected child artifacts, considers overlap, optional reviewer evidence, and optional controller-owned validation, and deliberately accepts, modifies, or rejects the artifact or child set upstream. That decision does not mutate Job/Orchestration state and is not currently persisted by AgentKnot.
+14. Only after acceptance may the controller perform a separate explicit promotion in its own repository workflow. AgentKnot does not automatically apply, commit, merge, or push artifacts.
 
 If event, artifact-recording, or terminal persistence fails after admission, the leaf completion rejects as a control-plane persistence failure. It does not retry the worker, invent a failed terminal result, or deliver a terminal callback; the last successfully persisted snapshot remains authoritative and unrecorded patch evidence is removed.
 
@@ -197,6 +202,7 @@ The product remains on course when all of the following are true:
 - completion summaries distinguish controller-captured artifact paths from worker-reported claims, never infer reports from prose/events/stderr/session statistics, and preserve explicit unavailable reasons; normal Pi runs use only the exact end-marked envelope, with absent or malformed envelopes unable to fail an otherwise successful job;
 - usage reporting counts exact persisted successful-Job statistics once, preserves provider-reported totals and cost without currency normalization, classifies route hits only from terminal plan/policy evidence, and reports controller usage and cross-boundary proportions unavailable until comparable exact controller data is persisted;
 - advisory quality review is disabled by omission, uses only an explicitly configured single-attempt route, cannot silently change controller/worker/provider/model, and records completed, skipped, unavailable, or restart-interrupted evidence without changing child success or promoting artifacts;
+- artifact validation is disabled by omission, admits only one successful child with one integrity/base-valid non-empty patch no larger than 32 KiB, executes one bounded shell-free configured command in a disposable worktree, persists command and cleanup evidence before the terminal parent event, and never mutates the source or promotes the artifact;
 - new leaf Job and Orchestration records carry `schemaVersion: 1`, legacy file reads remain byte-stable, and unsupported explicit versions fail rather than defaulting to v1;
 - Git worktree mode leaves the source workspace clean and returns artifacts without applying them;
 - controllers can verify and preview recorded artifacts without source mutation, while acceptance and promotion remain explicit upstream decisions;

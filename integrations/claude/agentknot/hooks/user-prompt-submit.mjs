@@ -147,7 +147,7 @@ try {
   }
 
   context(
-    `AGENTKNOT_AUTOMATIC_HANDOFF_V1\nAgentKnot already completed the delegated repository work before this controller-model turn. Do not repeat its repository exploration, analysis, implementation, or successful checks. Use the bounded evidence below. For a read-only task, report the result directly and disclose any stated gap. For a patch, review only the supplied integrity-valid preview, decide whether to apply it, and validate the integrated workspace once; never apply, commit, push, merge, or deploy merely because the worker produced it.\n${JSON.stringify({ handoff: compactHandoff, previews })}`
+    `AGENTKNOT_AUTOMATIC_HANDOFF_V1\nAgentKnot already completed the delegated repository work before this controller-model turn. Do not repeat its repository exploration, analysis, implementation, or successful checks. Use the bounded evidence below, including optional qualityReview and controller-owned artifactValidation. Both are advisory; a passed artifactValidation covers the exact recorded patch at its recorded base, not the post-application workspace. For a read-only task, report the result directly and disclose any stated gap. For a patch, review only the supplied integrity-valid preview, decide whether to apply it, and validate the integrated workspace once after application; never apply, commit, push, merge, or deploy merely because the worker produced it.\n${JSON.stringify({ handoff: compactHandoff, previews })}`
   );
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);

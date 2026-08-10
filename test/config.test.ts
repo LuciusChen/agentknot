@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseConfig, resolveRoute } from '../src/config.js';
+import { parseConfig, resolveDelegationConfig, resolveRoute } from '../src/config.js';
 
 test('parseConfig keeps worker and provider as independent routing dimensions', () => {
   const config = parseConfig({
@@ -159,6 +159,57 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
   });
   assert.equal(defaults.delegation?.dispatch.routeSelection, undefined);
   assert.equal(defaults.delegation?.qualityReview, undefined);
+});
+
+test('parseConfig validates optional artifact validation and preserves its resolved policy values', () => {
+  const base = {
+    version: 1,
+    defaultRoute: 'mock',
+    storage: { directory: '.agentknot/jobs' },
+    workers: { mock: { adapter: 'mock' } },
+    routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
+  };
+  const artifactValidation = {
+    argv: ['node', './validate-artifact.mjs', '--format', 'json'],
+    timeoutMs: 300_000,
+    maxOutputBytes: 65_536,
+  };
+  const config = parseConfig({
+    ...base,
+    delegation: { mode: 'off', artifactValidation },
+  });
+  assert.deepEqual(config.delegation?.artifactValidation, artifactValidation);
+  assert.deepEqual(resolveDelegationConfig(config).artifactValidation, artifactValidation);
+
+  assert.equal(parseConfig({ ...base, delegation: { mode: 'off' } }).delegation?.artifactValidation, undefined);
+  assert.equal(resolveDelegationConfig(parseConfig(base)).artifactValidation, undefined);
+
+  const invalid: unknown[] = [
+    null,
+    {},
+    { timeoutMs: 1, maxOutputBytes: 1 },
+    { argv: ['node'], maxOutputBytes: 1 },
+    { argv: ['node'], timeoutMs: 1 },
+    { argv: [], timeoutMs: 1, maxOutputBytes: 1 },
+    { argv: new Array(1), timeoutMs: 1, maxOutputBytes: 1 },
+    { argv: Array.from({ length: 33 }, () => 'node'), timeoutMs: 1, maxOutputBytes: 1 },
+    { argv: [''], timeoutMs: 1, maxOutputBytes: 1 },
+    { argv: ['   '], timeoutMs: 1, maxOutputBytes: 1 },
+    { argv: ['node', 1], timeoutMs: 1, maxOutputBytes: 1 },
+    { argv: ['node'], timeoutMs: 0, maxOutputBytes: 1 },
+    { argv: ['node'], timeoutMs: 300_001, maxOutputBytes: 1 },
+    { argv: ['node'], timeoutMs: 1.5, maxOutputBytes: 1 },
+    { argv: ['node'], timeoutMs: 1, maxOutputBytes: 0 },
+    { argv: ['node'], timeoutMs: 1, maxOutputBytes: 65_537 },
+    { argv: ['node'], timeoutMs: 1, maxOutputBytes: 1.5 },
+    { argv: ['node'], timeoutMs: 1, maxOutputBytes: 1, unexpected: true },
+  ];
+  for (const artifactValidation of invalid) {
+    assert.throws(
+      () => parseConfig({ ...base, delegation: { mode: 'off', artifactValidation } }),
+      /artifactValidation/
+    );
+  }
 });
 
 test('parseConfig strictly validates an optional single-attempt quality reviewer route', () => {

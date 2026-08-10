@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import type { AgentKnotConfig, RouteSelectionConfig } from '../src/config.js';
+import type {
+  AgentKnotConfig,
+  ArtifactValidationConfig,
+  RouteSelectionConfig,
+} from '../src/config.js';
 import { OrchestrationService } from '../src/orchestration.js';
 import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
 import type {
@@ -192,6 +196,48 @@ class BlockingReviewerAdapter implements WorkerAdapter {
       else input.signal.addEventListener('abort', onAbort, { once: true });
     });
     return { output: 'unreachable' };
+  }
+}
+
+class CoordinatedReviewerAdapter implements WorkerAdapter {
+  readonly name = 'test';
+
+  constructor(
+    readonly assessment: TaskAssessment,
+    readonly validationMarker: string,
+    readonly reviewerMarker: string
+  ) {}
+
+  async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
+    return { ok: true, message: 'coordinated reviewer ready' };
+  }
+
+  async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
+    await emit('worker.started', { route: input.route.name });
+    if (input.route.name === 'planner') return { output: JSON.stringify(this.assessment) };
+    if (input.route.name === 'worker') {
+      await writeFile(path.join(input.workspace, 'reviewed.ts'), 'export const reviewed = true;\n');
+      return { output: 'implemented reviewed.ts' };
+    }
+    await writeFile(this.reviewerMarker, 'started\n');
+    let validationStarted = false;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      validationStarted = await stat(this.validationMarker).then(
+        () => true,
+        () => false
+      );
+      if (validationStarted) break;
+      await abortableDelay(5, input.signal);
+    }
+    if (!validationStarted) throw new Error('Timed out waiting for concurrent artifact validation');
+    return {
+      output: JSON.stringify({
+        schemaVersion: 1,
+        verdict: 'accept',
+        summary: 'The patch and concurrent validation evidence are bounded.',
+        findings: [],
+      }),
+    };
   }
 }
 
@@ -419,7 +465,8 @@ function createServices(
   workerMaxAttempts = 1,
   maxChildren = 2,
   routeSelection?: RouteSelectionConfig,
-  qualityReview = false
+  qualityReview = false,
+  artifactValidation?: ArtifactValidationConfig
 ): {
   jobs: Orchestrator;
   jobStore: MemoryJobStore;
@@ -430,6 +477,9 @@ function createServices(
   if (routeSelection !== undefined) config.delegation!.dispatch.routeSelection = routeSelection;
   if (qualityReview) {
     config.delegation!.qualityReview = { route: 'reviewer', complexities: ['low'] };
+  }
+  if (artifactValidation !== undefined) {
+    config.delegation!.artifactValidation = artifactValidation;
   }
   const jobStore = new MemoryJobStore();
   const jobs = new Orchestrator({
@@ -550,6 +600,146 @@ test('OrchestrationService runs one advisory reviewer after one valid low-comple
   assert.equal(provenance.depth, 1);
   assert.equal(provenance.childJobId, record.children[0]?.jobId);
   assert.deepEqual(await orchestrationStore.get(record.id), record);
+  assert.equal(await gitStatus(workspace), '');
+});
+
+test('OrchestrationService runs controller-owned artifact validation concurrently with review', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-artifact-validation-');
+  const coordination = await mkdtemp(path.join(os.tmpdir(), 'agentknot-validation-coordination-'));
+  const validationMarker = path.join(coordination, 'validation-started');
+  const reviewerMarker = path.join(coordination, 'reviewer-started');
+  const adapter = new CoordinatedReviewerAdapter(
+    singleQualityReviewAssessment('Write reviewed.ts.'),
+    validationMarker,
+    reviewerMarker
+  );
+  const script = [
+    "const fs=require('node:fs')",
+    `fs.writeFileSync(${JSON.stringify(validationMarker)},'started\\n')`,
+    'const deadline=Date.now()+1000',
+    `;(function check(){if(fs.existsSync(${JSON.stringify(reviewerMarker)}))process.exit(0);if(Date.now()>deadline)process.exit(8);setTimeout(check,5)})()`,
+  ].join(';');
+  const { orchestrations, orchestrationStore } = createServices(
+    adapter,
+    2,
+    1,
+    1,
+    undefined,
+    true,
+    {
+      argv: [process.execPath, '-e', script],
+      timeoutMs: 2_000,
+      maxOutputBytes: 1_024,
+    }
+  );
+
+  const record = await orchestrations.run({
+    prompt: 'Write, validate, and independently review the target.',
+    workspace,
+  });
+
+  assert.equal(record.status, 'succeeded');
+  assert.equal(record.qualityReview?.status, 'completed');
+  assert.equal(record.artifactValidation?.status, 'completed');
+  if (record.artifactValidation?.status !== 'completed') {
+    assert.fail('artifact validation should complete');
+  }
+  assert.equal(record.artifactValidation.outcome, 'passed');
+  assert.equal(record.artifactValidation.command.outcome, 'passed');
+  assert.equal(record.artifactValidation.command.argv[0], process.execPath);
+  assert.equal(record.artifactValidation.cleanup, 'cleaned');
+  assert.equal(
+    record.events.findIndex(
+      (event) => event.type === 'orchestration.artifact-validation.started'
+    ) <
+      record.events.findIndex(
+        (event) => event.type === 'orchestration.artifact-validation.completed'
+      ),
+    true
+  );
+  assert.equal(
+    record.events.findIndex(
+      (event) => event.type === 'orchestration.artifact-validation.completed'
+    ) < record.events.findIndex((event) => event.type === 'orchestration.succeeded'),
+    true
+  );
+  assert.deepEqual(await orchestrationStore.get(record.id), record);
+  assert.equal(await gitStatus(workspace), '');
+});
+
+test('OrchestrationService keeps a failed validation command as advisory evidence', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-artifact-validation-failed-');
+  const adapter = new ArtifactWritingAdapter(
+    singleQualityReviewAssessment('Write failed-validation.ts.'),
+    new Map([['Write failed-validation.ts.', ['failed-validation.ts']]])
+  );
+  const { orchestrations } = createServices(adapter, 1, 1, 1, undefined, false, {
+    argv: [process.execPath, '-e', "process.stderr.write('validation failed'); process.exit(6)"],
+    timeoutMs: 1_000,
+    maxOutputBytes: 1_024,
+  });
+
+  const record = await orchestrations.run({ prompt: 'Produce a failing validation target.', workspace });
+
+  assert.equal(record.status, 'succeeded');
+  assert.equal(record.artifactValidation?.status, 'completed');
+  if (record.artifactValidation?.status !== 'completed') {
+    assert.fail('artifact validation should complete with a failed outcome');
+  }
+  assert.equal(record.artifactValidation.outcome, 'failed');
+  assert.equal(record.artifactValidation.command.outcome, 'failed');
+  assert.equal(record.artifactValidation.command.exitCode, 6);
+  assert.equal(record.artifactValidation.command.stderr, 'validation failed');
+  assert.equal(record.children[0]?.status, 'succeeded');
+  assert.equal(await gitStatus(workspace), '');
+});
+
+test('OrchestrationService cancellation awaits artifact validation cleanup', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-artifact-validation-cancel-');
+  const markerDirectory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-validation-cancel-'));
+  const marker = path.join(markerDirectory, 'started');
+  const adapter = new ArtifactWritingAdapter(
+    singleQualityReviewAssessment('Write cancellable-validation.ts.'),
+    new Map([['Write cancellable-validation.ts.', ['cancellable-validation.ts']]])
+  );
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(marker)},'started\\n');setInterval(()=>{},1000)`;
+  const { orchestrations } = createServices(adapter, 1, 1, 1, undefined, false, {
+    argv: [process.execPath, '-e', script],
+    timeoutMs: 2_000,
+    maxOutputBytes: 1_024,
+  });
+  const started = await orchestrations.start({
+    prompt: 'Produce and validate a cancellable target.',
+    workspace,
+  });
+  let commandStarted = false;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    commandStarted = await stat(marker).then(
+      () => true,
+      () => false
+    );
+    if (commandStarted) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(commandStarted, true);
+
+  await started.cancel();
+  const record = await started.completion;
+
+  assert.equal(record.status, 'cancelled');
+  assert.equal(record.artifactValidation?.status, 'unavailable');
+  if (record.artifactValidation?.status !== 'unavailable') {
+    assert.fail('artifact validation should be unavailable after cancellation');
+  }
+  assert.equal(record.artifactValidation.reason, 'parent-cancelled');
+  assert.equal(record.artifactValidation.cleanup, 'cleaned');
+  assert.equal(record.artifactValidation.command?.outcome, 'cancelled');
+  assert.equal(
+    record.events.findIndex(
+      (event) => event.type === 'orchestration.artifact-validation.unavailable'
+    ) < record.events.findIndex((event) => event.type === 'orchestration.cancelled'),
+    true
+  );
   assert.equal(await gitStatus(workspace), '');
 });
 

@@ -147,6 +147,15 @@ async function createDelegatedFixture(): Promise<CliFixture> {
             keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
           },
           qualityReview: { route: 'reviewer', complexities: ['low'] },
+          artifactValidation: {
+            argv: [
+              process.execPath,
+              '-e',
+              "const fs=require('node:fs');if(fs.readFileSync('reviewed.txt','utf8').trim()==='')process.exit(4);console.log('verified fixture')",
+            ],
+            timeoutMs: 2_000,
+            maxOutputBytes: 1_024,
+          },
         },
       },
       null,
@@ -301,6 +310,12 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
     }>;
     result: { action: string; artifactReview: { status: string } };
     qualityReview: { status: string; route: string; verdict?: string; reviewerJobId?: string };
+    artifactValidation: {
+      status: string;
+      outcome: string;
+      cleanup: string;
+      command: { outcome: string; stdoutTail: string; stderrTail: string };
+    };
   };
 
   assert.equal(handoff.plan.decision, 'delegate');
@@ -322,6 +337,12 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
   assert.equal(handoff.qualityReview.route, 'reviewer');
   assert.equal(handoff.qualityReview.verdict, 'accept');
   assert.equal(handoff.qualityReview.reviewerJobId?.startsWith('job_'), true);
+  assert.equal(handoff.artifactValidation.status, 'completed');
+  assert.equal(handoff.artifactValidation.outcome, 'passed');
+  assert.equal(handoff.artifactValidation.cleanup, 'cleaned');
+  assert.equal(handoff.artifactValidation.command.outcome, 'passed');
+  assert.equal(handoff.artifactValidation.command.stdoutTail, 'verified fixture\n');
+  assert.equal(handoff.artifactValidation.command.stderrTail, '');
   assert.equal(handoff.result.action, 'delegated');
   assert.equal(handoff.result.artifactReview.status, 'checked');
 });

@@ -167,6 +167,21 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
     childJobId: staleChild.id,
     reviewerJobId: 'job_stale_reviewer',
   };
+  staleParentRecord.policy.artifactValidation = {
+    argv: [process.execPath, '-e', 'process.exit(0)'],
+    timeoutMs: 1_000,
+    maxOutputBytes: 1_024,
+  };
+  staleParentRecord.artifactValidation = {
+    status: 'pending',
+    childJobId: staleChild.id,
+    artifact: {
+      attempt: 1,
+      size: 1,
+      sha256: 'b'.repeat(64),
+      baseCommit: 'c'.repeat(40),
+    },
+  };
   await orchestrationStore.create(staleParentRecord);
   const staleQueuedParent = staleOrchestration(
     'orchestration_stale_queued',
@@ -269,7 +284,23 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
     reviewerJobId: 'job_stale_reviewer',
     reason: 'runtime-restart',
   });
-  assert.equal(staleParent?.events.at(-2)?.type, 'orchestration.review.unavailable');
+  assert.deepEqual(staleParent?.artifactValidation, {
+    status: 'unavailable',
+    childJobId: staleChild.id,
+    artifact: {
+      attempt: 1,
+      size: 1,
+      sha256: 'b'.repeat(64),
+      baseCommit: 'c'.repeat(40),
+    },
+    reason: 'runtime-restart',
+    cleanup: 'not-confirmed',
+  });
+  assert.equal(staleParent?.events.at(-3)?.type, 'orchestration.review.unavailable');
+  assert.equal(
+    staleParent?.events.at(-2)?.type,
+    'orchestration.artifact-validation.unavailable'
+  );
   for (const [id, previousStatus] of [
     [staleQueuedParent.id, 'queued'],
     [stalePlanningParent.id, 'planning'],

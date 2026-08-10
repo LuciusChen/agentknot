@@ -4,9 +4,33 @@ import process from 'node:process';
 
 import { createAgentKnotHttpServer } from './http-server.js';
 import type { OrchestrationRecord } from './orchestration-types.js';
+import { limitTextSuffix } from './record-limits.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
 import type { JobEvent } from './types.js';
 import type { RouteSelectionModeUsage, UsageRate, UsageReport } from './usage-report.js';
+
+const MAX_HANDOFF_VALIDATION_STREAM_BYTES = 2 * 1024;
+
+function compactArtifactValidation(
+  value: OrchestrationRecord['artifactValidation']
+): OrchestrationRecord['artifactValidation'] | object {
+  if (value === undefined || !('command' in value) || value.command === undefined) return value;
+  const command = value.command;
+  return {
+    ...value,
+    command: {
+      argv: command.argv,
+      outcome: command.outcome,
+      exitCode: command.exitCode,
+      signal: command.signal,
+      durationMs: command.durationMs,
+      stdoutTail: limitTextSuffix(command.stdout, MAX_HANDOFF_VALIDATION_STREAM_BYTES),
+      stderrTail: limitTextSuffix(command.stderr, MAX_HANDOFF_VALIDATION_STREAM_BYTES),
+      outputTruncated: command.outputTruncated,
+      maxOutputBytes: command.maxOutputBytes,
+    },
+  };
+}
 
 function takeOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -262,6 +286,7 @@ async function orchestrationHandoff(
       };
     })
   );
+  const artifactValidation = compactArtifactValidation(record.artifactValidation);
   return {
     schemaVersion: record.schemaVersion,
     id: record.id,
@@ -304,6 +329,7 @@ async function orchestrationHandoff(
       error: child.error,
     })),
     qualityReview: record.qualityReview,
+    artifactValidation,
     artifacts,
     result:
       record.result === undefined

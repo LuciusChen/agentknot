@@ -119,6 +119,14 @@
         "low"
       ]
     },
+    "artifactValidation": {
+      "argv": [
+        "npm",
+        "test"
+      ],
+      "timeoutMs": 300000,
+      "maxOutputBytes": 65536
+    },
     "fallback": "upstream"
   }
 }

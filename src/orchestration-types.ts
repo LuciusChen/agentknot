@@ -139,6 +139,10 @@ export const ORCHESTRATION_EVENT_TYPES = [
   'orchestration.review.started',
   'orchestration.review.completed',
   'orchestration.review.unavailable',
+  'orchestration.artifact-validation.skipped',
+  'orchestration.artifact-validation.started',
+  'orchestration.artifact-validation.completed',
+  'orchestration.artifact-validation.unavailable',
   'orchestration.cancel.requested',
   'orchestration.succeeded',
   'orchestration.failed',
@@ -250,6 +254,88 @@ export type OrchestrationQualityReview =
       findings: QualityReviewFinding[];
     };
 
+export interface ArtifactValidationIdentity {
+  attempt: number;
+  size: number;
+  sha256: string;
+  baseCommit: string;
+}
+
+export const ARTIFACT_VALIDATION_COMMAND_OUTCOMES = [
+  'passed',
+  'failed',
+  'timed-out',
+  'output-limit',
+  'cancelled',
+] as const;
+export type ArtifactValidationCommandOutcome =
+  (typeof ARTIFACT_VALIDATION_COMMAND_OUTCOMES)[number];
+
+export interface ArtifactValidationCommandEvidence {
+  argv: string[];
+  outcome: ArtifactValidationCommandOutcome;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  durationMs: number;
+  stdout: string;
+  stderr: string;
+  outputTruncated: boolean;
+  maxOutputBytes: number;
+}
+
+export const ARTIFACT_VALIDATION_SKIPPED_REASONS = [
+  'not-delegated',
+  'child-count-not-one',
+  'child-not-succeeded',
+  'child-job-unavailable',
+  'artifact-count-not-one',
+  'artifact-invalid',
+  'artifact-empty',
+  'artifact-too-large',
+] as const;
+export type ArtifactValidationSkippedReason =
+  (typeof ARTIFACT_VALIDATION_SKIPPED_REASONS)[number];
+
+export const ARTIFACT_VALIDATION_UNAVAILABLE_REASONS = [
+  'artifact-invalid',
+  'source-dirty',
+  'patch-apply-failed',
+  'validation-start-failed',
+  'cleanup-failed',
+  'parent-cancelled',
+  'runtime-restart',
+] as const;
+export type ArtifactValidationUnavailableReason =
+  (typeof ARTIFACT_VALIDATION_UNAVAILABLE_REASONS)[number];
+
+export type OrchestrationArtifactValidation =
+  | {
+      status: 'skipped';
+      reason: ArtifactValidationSkippedReason;
+    }
+  | {
+      status: 'pending';
+      childJobId: string;
+      artifact: ArtifactValidationIdentity;
+    }
+  | {
+      status: 'unavailable';
+      childJobId?: string;
+      artifact?: ArtifactValidationIdentity;
+      reason: ArtifactValidationUnavailableReason;
+      cleanup: 'not-started' | 'cleaned' | 'failed' | 'not-confirmed';
+      command?: ArtifactValidationCommandEvidence;
+      error?: { name: string; message: string };
+    }
+  | {
+      status: 'completed';
+      childJobId: string;
+      artifact: ArtifactValidationIdentity;
+      outcome: 'passed' | 'failed';
+      command: ArtifactValidationCommandEvidence;
+      cleanup: 'cleaned';
+    };
+
 export interface OrchestrationResult {
   action: 'upstream' | 'suggested' | 'delegated';
   children: OrchestrationChild[];
@@ -281,6 +367,8 @@ export interface OrchestrationRecord {
   children: OrchestrationChild[];
   /** Optional advisory evidence from one separately configured depth-one reviewer Job. */
   qualityReview?: OrchestrationQualityReview;
+  /** Optional controller-owned command evidence from one applied patch in a disposable worktree. */
+  artifactValidation?: OrchestrationArtifactValidation;
   result?: OrchestrationResult;
   error?: OrchestrationError;
 }
