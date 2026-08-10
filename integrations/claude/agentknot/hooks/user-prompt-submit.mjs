@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
-import { access } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { access, chmod, lstat, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
@@ -13,6 +15,10 @@ const MAX_CHILD_OUTPUT_CHARS = 24_000;
 const MAX_PREVIEW_CHARS = 32_000;
 const MAX_CONTEXT_CHARS = 60_000;
 const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+const MAX_SESSION_RECORD_BYTES = 4 * 1024;
+const SESSION_DIRECTORY_MODE = 0o700;
+const SESSION_RECORD_MODE = 0o600;
+const EXPLICIT_PATH_PATTERN = /(?:^|[\s"'`([{<（【《])((?:~\/|\/)[^\s"'`\])}>）】》,，。；;:：！？!?]+)/gu;
 
 function truncate(value, maximum) {
   return value.length <= maximum ? value : `${value.slice(0, maximum)}\n[truncated by controller hook]`;
@@ -42,6 +48,159 @@ async function run(args, cwd) {
     encoding: 'utf8',
     maxBuffer: MAX_BUFFER_BYTES,
   });
+}
+
+function isNotFound(error) {
+  return typeof error === 'object' && error !== null && error.code === 'ENOENT';
+}
+
+function sessionKey(sessionId) {
+  if (typeof sessionId !== 'string' || sessionId === '' || Buffer.byteLength(sessionId, 'utf8') > 4_096) {
+    return undefined;
+  }
+  return createHash('sha256').update(source).update('\0').update(sessionId).digest('hex');
+}
+
+function sessionDirectory() {
+  const runtime = process.env.XDG_RUNTIME_DIR;
+  if (runtime !== undefined && path.isAbsolute(runtime)) {
+    return path.join(path.resolve(runtime), 'agentknot', 'controller-sessions');
+  }
+  const cache = process.env.XDG_CACHE_HOME;
+  const cacheHome = cache !== undefined && path.isAbsolute(cache)
+    ? path.resolve(cache)
+    : path.join(os.homedir(), '.cache');
+  return path.join(cacheHome, 'agentknot', 'controller-sessions');
+}
+
+function sessionRecordPath(sessionId) {
+  const key = sessionKey(sessionId);
+  return key === undefined ? undefined : path.join(sessionDirectory(), `${key}.json`);
+}
+
+async function writeSessionWorkspace(sessionId, workspace) {
+  const recordPath = sessionRecordPath(sessionId);
+  if (recordPath === undefined) return;
+  const directory = path.dirname(recordPath);
+  await mkdir(directory, { recursive: true, mode: SESSION_DIRECTORY_MODE });
+  await chmod(directory, SESSION_DIRECTORY_MODE);
+  const record = `${JSON.stringify({ schemaVersion: 1, source, workspace })}\n`;
+  if (Buffer.byteLength(record, 'utf8') > MAX_SESSION_RECORD_BYTES) return;
+  const temporaryPath = path.join(directory, `.${path.basename(recordPath)}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporaryPath, record, { encoding: 'utf8', flag: 'wx', mode: SESSION_RECORD_MODE });
+    await rename(temporaryPath, recordPath);
+  } finally {
+    await unlink(temporaryPath).catch((error) => {
+      if (!isNotFound(error)) throw error;
+    });
+  }
+}
+
+async function readSessionWorkspace(sessionId) {
+  const recordPath = sessionRecordPath(sessionId);
+  if (recordPath === undefined) return undefined;
+  let recordStats;
+  try {
+    recordStats = await lstat(recordPath);
+  } catch (error) {
+    if (isNotFound(error)) return undefined;
+    throw error;
+  }
+  if (
+    recordStats.isSymbolicLink() ||
+    !recordStats.isFile() ||
+    (recordStats.mode & 0o7777) !== SESSION_RECORD_MODE ||
+    recordStats.size > MAX_SESSION_RECORD_BYTES
+  ) {
+    return undefined;
+  }
+  let record;
+  try {
+    record = JSON.parse(await readFile(recordPath, 'utf8'));
+  } catch {
+    return undefined;
+  }
+  if (
+    typeof record !== 'object' ||
+    record === null ||
+    Array.isArray(record) ||
+    record.schemaVersion !== 1 ||
+    record.source !== source ||
+    typeof record.workspace !== 'string' ||
+    !path.isAbsolute(record.workspace)
+  ) {
+    return undefined;
+  }
+  return record.workspace;
+}
+
+async function clearSessionWorkspace(sessionId) {
+  const recordPath = sessionRecordPath(sessionId);
+  if (recordPath === undefined) return;
+  await unlink(recordPath).catch((error) => {
+    if (!isNotFound(error)) throw error;
+  });
+}
+
+async function gitRoot(candidate) {
+  let candidateStats;
+  try {
+    candidateStats = await stat(candidate);
+  } catch {
+    return undefined;
+  }
+  const cwd = candidateStats.isDirectory() ? candidate : path.dirname(candidate);
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
+      cwd,
+      encoding: 'utf8',
+    });
+    const root = stdout.trim();
+    return root === '' ? undefined : path.resolve(root);
+  } catch {
+    return undefined;
+  }
+}
+
+function explicitPaths(prompt) {
+  const candidates = [];
+  for (const match of prompt.matchAll(EXPLICIT_PATH_PATTERN)) {
+    const raw = match[1];
+    if (raw === undefined) continue;
+    const trimmed = raw.replace(/[.,;:!?，。；：！？]+$/u, '');
+    const expanded = trimmed.startsWith('~/') ? path.join(os.homedir(), trimmed.slice(2)) : trimmed;
+    if (path.isAbsolute(expanded)) candidates.push(path.resolve(expanded));
+    if (candidates.length >= 16) break;
+  }
+  return candidates;
+}
+
+async function resolveWorkspace(event, cwd) {
+  const cwdRoot = await gitRoot(cwd);
+  if (cwdRoot !== undefined) {
+    await writeSessionWorkspace(event.session_id, cwdRoot);
+    return cwdRoot;
+  }
+
+  const promptRoots = new Set();
+  for (const candidate of explicitPaths(event.prompt)) {
+    const root = await gitRoot(candidate);
+    if (root !== undefined) promptRoots.add(root);
+  }
+  if (promptRoots.size > 1) return undefined;
+  if (promptRoots.size === 1) {
+    const [workspace] = promptRoots;
+    await writeSessionWorkspace(event.session_id, workspace);
+    return workspace;
+  }
+
+  const bound = await readSessionWorkspace(event.session_id);
+  if (bound === undefined) return undefined;
+  const boundRoot = await gitRoot(bound);
+  if (boundRoot === bound) return bound;
+  await clearSessionWorkspace(event.session_id);
+  return undefined;
 }
 
 function commandFailureStdout(error) {
@@ -89,20 +248,16 @@ async function discoverServerUrl(cwd) {
 
 try {
   const event = await input();
+  if (event.hook_event_name === 'SessionEnd') {
+    await clearSessionWorkspace(event.session_id).catch(() => undefined);
+    process.exit(0);
+  }
   if (event.hook_event_name !== 'UserPromptSubmit' || typeof event.prompt !== 'string') process.exit(0);
   if (event.prompt.includes(explicit)) process.exit(0);
 
   const cwd = typeof event.cwd === 'string' && event.cwd !== '' ? event.cwd : process.cwd();
-  let rootOutput;
-  try {
-    ({ stdout: rootOutput } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
-      cwd,
-      encoding: 'utf8',
-    }));
-  } catch {
-    process.exit(0);
-  }
-  const workspace = rootOutput.trim();
+  const workspace = await resolveWorkspace(event, cwd);
+  if (workspace === undefined) process.exit(0);
   let serverUrl = process.env.AGENTKNOT_SERVER_URL;
   if (serverUrl !== undefined && serverUrl.trim() === '') {
     throw new Error('AGENTKNOT_SERVER_URL must not be empty');

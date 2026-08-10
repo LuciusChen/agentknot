@@ -156,3 +156,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0042](./0042-complete-route-pool-balancing.md) | Decision | Accepted | Balance heterogeneous downstreams above complete routes |
 | [0043](./0043-native-opencode-lifecycle-soak.md) | Decision / Experiment | Accepted | Close native OpenCode lifecycle gate and document Git metadata boundary |
 | [0044](./0044-required-worker-completion-and-canonical-worktree-id.md) | Incident / Decision | Resolved / Accepted | Require real-worker completion and canonicalize worktree identity |
+| [0045](./0045-controller-session-workspace-binding.md) | Incident / Decision | Resolved / Accepted | Bind an explicit repository to the controller session |

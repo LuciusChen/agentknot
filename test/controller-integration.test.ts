@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { chmod, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import test from 'node:test';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const execFileAsync = promisify(execFile);
 
 const integrations = [
   {
@@ -190,7 +192,10 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     assert.doesNotMatch(body, /git\s+(?:apply|am|commit|push|merge)\b/);
 
     const hook = JSON.parse(await readFile(path.join(repositoryRoot, integration.hook), 'utf8')) as {
-      hooks?: { UserPromptSubmit?: Array<{ hooks?: Array<Record<string, unknown>> }> };
+      hooks?: {
+        UserPromptSubmit?: Array<{ hooks?: Array<Record<string, unknown>> }>;
+        SessionEnd?: Array<{ hooks?: Array<Record<string, unknown>> }>;
+      };
     };
     const handlers = hook.hooks?.UserPromptSubmit;
     assert.equal(handlers?.length, 1);
@@ -202,6 +207,17 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
       statusMessage: 'Running AgentKnot automatic delegation',
       additionalContextLimit: 18000,
     });
+    assert.deepEqual(hook.hooks?.SessionEnd, [
+      {
+        hooks: [
+          {
+            type: 'command',
+            command: `node "\${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs" ${integration.controller}`,
+            timeout: 5,
+          },
+        ],
+      },
+    ]);
     const hookScript = await readFile(path.join(repositoryRoot, integration.hookScript), 'utf8');
     assert.match(hookScript, /process\.stdin/);
     assert.match(hookScript, /policy\.mode !== 'auto'/);
@@ -228,6 +244,116 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     normalizeControllerDifferences(skills[1]?.body ?? '')
   );
   assert.equal(skills[0]?.hookScript, skills[1]?.hookScript);
+});
+
+for (const integration of integrations) {
+  test(`${integration.controller} hook binds one explicitly named repository to its controller session`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-session-workspace-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const runtimeDirectory = path.join(directory, 'runtime');
+    await mkdir(runtimeDirectory, { mode: 0o700 });
+    const sessionHome = path.dirname(repositoryRoot);
+    const explicitWorkspace = `~/${path.basename(repositoryRoot)}`;
+    const sessionId = `session_${integration.controller}_explicit_workspace`;
+    const environment = {
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH ?? ''}`,
+      HOME: sessionHome,
+      XDG_RUNTIME_DIR: runtimeDirectory,
+      AGENTKNOT_CONFIG: undefined,
+      AGENTKNOT_SERVER_URL: 'http://127.0.0.1:17394',
+      FAKE_AGENTKNOT_CALLS: callsFile,
+      FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
+        plan: { willDispatch: false, reasoning: 'Keep this prompt upstream.' },
+        children: [],
+        artifacts: [],
+      }),
+    };
+    const hookPath = path.join(repositoryRoot, integration.hookScript);
+
+    const first = await runHook(hookPath, integration.controller, environment, {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: sessionId,
+      cwd: directory,
+      prompt: `请处理 ${explicitWorkspace} 中的一个明确任务。`,
+    });
+    assert.match(first, /kept it upstream/);
+
+    const continuation = '然后继续检查同一个项目。';
+    const second = await runHook(hookPath, integration.controller, environment, {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: sessionId,
+      cwd: directory,
+      prompt: continuation,
+    });
+    assert.match(second, /kept it upstream/);
+
+    assert.equal(
+      await runHook(hookPath, integration.controller, environment, {
+        hook_event_name: 'SessionEnd',
+        session_id: sessionId,
+        cwd: directory,
+      }),
+      ''
+    );
+    assert.equal(
+      await runHook(hookPath, integration.controller, environment, {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: sessionId,
+        cwd: directory,
+        prompt: '结束后不应继续沿用旧绑定。',
+      }),
+      ''
+    );
+
+    const calls = (await readFile(callsFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[]);
+    assert.equal(calls.length, 4);
+    for (const orchestrate of [calls[1], calls[3]]) {
+      assert.ok(orchestrate);
+      assert.equal(orchestrate[0], 'orchestrate');
+      assert.equal(orchestrate[orchestrate.indexOf('--workspace') + 1], repositoryRoot);
+    }
+    assert.equal(calls[3]?.[calls[3].indexOf('--prompt') + 1], continuation);
+  });
+}
+
+test('controller hooks bypass ambiguous explicit repositories from a non-Git cwd', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-ambiguous-workspace-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const callsFile = await writeFakeAgentKnot(directory);
+  await writeFile(callsFile, '');
+  const otherRepository = path.join(directory, 'other-repository');
+  await mkdir(otherRepository);
+  await execFileAsync('git', ['init', '--quiet'], { cwd: otherRepository });
+
+  for (const integration of integrations) {
+    const result = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ''}`,
+        XDG_RUNTIME_DIR: path.join(directory, 'missing-runtime'),
+        AGENTKNOT_CONFIG: undefined,
+        AGENTKNOT_SERVER_URL: 'http://127.0.0.1:17394',
+        FAKE_AGENTKNOT_CALLS: callsFile,
+        FAKE_AGENTKNOT_HANDOFF: '{}',
+      },
+      {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: `session_${integration.controller}_ambiguous`,
+        cwd: directory,
+        prompt: `Compare ${repositoryRoot} with ${otherRepository}.`,
+      }
+    );
+    assert.equal(result, '');
+  }
+
+  assert.equal(await readFile(callsFile, 'utf8'), '');
 });
 
 test('controller hook runs configured automatic delegation before the model and embeds valid preview evidence', async (t) => {

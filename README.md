@@ -1,8 +1,36 @@
 # AgentKnot
 
-AgentKnot is a small, vendor-neutral control plane for developers and teams that discuss work in one coding agent but want policy-driven execution through interchangeable workers and model providers. It removes controller-specific delegation logic while preserving an auditable plan, isolated job evidence, and explicit artifact handoff.
+AgentKnot is a vendor-neutral control plane for developers and teams that plan work in one coding agent but want policy-driven execution through interchangeable workers and model providers. It turns one repository request into an auditable plan, bounded isolated Jobs, and reviewable patch evidence without letting workers apply, commit, push, merge, or deploy their own output.
 
-The controller is intentionally not an SDK-specific concept. Codex, Claude, a CI job, or a custom application submits the same `JobRequest` or `OrchestrationRequest` through the CLI, HTTP API, or TypeScript API. Routes independently select:
+Use it when Codex, Claude, CI, or a custom controller should keep product decisions and artifact acceptance upstream while delegating implementation, tests, analysis, repair, or documentation to replaceable downstreams. Routes independently select the worker adapter, provider, model, and effort; the current repository dogfood chain is configuration, not a core dependency.
+
+## Quick Start
+
+Requires Node.js 22 or newer. Build and verify the deterministic local path first:
+
+```bash
+npm install
+npm run build
+npm test
+node dist/src/cli.js run --route mock --source codex --workspace . \
+  "Inspect this project and propose the next implementation step"
+```
+
+For a real configured repository, install the CLI once, start one shared loopback execution owner, and submit an orchestration:
+
+```bash
+npm install --global --prefix "$HOME/.local" /path/to/agentknot
+agentknot serve --config /path/to/agentknot.config.json --host 127.0.0.1 --port 7391
+agentknot client --json
+agentknot orchestrate --source codex --workspace /path/to/target-repository \
+  "Implement the approved feature and verify its public contract"
+```
+
+The server command remains attached to its terminal; run it under a process supervisor only after choosing one explicitly. To make new Codex or Claude sessions enter this flow automatically, continue to [Codex and Claude controller integrations](#codex-and-claude-controller-integrations). Jobs and orchestration records use the configured storage paths; the repository defaults are `.agentknot/jobs/` and `.agentknot/orchestrations/`.
+
+## How it fits
+
+The controller is intentionally not an SDK-specific concept. Every controller submits the same `JobRequest` or `OrchestrationRequest` through the CLI, HTTP API, or TypeScript API:
 
 ```text
 controller → AgentKnot orchestration policy → persisted plan → bounded child jobs
@@ -13,7 +41,7 @@ An optional orchestration route-selection policy can either record vendor-neutra
 
 The reference real worker adapter uses [Pi RPC](https://pi.dev/docs/latest/rpc), a strict JSONL protocol. A second promoted real adapter invokes OpenCode CLI's JSON run surface directly, proving that Pi is replaceable without changing Job semantics. Neither path fixes provider, model, or effort in core.
 
-To try it, install dependencies and run the deterministic Quick Start below. Use `agentknot run` for an already bounded leaf task or `agentknot orchestrate` when AgentKnot should decide whether and how to delegate.
+Use `agentknot run` for an already bounded leaf task or `agentknot orchestrate` when AgentKnot should decide whether and how to delegate.
 
 ## Capability status
 
@@ -22,12 +50,12 @@ The labels below are availability claims, not maturity ratings. **Current** mean
 | Status | Capability | Evidence or gate |
 | --- | --- | --- |
 | **Current** | Controller-neutral leaf jobs and bounded depth-one orchestration through CLI, HTTP, and TypeScript, with `off`, `suggest`, and `auto` delegation modes. | Implemented and covered by deterministic API, policy, lifecycle, and persistence tests; callers must invoke the Job or orchestration API rather than relying on native-chat interception. |
-| **Experimental** | Thin installable Codex and Claude controller plugins with explicit delegation and pre-model automatic entry. | Both repository marketplaces install successfully, their manifests and Skills pass native validators, and deterministic tests cover the shared CLI/evidence boundary, pre-model success/failure hook execution, and either package surviving removal of the other. Malformed handoff evidence is bounded, triggers no preview, and cannot add a fallback route/model call. Real Codex experiments also cover planner failure with zero children and a deterministic 500 ms Pi route timeout whose exact PID and managed worktree were gone before the controller continued. A read-only direct comparison reduced upstream input by 88.5%. A separate non-empty implementation comparison reduced Codex input from 2,266,538 on the controller-first/manual-delegation path to 141,781 with pre-model dispatch (93.7%); this second baseline is not a pure direct run. One later Codex run proved automatic two-child dispatch, disjoint verified artifacts, and upstream integration, but intentionally added no costly direct baseline. Real Claude parity remains a promotion gate. The separately installed `agentknot` CLI is required ([decisions 0027](postmortems/0027-controller-native-integration-boundary.md), [0029](postmortems/0029-controller-cli-and-single-child-delegation.md), [0030](postmortems/0030-pre-model-controller-dispatch.md), [incident 0031](postmortems/0031-bounded-pi-output-drain.md), [experiment 0032](postmortems/0032-pre-model-multi-child-evidence.md), and [incident 0033](postmortems/0033-controller-timeout-phase-claim.md)). |
+| **Experimental** | Thin installable Codex and Claude controller plugins with explicit delegation and pre-model automatic entry. | Both repository marketplaces install successfully, their manifests and Skills pass native validators, and deterministic tests cover the shared CLI/evidence boundary, pre-model success/failure hook execution, session-bound explicit repository paths, and either package surviving removal of the other. Malformed handoff evidence is bounded, triggers no preview, and cannot add a fallback route/model call. Real Codex experiments also cover planner failure with zero children and a deterministic 500 ms Pi route timeout whose exact PID and managed worktree were gone before the controller continued. A read-only direct comparison reduced upstream input by 88.5%. A separate non-empty implementation comparison reduced Codex input from 2,266,538 on the controller-first/manual-delegation path to 141,781 with pre-model dispatch (93.7%); this second baseline is not a pure direct run. One later Codex run proved automatic two-child dispatch, disjoint verified artifacts, and upstream integration, but intentionally added no costly direct baseline. Real Claude parity remains a promotion gate. The separately installed `agentknot` CLI is required ([decisions 0027](postmortems/0027-controller-native-integration-boundary.md), [0029](postmortems/0029-controller-cli-and-single-child-delegation.md), [0030](postmortems/0030-pre-model-controller-dispatch.md), [incident 0031](postmortems/0031-bounded-pi-output-drain.md), [experiment 0032](postmortems/0032-pre-model-multi-child-evidence.md), [incident 0033](postmortems/0033-controller-timeout-phase-claim.md), and [decision 0045](postmortems/0045-controller-session-workspace-binding.md)). |
 | **Current** | Independent worker/provider/model routing with built-in Mock, Pi RPC, and OpenCode JSON adapters. | Routing and core Job semantics are adapter-neutral; the planner remains exact Pi/OpenCode Go/Luna/max, the medium/high/default worker target is the human-configured Luna route pool, and the low-complexity rule remains exact Pi/OpenCode Go/DeepSeek Flash/max. |
 | **Current** | Reusable route-neutral `WorkerAdapter` conformance tests for Mock, Pi RPC, and OpenCode JSON. | The shared unit kit covers healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and pre-aborted runs. Protocol-specific lifecycle and artifact tests remain at each adapter boundary. |
-| **Current** | Optional human-authored route selection and complete-route pools for eligible work. | Active/shadow rules choose configured route targets. A `least-active` pool selects one complete exact route before Job creation, counts explicit member Jobs, rotates equal-load ties, and persists the pool plus exact selection. The repository sends `low` to exact DeepSeek Flash/max and medium/high/default children to the Pi-Luna/native-OpenCode-Luna pool. Deterministic verification passes 234/234; one real simultaneous pair selected and completed both members, and usage reported one hit each. Retries never switch routes; there is no learned ranking, health scoring, or fallback ([decisions 0020](postmortems/0020-human-authored-active-route-selection.md) and [0042](postmortems/0042-complete-route-pool-balancing.md)). |
+| **Current** | Optional human-authored route selection and complete-route pools for eligible work. | Active/shadow rules choose configured route targets. A `least-active` pool selects one complete exact route before Job creation, counts explicit member Jobs, rotates equal-load ties, and persists the pool plus exact selection. The repository sends `low` to exact DeepSeek Flash/max and medium/high/default children to the Pi-Luna/native-OpenCode-Luna pool. Deterministic verification passes 237/237; one real simultaneous pair selected and completed both members, and usage reported one hit each. Retries never switch routes; there is no learned ranking, health scoring, or fallback ([decisions 0020](postmortems/0020-human-authored-active-route-selection.md) and [0042](postmortems/0042-complete-route-pool-balancing.md)). |
 | **Current** | Optional independent advisory review for one bounded delegated patch. | `delegation.qualityReview` names any configured single-attempt route and eligible parent complexities. One separately persisted depth-one reviewer Job receives bounded verified patch evidence and returns strict `accept`, `changes-requested`, or `uncertain` evidence; it cannot apply, repair, promote, or override the controller. The repository's current no-tool reviewer profile reduced reviewer tokens by 94.1% on one same-task correction and caught a seeded no-mutation defect. Two distinct same-prompt Codex comparisons accepted the reviewed artifacts unchanged, passed their independent checks, and used 36.2% and 48.0% fewer upstream input-plus-output tokens than direct baselines. The second path was 80.5% slower and used 6.6% more non-cached-input-plus-output, so this remains bounded dogfood evidence rather than a fixed model ranking or universal efficiency claim ([decision/experiment 0036](postmortems/0036-bounded-advisory-quality-review.md)). |
-| **Current** | Read-only persisted-evidence usage report through CLI and TypeScript. | `agentknot usage` and `runtime.usage()` aggregate exact available downstream adapter-reported token totals and provider cost, report cache-read and active/shadow route-rule hit rates, and keep partial or missing evidence explicit. Pi RPC and OpenCode JSON both normalize exact provider evidence into this shape. Upstream controller usage and upstream/downstream proportions remain unavailable until a comparable exact controller contract exists ([decision 0034](postmortems/0034-persisted-usage-observability-boundary.md)). |
+| **Current** | Read-only persisted-evidence usage report through CLI and TypeScript. | `agentknot usage` and `runtime.usage()` aggregate exact available downstream adapter-reported token totals and provider cost, report cache-read and active/shadow route-rule hit rates, and keep partial or missing evidence explicit. Pi RPC and OpenCode JSON both normalize exact provider evidence into this shape. Upstream controller usage, cross-boundary proportions, and shared-account remaining quota are unavailable rather than inferred ([decision 0034](postmortems/0034-persisted-usage-observability-boundary.md)). |
 | **Current** | Ordered job/orchestration snapshots and normalized events with retries, timeouts, cancellation, one-shot callbacks, and bounded exact-child Pi supervision. | Implemented and covered by deterministic lifecycle, persistence, callback, and Pi conformance tests; catchable CLI/server shutdown cancels and awaits admitted work, late attempt events are ignored, and the bounded Stage 1 soak verifies exact process-group cleanup. File-backed execution owners hold advisory locks on both storage directories so a second conforming writer is refused before reconciliation or admission. |
 | **Current** | Fixed UTF-8 budgets for prompts, metadata, worker events, result output, completion reports, errors, snapshots, callbacks, and patch artifacts. | Oversized admission fails early, bounded evidence carries explicit replacement/truncation state, snapshots and patch artifacts each have a 16 MiB ceiling, and callbacks above 8 MiB are not sent; local records/artifacts remain until exact manual deletion and content is not automatically redacted ([decisions 0023](postmortems/0023-fixed-durable-record-budgets.md) and [0025](postmortems/0025-local-retention-and-redaction-boundary.md)). |
 | **Current** | Versioned persisted Job and Orchestration records. | New records carry top-level `schemaVersion: 1`; file reads materialize missing versions as legacy v1 in memory without rewriting bytes and reject explicit unsupported versions. |
@@ -43,7 +71,7 @@ The labels below are availability claims, not maturity ratings. **Current** mean
 | **Deferred** | Automatic patch application, commit, merge, push, deployment, or pull-request creation. | Not available by design; artifact inspection ends with an upstream controller or human decision. |
 | **Deferred** | Remote/team/fleet operation, collaboration surfaces, recursive or dependency-graph swarms, and silent provider/model fallback or optimization. | Not available; these remain conditional or deferred until an explicit PRD/SPEC change and evidence-gated roadmap stage. |
 
-Outside the experimental plugins, controllers still choose whether a request enters the leaf Job API or orchestration API. In a Git repository whose resolved AgentKnot policy is explicitly `mode: "auto"`, the plugin hook submits each non-explicit prompt to the existing planner before the first controller-model request; non-Git, unconfigured, `off`, `suggest`, and explicit-Skill prompts bypass this path. AgentKnot—not plugin code—classifies the request and applies the existing keep-upstream, route, concurrency, depth, and artifact rules. Other integrations can call the same CLI, `POST /v1/orchestrations`, or `runtime.orchestrate()` boundary.
+Outside the experimental plugins, controllers still choose whether a request enters the leaf Job API or orchestration API. For a workspace whose resolved AgentKnot policy is explicitly `mode: "auto"`, the plugin hook submits each non-explicit prompt to the existing planner before the first controller-model request. It uses the event cwd's Git root when available; otherwise one explicit existing absolute or `~/...` prompt path may establish a controller-session workspace for later continuation prompts. Unresolved or ambiguous non-Git prompts, unconfigured workspaces, `off`, `suggest`, and explicit-Skill prompts bypass this path. AgentKnot—not plugin code—classifies the request and applies the existing keep-upstream, route, concurrency, depth, and artifact rules ([decision 0045](postmortems/0045-controller-session-workspace-binding.md)). Other integrations can call the same CLI, `POST /v1/orchestrations`, or `runtime.orchestrate()` boundary.
 
 ## Product and architecture contracts
 
@@ -58,29 +86,6 @@ AgentKnot keeps current behavior, future intent, execution order, and historical
 Material changes should map to all four layers before implementation starts.
 
 AgentKnot borrows the useful boundary ideas of harness/session/event systems such as Agent Relay, but has no Agent Relay runtime dependency and does not copy its cloud, chat, fleet, or workspace layers.
-
-## Development setup
-
-Requires Node.js 22 or newer.
-
-```bash
-npm install
-npm run build
-npm test
-```
-
-Run the deterministic route before installing any agent:
-
-```bash
-node dist/src/cli.js routes
-node dist/src/cli.js run \
-  --route mock \
-  --source codex \
-  --workspace . \
-  "Inspect this project and propose the next implementation step"
-```
-
-Jobs are written under `.agentknot/jobs/` by default.
 
 ## Automatic delegation
 
@@ -153,7 +158,7 @@ claude plugin install agentknot@agentknot
 
 Invoke it explicitly as `/agentknot:agentknot-delegate`; Claude's native Skill surface remains available, while configured automatic entry uses the same pre-model hook contract. A controller's `/goal` may preserve an upstream goal, but `/goal` is not the AgentKnot protocol and does not itself bypass the plugin or orchestration API.
 
-After installation or any hook change, review and trust the plugin hook in the controller's native hook UI, then start a new session. `UserPromptSubmit` has no task-category matcher. The hook is a dependency-free I/O adapter: it finds the Git root, honors explicit `AGENTKNOT_SERVER_URL` or `AGENTKNOT_CONFIG`, and otherwise calls `agentknot client --json` once. An available record is passed as `--server` to every remaining CLI call; `unconfigured` preserves the existing repository-local opt-in, while unavailable or malformed discovery fails without local or model fallback. The hook then synchronously calls `agentknot orchestrate --delegation inherit --handoff-json` before the first controller-model request. The existing exact Luna planner decides whether work stays upstream or dispatches; configured low children use exact Pi/DeepSeek Flash/max and medium/high/default children use the Pi-Luna/native-OpenCode-Luna pool. Explicit Skill prompts bypass the hook, and Codex keeps implicit Skill loading disabled.
+After installation or any hook change, review and trust the plugin hook in the controller's native hook UI, then start a new session. `UserPromptSubmit` has no task-category matcher. The dependency-free hook first uses the event cwd's Git root. When the session starts above a repository, one unambiguous explicit existing absolute or `~/...` path in the prompt may establish its Git root; a schema-versioned 0600 record keyed by controller and `session_id` preserves that root for later prompts such as “然后继续”, and `SessionEnd` removes the exact record. Multiple repository roots, missing paths, missing session IDs, and invalid/stale records never trigger a home scan, transcript parse, semantic guess, or fallback. The hook then honors explicit `AGENTKNOT_SERVER_URL` or `AGENTKNOT_CONFIG`, otherwise calls `agentknot client --json` once, and synchronously calls `agentknot orchestrate --delegation inherit --handoff-json` before the first controller-model request. An available record is passed as `--server` to every remaining CLI call; `unconfigured` preserves the resolved repository-local opt-in, while unavailable or malformed discovery fails without local or model fallback. The existing exact Luna planner decides whether work stays upstream or dispatches; configured low children use exact Pi/DeepSeek Flash/max and medium/high/default children use the Pi-Luna/native-OpenCode-Luna pool. Explicit Skill prompts bypass the hook, and Codex keeps implicit Skill loading disabled ([decision 0045](postmortems/0045-controller-session-workspace-binding.md)).
 
 For delegated work, the hook supplies compact terminal evidence and integrity-valid non-empty patch previews but never applies them. All child outputs share a 24,000-character budget, previews share 32,000 characters, and total model-visible hook context is capped at 60,000 characters. A configured `auto` repository therefore forwards every non-explicit submitted prompt to the configured planner, including prompts the planner later retains upstream; use `off` or `suggest` where that latency or data boundary is unacceptable. No MCP server, wrapper daemon, local semantic classifier, learned router, or fallback model is added; see [decision 0030](postmortems/0030-pre-model-controller-dispatch.md).
 

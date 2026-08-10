@@ -1,6 +1,6 @@
 {
   "name": "agentknot",
-  "version": "0.1.0+codex.20260810102659",
+  "version": "0.1.0+codex.local-20260810-145700",
   "description": "Delegate bounded independent coding work through AgentKnot while keeping decisions and artifact promotion upstream.",
   "author": {
     "name": "AgentKnot"

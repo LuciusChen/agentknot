@@ -13,6 +13,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" codex",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
