@@ -98,7 +98,10 @@ async function writeFakeAgentKnot(directory: string): Promise<string> {
       `import { appendFileSync } from 'node:fs';\n` +
       `const args = process.argv.slice(2);\n` +
       `appendFileSync(process.env.FAKE_AGENTKNOT_CALLS, JSON.stringify(args) + '\\n');\n` +
-      `if (args[0] === 'delegation') process.stdout.write('{"mode":"auto"}');\n` +
+      `if (args[0] === 'client') {\n` +
+      `  process.stdout.write(process.env.FAKE_AGENTKNOT_CLIENT ?? '{"status":"unconfigured"}');\n` +
+      `  if (process.env.FAKE_AGENTKNOT_CLIENT_EXIT === '1') process.exitCode = 1;\n` +
+      `} else if (args[0] === 'delegation') process.stdout.write('{"mode":"auto"}');\n` +
       `else if (args[0] === 'orchestrate') process.stdout.write(process.env.FAKE_AGENTKNOT_HANDOFF);\n` +
       `else if (args[0] === 'artifact-preview') process.stdout.write(process.env.FAKE_AGENTKNOT_PREVIEW);\n` +
       `else process.exitCode = 1;\n`
@@ -297,6 +300,184 @@ test('controller hook runs configured automatic delegation before the model and 
   assert.equal(explicit, '');
   assert.equal((await readFile(callsFile, 'utf8')).trim().split('\n').length, 3);
 });
+
+for (const integration of integrations) {
+  test(`${integration.controller} hook discovers an available server for every handoff call`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-discovered-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const serverUrl = 'http://127.0.0.1:17392';
+    const prompt = 'Inspect one discovered bounded component.';
+    const handoff = {
+      plan: { willDispatch: true, reasoning: 'Dispatch one bounded task.' },
+      children: [{ jobId: 'job_discovered', status: 'succeeded', output: 'Completed the task.' }],
+      artifacts: [
+        {
+          jobId: 'job_discovered',
+          status: 'verified',
+          attempts: [{ attempt: 1, size: 24, valid: true }],
+        },
+      ],
+    };
+    const result = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ''}`,
+        AGENTKNOT_CONFIG: undefined,
+        AGENTKNOT_SERVER_URL: undefined,
+        FAKE_AGENTKNOT_CALLS: callsFile,
+        FAKE_AGENTKNOT_CLIENT: JSON.stringify({ status: 'available', url: serverUrl }),
+        FAKE_AGENTKNOT_HANDOFF: JSON.stringify(handoff),
+        FAKE_AGENTKNOT_PREVIEW: JSON.stringify({ content: 'diff --git a/discovered b/discovered\n+fixed\n', truncated: false }),
+      },
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
+    );
+    const output = JSON.parse(result) as {
+      hookSpecificOutput: { hookEventName: string; additionalContext: string };
+    };
+    assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+    assert.match(output.hookSpecificOutput.additionalContext, /Completed the task/);
+    assert.match(output.hookSpecificOutput.additionalContext, /diff --git a\/discovered b\/discovered/);
+
+    const calls = (await readFile(callsFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[]);
+    assert.deepEqual(calls, [
+      ['client', '--json'],
+      ['delegation', '--json', '--server', serverUrl],
+      [
+        'orchestrate',
+        '--source',
+        integration.controller,
+        '--workspace',
+        repositoryRoot,
+        '--delegation',
+        'inherit',
+        '--handoff-json',
+        '--prompt',
+        prompt,
+        '--server',
+        serverUrl,
+      ],
+      ['artifact-preview', 'job_discovered', '1', '--json', '--server', serverUrl],
+    ]);
+  });
+}
+
+for (const integration of integrations) {
+  test(`${integration.controller} hook keeps repository config opt-in after unconfigured discovery`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-unconfigured-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const configPath = path.join(repositoryRoot, 'agentknot.config.json');
+    const prompt = 'Keep this bounded prompt upstream.';
+    const result = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ''}`,
+        AGENTKNOT_CONFIG: undefined,
+        AGENTKNOT_SERVER_URL: undefined,
+        FAKE_AGENTKNOT_CALLS: callsFile,
+        FAKE_AGENTKNOT_CLIENT: JSON.stringify({ status: 'unconfigured' }),
+        FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
+          plan: { willDispatch: false, reasoning: 'No configured automatic delegation.' },
+          children: [],
+          artifacts: [],
+        }),
+      },
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
+    );
+    const output = JSON.parse(result) as {
+      hookSpecificOutput: { hookEventName: string; additionalContext: string };
+    };
+    assert.match(output.hookSpecificOutput.additionalContext, /kept it upstream/);
+
+    const calls = (await readFile(callsFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[]);
+    assert.deepEqual(calls, [
+      ['client', '--json'],
+      ['delegation', '--json', '--config', configPath],
+      [
+        'orchestrate',
+        '--source',
+        integration.controller,
+        '--workspace',
+        repositoryRoot,
+        '--delegation',
+        'inherit',
+        '--handoff-json',
+        '--prompt',
+        prompt,
+        '--config',
+        configPath,
+      ],
+    ]);
+  });
+}
+
+for (const integration of integrations) {
+  for (const discovery of [
+    {
+      name: 'unavailable discovery',
+      output: JSON.stringify({
+        status: 'unavailable',
+        url: 'http://127.0.0.1:17393',
+        error: 'server is not reachable',
+      }),
+      exit: '1',
+    },
+    { name: 'malformed discovery JSON', output: '{', exit: undefined },
+    { name: 'malformed available discovery', output: JSON.stringify({ status: 'available' }), exit: undefined },
+  ] as const) {
+    test(`${integration.controller} hook bounds ${discovery.name} without fallback`, async (t) => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-discovery-failure-'));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const callsFile = await writeFakeAgentKnot(directory);
+      const result = await runHook(
+        path.join(repositoryRoot, integration.hookScript),
+        integration.controller,
+        {
+          ...process.env,
+          PATH: `${directory}:${process.env.PATH ?? ''}`,
+          AGENTKNOT_CONFIG: undefined,
+          AGENTKNOT_SERVER_URL: undefined,
+          FAKE_AGENTKNOT_CALLS: callsFile,
+          FAKE_AGENTKNOT_CLIENT: discovery.output,
+          FAKE_AGENTKNOT_CLIENT_EXIT: discovery.exit,
+          FAKE_AGENTKNOT_PREVIEW: 'FORBIDDEN_PREVIEW',
+        },
+        {
+          hook_event_name: 'UserPromptSubmit',
+          cwd: repositoryRoot,
+          prompt: 'Do not fall back from local discovery.',
+        }
+      );
+      const output = JSON.parse(result) as {
+        hookSpecificOutput: { hookEventName: string; additionalContext: string };
+      };
+      const context = output.hookSpecificOutput.additionalContext;
+      assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+      assert.match(context, /^AgentKnot automatic entry failed to return a usable handoff:/);
+      assert.match(context, /Continue upstream without silently substituting another worker, provider, or model\./);
+      assert.doesNotMatch(context, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
+      assert.doesNotMatch(context, /FORBIDDEN_PREVIEW/);
+      assert.ok(context.length <= 60_000);
+
+      const calls = (await readFile(callsFile, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as string[]);
+      assert.deepEqual(calls, [['client', '--json']]);
+    });
+  }
+}
 
 for (const integration of integrations) {
   test(`${integration.controller} hook uses one selected shared server without reading local config`, async (t) => {

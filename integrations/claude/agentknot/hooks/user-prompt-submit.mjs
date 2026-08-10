@@ -44,6 +44,49 @@ async function run(args, cwd) {
   });
 }
 
+function commandFailureStdout(error) {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'stdout' in error &&
+    typeof error.stdout === 'string'
+  ) {
+    return error.stdout;
+  }
+  throw error;
+}
+
+async function discoverServerUrl(cwd) {
+  let output;
+  try {
+    ({ stdout: output } = await run(['client', '--json'], cwd));
+  } catch (error) {
+    output = commandFailureStdout(error);
+  }
+
+  let report;
+  try {
+    report = JSON.parse(output);
+  } catch (error) {
+    throw new Error('AgentKnot client returned malformed JSON', { cause: error });
+  }
+  if (typeof report !== 'object' || report === null || Array.isArray(report)) {
+    throw new Error('AgentKnot client returned a malformed status report');
+  }
+  if (report.status === 'unconfigured') return undefined;
+  if (report.status === 'available') {
+    if (typeof report.url !== 'string' || report.url.trim() === '') {
+      throw new Error('AgentKnot client returned an available status without a URL');
+    }
+    return report.url;
+  }
+  if (report.status === 'unavailable') {
+    const reason = typeof report.error === 'string' && report.error !== '' ? `: ${report.error}` : '';
+    throw new Error(`AgentKnot client reported unavailable${reason}`);
+  }
+  throw new Error('AgentKnot client returned an unknown status');
+}
+
 try {
   const event = await input();
   if (event.hook_event_name !== 'UserPromptSubmit' || typeof event.prompt !== 'string') process.exit(0);
@@ -60,24 +103,27 @@ try {
     process.exit(0);
   }
   const workspace = rootOutput.trim();
-  const serverUrl = process.env.AGENTKNOT_SERVER_URL;
+  let serverUrl = process.env.AGENTKNOT_SERVER_URL;
   if (serverUrl !== undefined && serverUrl.trim() === '') {
     throw new Error('AGENTKNOT_SERVER_URL must not be empty');
   }
   if (serverUrl !== undefined && process.env.AGENTKNOT_CONFIG !== undefined) {
     throw new Error('AGENTKNOT_SERVER_URL and AGENTKNOT_CONFIG cannot be used together');
   }
-  const configPath =
-    serverUrl === undefined
-      ? process.env.AGENTKNOT_CONFIG === undefined
-        ? path.join(workspace, 'agentknot.config.json')
-        : path.resolve(cwd, process.env.AGENTKNOT_CONFIG)
-      : undefined;
-  if (serverUrl === undefined && process.env.AGENTKNOT_CONFIG === undefined) {
-    try {
-      await access(configPath);
-    } catch {
-      process.exit(0);
+  let configPath;
+  if (serverUrl === undefined) {
+    if (process.env.AGENTKNOT_CONFIG !== undefined) {
+      configPath = path.resolve(cwd, process.env.AGENTKNOT_CONFIG);
+    } else {
+      serverUrl = await discoverServerUrl(workspace);
+      if (serverUrl === undefined) {
+        configPath = path.join(workspace, 'agentknot.config.json');
+        try {
+          await access(configPath);
+        } catch {
+          process.exit(0);
+        }
+      }
     }
   }
   const connectionArgs = serverUrl === undefined ? ['--config', configPath] : ['--server', serverUrl];
