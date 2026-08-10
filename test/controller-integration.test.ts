@@ -483,7 +483,10 @@ for (const integration of integrations) {
     t.after(() => rm(directory, { recursive: true, force: true }));
     const callsFile = await writeFakeAgentKnot(directory);
     const runtimeDirectory = path.join(directory, 'runtime');
+    const transcriptDecoy = path.join(directory, 'transcript-decoy');
     await mkdir(runtimeDirectory, { mode: 0o700 });
+    await mkdir(transcriptDecoy);
+    await execFileAsync('git', ['init', '--quiet'], { cwd: transcriptDecoy });
     const sessionHome = path.dirname(repositoryRoot);
     const explicitWorkspace = `~/${path.basename(repositoryRoot)}`;
     const sessionId = `session_${integration.controller}_explicit_workspace`;
@@ -502,6 +505,14 @@ for (const integration of integrations) {
       }),
     };
     const hookPath = path.join(repositoryRoot, integration.hookScript);
+    const assertContextRecovery = (output: string) => {
+      assert.match(output, /kept it upstream/);
+      assert.match(output, /without controller conversation context/);
+      assert.match(output, /surrounding controller context supplies a concrete, bounded repository task/);
+      assert.match(output, /normal AgentKnot delegation entry for that recovered task/);
+      assert.match(output, /unless AgentKnot's normal policy keeps the recovered task upstream/);
+      assert.doesNotMatch(output, /do not invoke AgentKnot again for this prompt/);
+    };
 
     const first = await runHook(hookPath, integration.controller, environment, {
       hook_event_name: 'UserPromptSubmit',
@@ -509,7 +520,7 @@ for (const integration of integrations) {
       cwd: directory,
       prompt: `请处理 ${explicitWorkspace} 中的一个明确任务。`,
     });
-    assert.match(first, /kept it upstream/);
+    assertContextRecovery(first);
 
     const continuation = '然后继续检查同一个项目。';
     const second = await runHook(hookPath, integration.controller, environment, {
@@ -518,7 +529,7 @@ for (const integration of integrations) {
       cwd: directory,
       prompt: continuation,
     });
-    assert.match(second, /kept it upstream/);
+    assertContextRecovery(second);
 
     assert.equal(
       await runHook(hookPath, integration.controller, environment, {
@@ -529,21 +540,20 @@ for (const integration of integrations) {
       ''
     );
     const resumedPrompt = '恢复后继续检查同一个项目。';
-    assert.match(
-      await runHook(
-        hookPath,
-        integration.controller,
-        environment,
-        {
-          hook_event_name: 'UserPromptSubmit',
-          session_id: sessionId,
-          cwd: directory,
-          prompt: resumedPrompt,
-        },
-        null
-      ),
-      /kept it upstream/
+    const resumed = await runHook(
+      hookPath,
+      integration.controller,
+      environment,
+      {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: sessionId,
+        cwd: directory,
+        prompt: resumedPrompt,
+        transcript: [{ tool_input: { workspace: transcriptDecoy } }],
+      },
+      null
     );
+    assertContextRecovery(resumed);
     assert.equal(
       await runHook(
         hookPath,

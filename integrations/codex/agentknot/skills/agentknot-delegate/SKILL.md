@@ -7,6 +7,8 @@ description: Delegate bounded, independently verifiable implementation, test, an
 
 Use this skill for bounded, independently verifiable repository work that requires more than one direct upstream read or action and can be handed to AgentKnot without an upstream decision, including one substantive task with no useful parallel split. Keep a trivial one-read check upstream because planner, worker, and review overhead would cost more. Explicit invocation may request the workflow; model-triggered use applies to eligible independent implementation, test, analysis, repair, or documentation work. Preserve the upstream controller as the decision-maker.
 
+If automatic entry reports that the exact submitted text stayed upstream because it lacked controller conversation context, use the surrounding controller context only to recover one concrete bounded repository task, then run this normal delegation workflow once for that recovered task before doing its repository work upstream. Do not resubmit the same context-free continuation text. Every eligibility, policy, artifact, and promotion boundary below still applies, and AgentKnot may retain the recovered task upstream after evaluating it normally.
+
 ## Keep upstream
 
 Do not delegate or automate:

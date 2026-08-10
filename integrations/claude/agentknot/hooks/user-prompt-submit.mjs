@@ -446,7 +446,7 @@ try {
 
   if (handoff.plan?.willDispatch !== true) {
     context(
-      `AgentKnot automatic entry evaluated this prompt and kept it upstream: ${handoff.plan?.reasoning ?? 'no delegatable subtask'}. Continue normally and do not invoke AgentKnot again for this prompt.`
+      `AgentKnot automatic entry evaluated this submitted text without controller conversation context and kept it upstream: ${handoff.plan?.reasoning ?? 'no delegatable subtask'}. Continue normally. If the surrounding controller context supplies a concrete, bounded repository task that this text is continuing, first use the normal AgentKnot delegation entry for that recovered task; do not execute that task upstream unless AgentKnot's normal policy keeps the recovered task upstream. Otherwise keep this submitted text upstream. Do not resubmit this exact context-free text.`
     );
     process.exit(0);
   }

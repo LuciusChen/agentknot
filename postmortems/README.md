@@ -159,3 +159,6 @@ Incident records should also include severity, user/controller impact, immediate
 | [0045](./0045-controller-session-workspace-binding.md) | Incident / Decision | Resolved / Accepted | Bind an explicit repository to the controller session |
 | [0046](./0046-clutch-review-listing-and-shutdown-gaps.md) | Incident / Decision | Resolved / Accepted | Close Clutch review, listing, and shutdown gaps |
 | [0047](./0047-resumable-controller-binding-and-replaceable-role-pools.md) | Incident / Decision | Resolved / Accepted | Resume controller bindings and make orchestration roles replaceable |
+| [0048](./0048-controller-hook-failure-blocking.md) | Incident / Decision | Resolved / Accepted | Block controller fallback after automatic-entry failure |
+| [0049](./0049-dirty-workspace-snapshot-isolation.md) | Decision | Accepted | Snapshot dirty workspaces without weakening artifact isolation |
+| [0050](./0050-context-dependent-continuation-handoff.md) | Incident / Decision | Resolved / Accepted | Recover bounded continuation tasks without reading controller transcripts |
