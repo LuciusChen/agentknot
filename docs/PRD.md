@@ -2,16 +2,16 @@
 
 - Status: Living product contract
 - Version: 0.1
-- Last updated: 2026-08-10
+- Last updated: 2026-08-11
 
 ## Product thesis
 
-AgentKnot is a small, local-first, vendor-neutral execution control plane for deciding whether and how a goal should be delegated, with or without splitting, from interchangeable controllers to interchangeable agent workers and model routes.
+AgentKnot is a small, local-first, vendor-neutral execution control plane for validating and executing a controller-authored delegation handoff from interchangeable controllers through interchangeable agent workers and model routes.
 
 Its job is to admit work, apply a bounded delegation policy, persist the plan and lifecycle evidence, invoke workers, and hand back results and artifacts. It does not own the worker's intelligence, the provider's model runtime, or a collaboration network.
 
 ```text
-controller -> Orchestration API -> planner assessment -> deterministic policy
+controller -> plan/assessment -> Orchestration API -> deterministic policy
                          |                         |
                          +-> upstream/suggestion  +-> bounded child Job APIs
 controller ---------------------------> Job API -> worker -> provider/model
@@ -25,7 +25,7 @@ Coding-agent workflows are often coupled at several layers at once: the controll
 
 Directly invoking a worker also leaves recurring control-plane concerns to every caller: route configuration, job state, cancellation, retries, event normalization, workspace protection, artifact capture, and audit history.
 
-Relying on a controller prompt to remember when to delegate creates another coupling: every controller and every target repository must reproduce the same judgment, limits, and evidence rules. AgentKnot therefore needs a shared orchestration entry point whose planner is advisory and whose dispatch decision is deterministic configuration.
+Controllers already own conversation context, intent, planning, and product decisions. AgentKnot therefore needs one shared, strict orchestration handoff: controllers author the semantic assessment, while middleware validates it and applies common limits, routing, isolation, lifecycle, and evidence rules. Requiring middleware to plan from a raw prompt would duplicate controller reasoning, hide context, add latency, and couple the control plane to another model call.
 
 AgentKnot provides one narrow contract for those concerns while keeping every execution choice explicit and replaceable.
 
@@ -50,7 +50,7 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 5. Keep the supplied Git workspace unchanged while receiving a verifiable patch artifact.
 6. Inspect enough evidence to decide whether a result should be accepted, revised, or discarded.
 7. Diagnose why a job failed without exposing provider credentials.
-8. Submit one goal and have the same policy decide whether to keep it upstream, suggest a split, or dispatch bounded child jobs regardless of controller vendor.
+8. Submit one controller-authored assessment and have the same policy decide whether to keep it upstream, suggest the validated split, or dispatch bounded child jobs regardless of controller vendor.
 9. Optionally ask a separately configured route to review one bounded patch before the controller makes the final acceptance decision.
 10. Optionally obtain controller-owned test evidence for one bounded patch without first applying it to the supplied source workspace.
 11. Use one local AgentKnot execution owner concurrently from multiple upstream controller sessions without sharing file-store write authority with those clients.
@@ -65,13 +65,13 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 
 ### Explicit routing
 
-A route resolves worker, provider, model, thinking level, timeout, and retry settings before execution. Existing jobs retain that resolved snapshot even if configuration changes later. The optional human-authored `delegation.dispatch.routeSelection` policy supports `shadow` evidence and `active` execution. Shadow keeps `dispatch.defaultRoute`; active writes the first matching configured route into the planned child and ordinary Job request. The planner assesses complexity but cannot name a route.
+A route resolves worker, provider, model, thinking level, timeout, and retry settings before execution. Existing jobs retain that resolved snapshot even if configuration changes later. The optional human-authored `delegation.dispatch.routeSelection` policy supports `shadow` evidence and `active` execution. Shadow keeps `dispatch.defaultRoute`; active writes the first matching configured route into the planned child and ordinary Job request. The controller assesses complexity, but its strict assessment cannot name a route.
 
 ### Records first, live signals second
 
 The durable job record and its ordered events are the authority. Streaming, callbacks, dashboards, or notifications are delivery conveniences and must not become the only copy of state.
 
-Each orchestration has one authoritative primary target workspace and workers may modify only its isolated copy; every other repository is a read-only reference. A requested edit target that conflicts with the admitted workspace must remain upstream as a visible mismatch. Repository analysis must also remain bounded at admission: unless exhaustive coverage is explicitly requested, the planner and worker contract names the primary target, references, exact scope, and non-goals, then returns only a small decision-relevant evidence set rather than an inventory or source restatement.
+Each orchestration has one authoritative primary target workspace and workers may modify only its isolated copy; every other repository is a read-only reference. A requested edit target that conflicts with the admitted workspace must remain upstream as a visible mismatch. Repository analysis must also remain bounded at admission: unless exhaustive coverage is explicitly requested, the controller-authored subtask and worker contract name the primary target, references, exact scope, and non-goals, then return only a small decision-relevant evidence set rather than an inventory or source restatement.
 
 ### Honest capabilities
 
@@ -95,7 +95,7 @@ Worker-specific process and protocol behavior belongs in worker adapters. Orches
 
 ### Bounded automation
 
-Automatic delegation must be explicit at the API boundary, depth-limited, concurrency-limited, isolated, and recorded before execution. Its process-local semaphore covers planner and child execution, not independent callers issuing concurrent leaf Job requests; caller-side admission control remains required for direct bursts in v1. Automatic delegation must never imply automatic artifact integration, product decisions, commits, or pushes.
+Automatic delegation must be explicit at the API boundary, carry a strict controller-authored assessment, remain depth-limited, concurrency-limited and isolated, and be recorded before execution. Its process-local semaphore covers child and reviewer execution, not independent callers issuing concurrent leaf Job requests; caller-side admission control remains required for direct bursts in v1. Automatic delegation must never imply automatic artifact integration, product decisions, commits, or pushes.
 
 ## Current product scope
 
@@ -103,12 +103,12 @@ Version 0.0.1 currently implements:
 
 - controller-neutral CLI, HTTP, and TypeScript entry points;
 - a compact CLI orchestration handoff projection for controller consumption that omits duplicated prompts, policy snapshots, and event history without changing the persisted full record or artifact-review authority;
-- experimental thin Codex and Claude plugin packages whose explicit Skill or pre-model hook submits through the existing orchestration CLI and returns terminal/artifact evidence without moving classification, route policy, or promotion into the controller adapter; a non-Git controller cwd may bind one explicit repository to the controller session, update that focus from one exact structured tool working directory when the session changes repositories, retain it across exit/resume under the same source/session identity, and revalidate the Git root before reuse without scanning or parsing commands, outputs, or transcripts; when the exact current text lacks conversation context but the controller can recover one concrete bounded continuation task, the hook may permit one normal reconstructed handoff before upstream repository work without classifying continuation phrases or bypassing normal policy; upgrading the packaged hook must not make an older retained resume command fail before bounded error handling, and automatic-entry failure must block the submitted prompt rather than silently repeat it in the controller model;
+- experimental thin Codex and Claude plugin packages whose prompt hook performs only bounded workspace/policy discovery and injects a non-blocking handoff obligation; the upstream controller owns semantic classification, planning, decomposition, and acceptance criteria, then the explicit or implicit Skill submits the parent task plus strict assessment through the existing orchestration CLI. Session focus remains source-neutral and resume-safe without parsing commands, outputs, or transcripts. The hook never submits the raw prompt, waits for workers, transports artifact previews, chooses routes/models, or blocks the controller turn on discovery/policy failure ([decision 0053](../postmortems/0053-controller-owned-planning-handoff.md));
 - immutable resolved route snapshots with worker, provider, and model dimensions;
-- optional process-local least-active pools over complete exact routes for leaf, planner, child, and advisory-review targets, with immutable per-Job selection evidence, explicit member traffic included in load, rotating equal-load ties, and no retry-time route switching or fallback;
+- optional process-local least-active pools over complete exact routes for leaf, child, and advisory-review targets, with immutable per-Job selection evidence, explicit member traffic included in load, rotating equal-load ties, and no retry-time route switching or fallback;
 - deterministic Mock, Pi RPC, and OpenCode JSON worker adapters;
 - OpenCode worker profiles may keep the upstream loop alive after a denied tool request so the denial reaches the next model turn; the operation remains denied and the normal completion-envelope requirement remains unchanged;
-- built-in structured planner and advisory-review prompts reserve the transport-owned completion suffix as the only permitted content outside their role JSON, avoiding contradictory output requirements without weakening either parser;
+- the built-in structured advisory-review prompt reserves the transport-owned completion suffix as the only permitted content outside its role JSON, avoiding contradictory output requirements without weakening either parser;
 - a reusable route-neutral adapter unit contract for healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and already-aborted runs; Pi and OpenCode are the two real protocol implementations while Mock remains deterministic-only evidence;
 - OpenCode Go/Luna and OpenCode Go/DeepSeek V4 Flash routes through Pi configuration;
 - file-backed or in-memory job snapshots and ordered events;
@@ -132,7 +132,7 @@ Version 0.0.1 currently implements:
 - one exact `127.0.0.1` `serve` process publishing a product-owned per-user record after listen, with `agentknot client --json` reporting `unconfigured`, `available`, or `unavailable`; later CLI and Codex/Claude hooks discover the record without shell-profile edits or repeated server flags, while stale or malformed records fail without local or model fallback;
 - controller-neutral orchestration through CLI, HTTP, and TypeScript;
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
-- strict planner assessments followed by deterministic task-kind policy;
+- strict controller-authored assessments followed by deterministic task-kind policy;
 - immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
 - bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with six active slots backed by current six-child Pi/OpenCode Go/Luna/max orchestration evidence, and a configuration ceiling of six for each with concurrency never exceeding the child count;
 - fail-without-resume startup reconciliation for stale jobs and orchestration records;
@@ -148,7 +148,7 @@ The current file stores provide persistent audit snapshots. After acquiring excl
 
 Provider and model independence are currently routing properties implemented by the selected worker. AgentKnot does not yet expose an independent provider-runtime interface.
 
-A native OpenCode JSON adapter provides the second promoted real worker-runtime implementation needed to demonstrate that Pi is replaceable. It uses an independent credential path and keeps provider/model/effort as route data. Planner, routine, advanced, and review roles may include Pi, native OpenCode, or future complete routes through configuration; no runtime is the core reference/planner requirement. OpenCode's first-use `.git/opencode` project-ID metadata write remains explicit and outside working-tree/artifact cleanliness claims ([decisions 0041](../postmortems/0041-native-opencode-worker-portability.md), [0042](../postmortems/0042-complete-route-pool-balancing.md), [0043](../postmortems/0043-native-opencode-lifecycle-soak.md), and [0047](../postmortems/0047-resumable-controller-binding-and-replaceable-role-pools.md)).
+A native OpenCode JSON adapter provides the second promoted real worker-runtime implementation needed to demonstrate that Pi is replaceable. It uses an independent credential path and keeps provider/model/effort as route data. Routine, advanced, and review roles may include Pi, native OpenCode, or future complete routes through configuration; no runtime is a privileged core requirement. OpenCode's first-use `.git/opencode` project-ID metadata write remains explicit and outside working-tree/artifact cleanliness claims ([decisions 0041](../postmortems/0041-native-opencode-worker-portability.md), [0042](../postmortems/0042-complete-route-pool-balancing.md), [0043](../postmortems/0043-native-opencode-lifecycle-soak.md), and [0047](../postmortems/0047-resumable-controller-binding-and-replaceable-role-pools.md)).
 
 Pi extensions are optional worker-profile inputs, not portable core dependencies. A community package can enter the repository dogfood route only after source/supply-chain review and repeated same-task comparison against the minimal Pi route show no regression in terminal completion, artifact validity, or tests and a measurable improvement in upstream intervention, token use, or elapsed work. Trials must use an exact version or immutable external path without global or repository-local installation, and must preserve the selected provider, model, and thinking level. AgentKnot never silently selects an extension or model fallback.
 
@@ -173,9 +173,9 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 
 ## Reference workflow
 
-1. The controller and user agree on a bounded task and acceptance criteria.
-2. The controller chooses the leaf Job API for an already bounded task or the orchestration API for policy-driven delegation. An explicit controller Skill may make that call directly. In an explicitly configured `auto` workspace, the installed pre-model hook may instead forward the submitted prompt to the same orchestration API before the controller model runs. It uses the event cwd's Git root, or one unambiguous explicit existing absolute or `~/...` prompt path plus a controller-session binding for later continuation prompts; it performs structural gating and bounded I/O only, while AgentKnot owns semantic classification and dispatch. If that automatic entry fails, the hook returns a blocking reason and the submitted prompt does not proceed to the controller model; intentional upstream retention remains non-blocking. Because the planner sees only the current text, a retained context-dependent continuation may instruct the controller to recover one concrete self-contained task from its existing context and submit that task once through the same normal boundary before doing repository work; the hook itself never reads the conversation, and normal policy may still retain the recovered task upstream. A native `/goal` is not a separate AgentKnot protocol.
-3. For orchestration, AgentKnot snapshots the effective policy, asks the configured planner route for a strict read-only assessment, validates it, deterministically filters and caps it, optionally evaluates configured shadow or active rules using subtask kind and parent assessment complexity, and persists the plan before any child dispatch; the planner cannot name routes.
+1. The controller and user agree on a bounded task and acceptance criteria; the controller owns intent, planning, decomposition, and product decisions.
+2. The controller chooses the leaf Job API for an already bounded leaf or authors a strict `TaskAssessment` for the orchestration API. In an explicitly configured `auto` workspace, the installed prompt hook only resolves workspace/policy and injects a non-blocking obligation to perform this handoff before eligible repository execution. It never forwards the raw prompt or runs orchestration. A native `/goal` is not a separate AgentKnot protocol.
+3. For orchestration, AgentKnot validates the assessment, snapshots effective policy, deterministically filters and caps subtasks, optionally evaluates configured shadow or active rules using subtask kind and parent complexity, persists one accepted-handoff event and the plan, and only then dispatches children. The assessment cannot name routes, workers, providers, models, or effort.
 4. An upstream or suggested decision returns without starting child jobs. An automatic decision submits each selected subtask through the ordinary Job API with depth-one provenance and bounded concurrency. One bounded substantive task may be one non-parallel child; a lack of useful parallel splitting does not by itself retain the task upstream. A bounded allowlisted task expected to create or modify a repository file is delegation-first even when small or low-complexity. A concrete allowlisted `repository-analysis` that must search, compare, or interpret project content and return independently verifiable findings is likewise delegation-first when read-only; only a direct lookup of one explicit fact from one already identified location may stay upstream on cost grounds. Shadow keeps `dispatch.defaultRoute`; active uses the matched configured route or the conservative default, and both carry selection evidence, task kind, and parent complexity in structured child metadata ([decisions 0035](../postmortems/0035-delegation-first-small-repository-deliverables.md) and [0051](../postmortems/0051-evidence-producing-repository-analysis.md)).
 5. For a leaf job, the controller submits a `JobRequest` with a workspace, route, source identity, and optional callback.
 6. AgentKnot validates the request and snapshots the route, then atomically creates the queued job record with `job.queued`; failure starts no worker.
@@ -252,7 +252,7 @@ These are evidence requirements, not claims that the current MVP has already met
 - A custom adapter may ignore cooperative cancellation unless the adapter contract and process supervision enforce termination.
 - Hard `SIGKILL`, host loss, or another uncatchable failure bypasses shutdown handlers; restart reconciliation repairs persisted nonterminal state but cannot universally prove ownership of leftover processes or worktrees.
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete bounded job record when its serialized body is no more than 8 MiB.
-- A planner is a model and can produce malformed or adversarial assessments; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk. Shadow suggestions and active configured routing both inherit the limits of the parent complexity and task-kind classification; active mode therefore keeps a conservative Luna default and never adds fallback.
+- A controller may be model-driven and can author a mistaken or repository-influenced assessment; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk. Shadow suggestions and active configured routing both inherit the limits of the parent complexity and task-kind classification; active mode therefore keeps a conservative Luna default and never adds fallback.
 - Shadow route evidence is not a measured model ranking; separate scorecards must compare routes on the same bounded workloads before any automatic selection is proposed.
 - Process-local task concurrency and file-runtime advisory ownership are not a distributed scheduler, lease, or hostile-writer security boundary.
 - A conforming second execution owner is refused before whole-snapshot mutation, including across PID namespaces that share the locked filesystem. A custom process can ignore advisory locks or mutate files directly; compare-and-set storage and distributed coordination remain absent ([decision 0022](../postmortems/0022-file-runtime-single-writer-ownership.md)).

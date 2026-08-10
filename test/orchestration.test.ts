@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { mkdtemp, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +16,7 @@ import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
 import type {
   DelegationPlan,
   OrchestrationRecord,
+  OrchestrationRequest,
   OrchestrationStore,
   PlannedSubtask,
   TaskAssessment,
@@ -24,6 +24,7 @@ import type {
 import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { MemoryJobStore } from '../src/store.js';
 import type {
+  JobRecord,
   ResolvedRoute,
   WorkerAdapter,
   WorkerEventSink,
@@ -85,8 +86,7 @@ class PlannerAndWorkerAdapter implements WorkerAdapter {
   constructor(
     readonly assessment: TaskAssessment,
     readonly workerDelayMs = 5,
-    readonly plannerOutput?: string,
-    readonly plannerDelayMs = 0
+    ..._unused: unknown[]
   ) {}
 
   async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
@@ -98,10 +98,6 @@ class PlannerAndWorkerAdapter implements WorkerAdapter {
     this.activeRuns += 1;
     this.peakRuns = Math.max(this.peakRuns, this.activeRuns);
     try {
-      if (input.route.name.startsWith('planner')) {
-        await abortableDelay(this.plannerDelayMs, input.signal);
-        return { output: this.plannerOutput ?? JSON.stringify(this.assessment) };
-      }
       if (input.route.name.startsWith('reviewer')) {
         this.reviewerRuns += 1;
         return {
@@ -149,7 +145,6 @@ class ArtifactWritingAdapter implements WorkerAdapter {
 
   async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
     await emit('worker.started', { route: input.route.name });
-    if (input.route.name.startsWith('planner')) return { output: JSON.stringify(this.assessment) };
     if (input.route.name.startsWith('reviewer')) {
       this.reviewerRuns += 1;
       return { output: this.reviewerOutput };
@@ -180,7 +175,6 @@ class BlockingReviewerAdapter implements WorkerAdapter {
 
   async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
     await emit('worker.started', { route: input.route.name });
-    if (input.route.name === 'planner') return { output: JSON.stringify(this.assessment) };
     if (input.route.name === 'worker') {
       await writeFile(path.join(input.workspace, 'reviewed.ts'), 'export const reviewed = true;\n');
       return { output: 'implemented reviewed.ts' };
@@ -214,7 +208,6 @@ class CoordinatedReviewerAdapter implements WorkerAdapter {
 
   async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
     await emit('worker.started', { route: input.route.name });
-    if (input.route.name === 'planner') return { output: JSON.stringify(this.assessment) };
     if (input.route.name === 'worker') {
       await writeFile(path.join(input.workspace, 'reviewed.ts'), 'export const reviewed = true;\n');
       return { output: 'implemented reviewed.ts' };
@@ -241,13 +234,13 @@ class CoordinatedReviewerAdapter implements WorkerAdapter {
   }
 }
 
-class BlockingPlannerAdapter implements WorkerAdapter {
+class BlockingWorkerAdapter implements WorkerAdapter {
   readonly name = 'test';
   activeRuns = 0;
   workerRuns = 0;
-  #plannerStartedResolve: (() => void) | undefined;
-  readonly plannerStarted = new Promise<void>((resolve) => {
-    this.#plannerStartedResolve = resolve;
+  #workerStartedResolve: (() => void) | undefined;
+  readonly workerStarted = new Promise<void>((resolve) => {
+    this.#workerStartedResolve = resolve;
   });
 
   async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
@@ -258,23 +251,17 @@ class BlockingPlannerAdapter implements WorkerAdapter {
     this.activeRuns += 1;
     try {
       await emit('worker.started', { route: input.route.name });
-      if (input.route.name === 'planner') {
-        this.#plannerStartedResolve?.();
-        await new Promise<void>((_resolve, reject) => {
-          const onAbort = () => {
-            cleanup();
-            reject(input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted'));
-          };
-          const cleanup = () => {
-            input.signal.removeEventListener('abort', onAbort);
-          };
-          if (input.signal.aborted) onAbort();
-          else input.signal.addEventListener('abort', onAbort, { once: true });
-        });
-        return { output: JSON.stringify(assessment) };
-      }
       this.workerRuns += 1;
-      return { output: `completed ${input.route.name}: ${input.prompt}` };
+      this.#workerStartedResolve?.();
+      await new Promise<void>((_resolve, reject) => {
+        const onAbort = () => {
+          input.signal.removeEventListener('abort', onAbort);
+          reject(input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted'));
+        };
+        if (input.signal.aborted) onAbort();
+        else input.signal.addEventListener('abort', onAbort, { once: true });
+      });
+      return { output: `unreachable ${input.route.name}: ${input.prompt}` };
     } finally {
       this.activeRuns -= 1;
     }
@@ -291,8 +278,6 @@ class RetryingChildAdapter implements WorkerAdapter {
 
   async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
     await emit('worker.started', { route: input.route.name });
-    if (input.route.name === 'planner') return { output: JSON.stringify(assessment) };
-
     this.attempts.push({ prompt: input.prompt, attempt: input.attempt });
     if (input.prompt.includes('Review the tests') && input.attempt === 1) {
       throw new Error('transient child failure');
@@ -356,6 +341,26 @@ class SwitchableOrchestrationStore implements OrchestrationStore {
   }
 }
 
+class ParentAwareJobStore extends MemoryJobStore {
+  constructor(readonly parentStore: OrchestrationStore) {
+    super();
+  }
+
+  override async create(record: JobRecord): Promise<void> {
+    const metadata = record.request.metadata?.agentknotDelegation as Record<string, unknown> | undefined;
+    if (metadata?.role === 'worker') {
+      const parent = await this.parentStore.get(String(metadata.orchestrationId));
+      assert.ok(parent?.plan, 'the deterministic handoff plan must be persisted before child admission');
+      assert.equal(
+        parent.events.some((event) => event.type === 'orchestration.handoff.accepted'),
+        true,
+        'the handoff event must be persisted before child admission'
+      );
+    }
+    await super.create(record);
+  }
+}
+
 class ChildPersistenceFailureAdapter implements WorkerAdapter {
   readonly name = 'test';
 
@@ -365,7 +370,6 @@ class ChildPersistenceFailureAdapter implements WorkerAdapter {
 
   async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
     await emit('worker.started', { route: input.route.name });
-    if (input.route.name === 'planner') return { output: JSON.stringify(assessment) };
     throw new JobPersistenceError('terminal', 'job.succeeded', new Error('child snapshot full'));
   }
 }
@@ -423,14 +427,6 @@ function testConfig(maxConcurrency = 1, workerMaxAttempts = 1, maxChildren = 2):
     },
     workers: { test: { adapter: 'mock' } },
     routes: {
-      planner: { worker: 'test', provider: 'test', model: 'planner', maxAttempts: 1, timeoutMs: 30_000 },
-      'planner-alternate': {
-        worker: 'test',
-        provider: 'test',
-        model: 'planner-alternate',
-        maxAttempts: 1,
-        timeoutMs: 30_000,
-      },
       worker: {
         worker: 'test',
         provider: 'test',
@@ -462,13 +458,11 @@ function testConfig(maxConcurrency = 1, workerMaxAttempts = 1, maxChildren = 2):
     },
     delegation: {
       mode: 'auto',
-      planner: { strategy: 'hybrid', route: 'planner' },
       dispatch: { defaultRoute: 'worker', maxChildren, maxDepth: 1, maxConcurrency },
       policy: {
         delegate: ['test-gap-analysis', 'documentation'],
         keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
       },
-      fallback: 'upstream',
     },
   };
 }
@@ -518,13 +512,15 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
   const record = await orchestrations.run({
     prompt: 'Review the tests and update the documentation.',
     workspace,
+    assessment,
     source: 'claude',
   });
 
   assert.equal(record.status, 'succeeded');
   assert.equal(record.plan?.decision, 'split');
   assert.equal(record.plan?.willDispatch, true);
-  assert.equal(record.plannerJobId?.startsWith('job_'), true);
+  assert.deepEqual(record.request.assessment, assessment);
+  assert.notEqual(record.request.assessment, assessment);
   assert.equal(record.children.length, 2);
   assert.equal(record.children.every((child) => child.status === 'succeeded'), true);
   assert.equal(record.children.every((child) => child.planHash === record.plan?.planHash), true);
@@ -539,7 +535,7 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
   assert.equal(adapter.workerRuns, 2);
   assert.equal(adapter.peakWorkers, 1);
   assert.ok(
-    record.events.findIndex((event) => event.type === 'orchestration.planned') <
+    record.events.findIndex((event) => event.type === 'orchestration.handoff.accepted') <
       record.events.findIndex((event) => event.type === 'orchestration.child.started')
   );
   assert.deepEqual(
@@ -547,11 +543,21 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
     Array.from({ length: record.events.length }, (_, index) => index + 1)
   );
   assert.deepEqual(await orchestrationStore.get(record.id), record);
+  assert.equal(
+    record.events.some(
+      (event) => String(event.type).includes('orchestration.planner') || String(event.type) === 'orchestration.planning'
+    ),
+    false
+  );
   const jobs = await jobStore.list();
-  assert.equal(jobs.length, 3);
-  for (const child of jobs.filter(
-    (job) => job.request.metadata?.agentknotDelegation && job.id !== record.plannerJobId
-  )) {
+  assert.equal(jobs.length, 2);
+  assert.equal(
+    jobs.every(
+      (job) => (job.request.metadata?.agentknotDelegation as Record<string, unknown> | undefined)?.role === 'worker'
+    ),
+    true
+  );
+  for (const child of jobs) {
     const provenance = child.request.metadata?.agentknotDelegation as Record<string, unknown>;
     assert.equal(provenance.planHash, record.plan?.planHash);
     assert.equal(provenance.policyVersion, 1);
@@ -581,6 +587,7 @@ test('OrchestrationService dispatches parallel children through a complete-route
   const record = await orchestrations.run({
     prompt: 'Review tests and update docs through the configured pool.',
     workspace,
+    assessment,
     source: 'codex',
   });
   assert.equal(record.status, 'succeeded');
@@ -599,7 +606,7 @@ test('OrchestrationService dispatches parallel children through a complete-route
   );
 });
 
-test('OrchestrationService resolves planner and reviewer pools to replaceable exact routes', async () => {
+test('OrchestrationService resolves reviewer pools to replaceable exact routes', async () => {
   const workspace = await createGitWorkspace('agentknot-orchestration-role-pools-');
   const adapter = new ArtifactWritingAdapter(
     singleQualityReviewAssessment('Produce reviewed file.'),
@@ -607,10 +614,8 @@ test('OrchestrationService resolves planner and reviewer pools to replaceable ex
   );
   const config = testConfig(2, 1, 1);
   config.routePools = {
-    planners: { strategy: 'least-active', routes: ['planner', 'planner-alternate'] },
     reviewers: { strategy: 'least-active', routes: ['reviewer', 'reviewer-alternate'] },
   };
-  config.delegation!.planner.route = 'planners';
   config.delegation!.qualityReview = { route: 'reviewers', complexities: ['low'] };
   const jobStore = new MemoryJobStore();
   const jobs = new Orchestrator({
@@ -627,13 +632,11 @@ test('OrchestrationService resolves planner and reviewer pools to replaceable ex
   const record = await orchestrations.run({
     prompt: 'Produce and review one bounded file through replaceable role pools.',
     workspace,
+    assessment: adapter.assessment,
   });
 
   assert.equal(record.status, 'succeeded');
-  const planner = await jobs.get(record.plannerJobId!);
-  assert.equal(planner?.request.route, 'planners');
-  assert.equal(planner?.routePoolSelection?.pool, 'planners');
-  assert.equal(planner?.routePoolSelection?.selectedRoute, planner?.route.name);
+  assert.equal(record.children.length, 1);
   if (record.qualityReview?.status !== 'completed') assert.fail('quality review should complete');
   assert.equal(record.qualityReview.route, 'reviewers');
   const reviewer = await jobs.get(record.qualityReview.reviewerJobId);
@@ -661,6 +664,7 @@ test('OrchestrationService runs one advisory reviewer after one valid low-comple
   const record = await orchestrations.run({
     prompt: 'Add the bounded reviewed file and verify it.',
     workspace,
+    assessment: lowAssessment,
     source: 'controller-test',
   });
 
@@ -686,7 +690,7 @@ test('OrchestrationService runs one advisory reviewer after one valid low-comple
     true
   );
   const jobs = await jobStore.list();
-  assert.equal(jobs.length, 3);
+  assert.equal(jobs.length, 2);
   const reviewer = jobs.find((job) => job.id === reviewerJobId);
   assert.ok(reviewer);
   assert.equal(reviewer.request.route, 'reviewer');
@@ -734,6 +738,7 @@ test('OrchestrationService runs controller-owned artifact validation concurrentl
   const record = await orchestrations.run({
     prompt: 'Write, validate, and independently review the target.',
     workspace,
+    assessment: adapter.assessment,
   });
 
   assert.equal(record.status, 'succeeded');
@@ -777,7 +782,7 @@ test('OrchestrationService keeps a failed validation command as advisory evidenc
     maxOutputBytes: 1_024,
   });
 
-  const record = await orchestrations.run({ prompt: 'Produce a failing validation target.', workspace });
+  const record = await orchestrations.run({ prompt: 'Produce a failing validation target.', workspace, assessment: adapter.assessment });
 
   assert.equal(record.status, 'succeeded');
   assert.equal(record.artifactValidation?.status, 'completed');
@@ -809,6 +814,7 @@ test('OrchestrationService cancellation awaits artifact validation cleanup', asy
   const started = await orchestrations.start({
     prompt: 'Produce and validate a cancellable target.',
     workspace,
+    assessment: adapter.assessment,
   });
   let commandStarted = false;
   for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -851,7 +857,7 @@ test('OrchestrationService keeps malformed reviewer output advisory and does not
   );
   const { jobStore, orchestrations } = createServices(adapter, 2, 1, 1, undefined, true);
 
-  const record = await orchestrations.run({ prompt: 'Produce one reviewed target.', workspace });
+  const record = await orchestrations.run({ prompt: 'Produce one reviewed target.', workspace, assessment: lowAssessment });
 
   assert.equal(record.status, 'succeeded');
   assert.equal(record.result?.action, 'delegated');
@@ -887,7 +893,7 @@ test('OrchestrationService preserves success when the advisory reviewer requests
   );
   const { orchestrations } = createServices(adapter, 2, 1, 1, undefined, true);
 
-  const record = await orchestrations.run({ prompt: 'Produce a target for advisory review.', workspace });
+  const record = await orchestrations.run({ prompt: 'Produce a target for advisory review.', workspace, assessment: lowAssessment });
 
   assert.equal(record.status, 'succeeded');
   assert.equal(record.result?.action, 'delegated');
@@ -903,7 +909,7 @@ test('OrchestrationService explicitly skips configured review for an empty patch
   const adapter = new PlannerAndWorkerAdapter(singleQualityReviewAssessment('Inspect without editing.'));
   const { orchestrations } = createServices(adapter, 2, 1, 1, undefined, true);
 
-  const record = await orchestrations.run({ prompt: 'Produce an empty artifact.', workspace });
+  const record = await orchestrations.run({ prompt: 'Produce an empty artifact.', workspace, assessment: adapter.assessment });
 
   assert.deepEqual(record.qualityReview, {
     status: 'skipped',
@@ -929,7 +935,7 @@ test('OrchestrationService explicitly skips configured review for multiple child
   );
   const { orchestrations } = createServices(adapter, 2, 1, 2, undefined, true);
 
-  const record = await orchestrations.run({ prompt: 'Produce two independent artifacts.', workspace });
+  const record = await orchestrations.run({ prompt: 'Produce two independent artifacts.', workspace, assessment: lowMultiple });
 
   assert.equal(record.status, 'succeeded');
   assert.deepEqual(record.qualityReview, {
@@ -946,7 +952,7 @@ test('OrchestrationService cancels and awaits a running advisory reviewer', asyn
   const lowAssessment = singleQualityReviewAssessment('Write reviewed.ts.');
   const adapter = new BlockingReviewerAdapter(lowAssessment);
   const { jobStore, orchestrations } = createServices(adapter, 2, 1, 1, undefined, true);
-  const started = await orchestrations.start({ prompt: 'Write and review the target.', workspace });
+  const started = await orchestrations.start({ prompt: 'Write and review the target.', workspace, assessment: lowAssessment });
   await adapter.reviewerStarted;
 
   await started.cancel();
@@ -1002,7 +1008,7 @@ test('OrchestrationService flags deterministic child artifact path overlaps', as
   );
   const { orchestrations, orchestrationStore } = createServices(adapter, 3, 1, 3);
 
-  const record = await orchestrations.run({ prompt: 'Produce three isolated artifacts.', workspace });
+  const record = await orchestrations.run({ prompt: 'Produce three isolated artifacts.', workspace, assessment: overlapAssessment });
   const subtaskIds = record.plan?.subtasks.map((subtask) => subtask.id);
   assert.ok(subtaskIds);
   assert.deepEqual(record.result?.artifactReview, {
@@ -1037,7 +1043,7 @@ test('OrchestrationService marks missing terminal child evidence as incomplete',
     return job;
   };
 
-  const record = await orchestrations.run({ prompt: 'Review incomplete evidence.', workspace });
+  const record = await orchestrations.run({ prompt: 'Review incomplete evidence.', workspace, assessment });
   const unavailableChild = record.children.find((child) => {
     const subtask = record.plan?.subtasks.find((candidate) => candidate.id === child.subtaskId);
     return subtask?.prompt.includes('Update documentation');
@@ -1062,8 +1068,8 @@ test('OrchestrationService keeps shadow suggestions out of child route authority
   const routeSelection: RouteSelectionConfig = {
     mode: 'shadow',
     rules: [
-      { route: 'planner', taskKinds: ['test-gap-analysis'] },
-      { route: 'planner', complexities: ['medium'] },
+      { route: 'alternate', taskKinds: ['test-gap-analysis'] },
+      { route: 'alternate', complexities: ['medium'] },
       { route: 'worker' },
     ],
   };
@@ -1072,6 +1078,7 @@ test('OrchestrationService keeps shadow suggestions out of child route authority
   const record = await orchestrations.run({
     prompt: 'Review the tests and update the documentation.',
     workspace,
+    assessment,
   });
 
   assert.equal(record.status, 'succeeded');
@@ -1080,8 +1087,8 @@ test('OrchestrationService keeps shadow suggestions out of child route authority
   assert.deepEqual(
     record.plan?.subtasks.map((subtask) => subtask.routeSelection),
     [
-      { mode: 'shadow', suggestedRoute: 'planner', basis: 'rule', ruleIndex: 0 },
-      { mode: 'shadow', suggestedRoute: 'planner', basis: 'rule', ruleIndex: 1 },
+      { mode: 'shadow', suggestedRoute: 'alternate', basis: 'rule', ruleIndex: 0 },
+      { mode: 'shadow', suggestedRoute: 'alternate', basis: 'rule', ruleIndex: 1 },
     ]
   );
   assert.deepEqual(
@@ -1127,6 +1134,7 @@ test('OrchestrationService dispatches the exact human-configured active route', 
   const record = await orchestrations.run({
     prompt: 'Run the configured medium-complexity route.',
     workspace,
+    assessment,
   });
 
   assert.equal(record.status, 'succeeded');
@@ -1169,8 +1177,8 @@ test('OrchestrationService suggest mode persists a plan without dispatching work
   const routeSelection: RouteSelectionConfig = {
     mode: 'shadow',
     rules: [
-      { route: 'planner', taskKinds: ['test-gap-analysis'] },
-      { route: 'planner', complexities: ['medium'] },
+      { route: 'alternate', taskKinds: ['test-gap-analysis'] },
+      { route: 'alternate', complexities: ['medium'] },
       { route: 'worker' },
     ],
   };
@@ -1179,6 +1187,7 @@ test('OrchestrationService suggest mode persists a plan without dispatching work
   const record = await orchestrations.run({
     prompt: 'Suggest a delegation plan.',
     workspace,
+    assessment,
     delegation: 'suggest',
   });
 
@@ -1188,35 +1197,33 @@ test('OrchestrationService suggest mode persists a plan without dispatching work
   assert.deepEqual(
     record.plan?.subtasks.map((subtask) => subtask.routeSelection),
     [
-      { mode: 'shadow', suggestedRoute: 'planner', basis: 'rule', ruleIndex: 0 },
-      { mode: 'shadow', suggestedRoute: 'planner', basis: 'rule', ruleIndex: 1 },
+      { mode: 'shadow', suggestedRoute: 'alternate', basis: 'rule', ruleIndex: 0 },
+      { mode: 'shadow', suggestedRoute: 'alternate', basis: 'rule', ruleIndex: 1 },
     ]
   );
   assert.equal(record.result?.action, 'suggested');
   assert.deepEqual(record.children, []);
   assert.equal(adapter.workerRuns, 0);
-  assert.equal((await jobStore.list()).length, 1);
+  assert.equal((await jobStore.list()).length, 0);
 });
 
-test('OrchestrationService uses explicit upstream fallback for malformed planner output', async () => {
-  const workspace = await createGitWorkspace('agentknot-fallback-');
-  const adapter = new PlannerAndWorkerAdapter(assessment, 5, 'not json');
-  const { orchestrations } = createServices(adapter);
+test('OrchestrationService rejects a missing controller assessment before record admission', async () => {
+  const workspace = await createGitWorkspace('agentknot-missing-assessment-');
+  const adapter = new PlannerAndWorkerAdapter(assessment);
+  const { jobStore, orchestrations, orchestrationStore } = createServices(adapter);
 
-  const record = await orchestrations.run({ prompt: 'Ambiguous task.', workspace });
-
-  assert.equal(record.status, 'succeeded');
-  assert.equal(record.plan?.decision, 'upstream');
-  assert.equal(record.plan?.willDispatch, false);
-  assert.match(record.plan?.plannerError?.message ?? '', /valid JSON object/);
-  const { planHash, ...unhashedPlan } = record.plan!;
-  assert.equal(planHash, createHash('sha256').update(JSON.stringify(unhashedPlan)).digest('hex'));
-  assert.equal(record.result?.action, 'upstream');
-  assert.deepEqual(record.children, []);
+  await assert.rejects(
+    orchestrations.start({ prompt: 'Assessment is required.', workspace } as OrchestrationRequest),
+    /Orchestration controller assessment is required/
+  );
+  assert.equal((await jobStore.list()).length, 0);
+  assert.equal((await orchestrationStore.list()).length, 0);
 });
 
-test('OrchestrationService rejects a nested missing acceptanceCriteria without dispatching children', async () => {
-  const workspace = await createGitWorkspace('agentknot-fallback-missing-criteria-');
+test('OrchestrationService rejects a malformed controller assessment before record admission', async () => {
+  const workspace = await createGitWorkspace('agentknot-malformed-assessment-');
+  const adapter = new PlannerAndWorkerAdapter(assessment);
+  const { jobStore, orchestrations, orchestrationStore } = createServices(adapter);
   const malformedAssessment = {
     ...assessment,
     subtasks: assessment.subtasks.map((subtask, index) => {
@@ -1225,20 +1232,17 @@ test('OrchestrationService rejects a nested missing acceptanceCriteria without d
       return rest;
     }),
   };
-  const adapter = new PlannerAndWorkerAdapter(assessment, 5, JSON.stringify(malformedAssessment));
-  const { jobStore, orchestrations } = createServices(adapter);
 
-  const record = await orchestrations.run({ prompt: 'Reject incomplete structured planner output.', workspace });
-
-  assert.equal(record.status, 'succeeded');
-  assert.equal(record.plan?.decision, 'upstream');
-  assert.equal(record.plan?.willDispatch, false);
-  assert.match(record.plan?.plannerError?.message ?? '', /subtasks\[1\]/);
-  assert.match(record.plan?.plannerError?.message ?? '', /missing: acceptanceCriteria/);
-  assert.equal(record.result?.action, 'upstream');
-  assert.deepEqual(record.children, []);
-  assert.equal(adapter.workerRuns, 0);
-  assert.equal((await jobStore.list()).length, 1);
+  await assert.rejects(
+    orchestrations.start({
+      prompt: 'Reject incomplete controller handoff.',
+      workspace,
+      assessment: malformedAssessment as unknown as TaskAssessment,
+    }),
+    /Controller assessment subtasks\[1\].*missing: acceptanceCriteria/
+  );
+  assert.equal((await jobStore.list()).length, 0);
+  assert.equal((await orchestrationStore.list()).length, 0);
 });
 
 test('OrchestrationService cancellation stops active child jobs and does not launch more work', async () => {
@@ -1246,7 +1250,7 @@ test('OrchestrationService cancellation stops active child jobs and does not lau
   const adapter = new PlannerAndWorkerAdapter(assessment, 1_000);
   const { orchestrations } = createServices(adapter);
 
-  const started = await orchestrations.start({ prompt: 'Run delegated work.', workspace });
+  const started = await orchestrations.start({ prompt: 'Run delegated work.', workspace, assessment });
   while (adapter.workerRuns === 0) await new Promise((resolve) => setTimeout(resolve, 5));
   await started.cancel();
   const record = await started.completion;
@@ -1259,23 +1263,23 @@ test('OrchestrationService cancellation stops active child jobs and does not lau
   assert.equal(record.events.at(-1)?.type, 'orchestration.cancelled');
 });
 
-test('OrchestrationService cancellation removes a planner blocked on the shared dispatch semaphore', async () => {
+test('OrchestrationService cancellation removes a child blocked on the shared dispatch semaphore', async () => {
   const workspace = await createGitWorkspace('agentknot-orchestration-blocked-cancel-');
-  const adapter = new BlockingPlannerAdapter();
+  const adapter = new BlockingWorkerAdapter();
   const { jobStore, orchestrations, orchestrationStore } = createServices(adapter, 1);
 
-  const first = await orchestrations.start({ prompt: 'Hold the planner slot.', workspace });
-  await adapter.plannerStarted;
+  const first = await orchestrations.start({ prompt: 'Hold the worker slot.', workspace, assessment });
+  await adapter.workerStarted;
 
-  const second = await orchestrations.start({ prompt: 'Wait for the planner slot.', workspace });
+  const second = await orchestrations.start({ prompt: 'Wait for the worker slot.', workspace, assessment });
   await waitFor(
     async () => {
       const record = await orchestrationStore.get(second.orchestration.id);
-      return record?.events.some((event) => event.type === 'orchestration.planning') === true;
+      return record?.events.some((event) => event.type === 'orchestration.handoff.accepted') === true;
     },
-    'the second orchestration to reach planning'
+    'the second orchestration to accept the handoff'
   );
-  assert.equal((await jobStore.list()).length, 1, 'the blocked planner must not be admitted');
+  assert.equal((await jobStore.list()).length, 1, 'the blocked child must not be admitted');
 
   await second.cancel();
   const cancelled = await second.completion;
@@ -1283,7 +1287,7 @@ test('OrchestrationService cancellation removes a planner blocked on the shared 
   assert.equal(cancelled.children.length, 0);
   assert.equal(cancelled.events.at(-1)?.type, 'orchestration.cancelled');
   assert.equal((await jobStore.list()).length, 1, 'cancelling a semaphore waiter must not start a job');
-  assert.equal(adapter.activeRuns, 1, 'the first planner remains the only active execution');
+  assert.equal(adapter.activeRuns, 1, 'the first child remains the only active execution');
 
   await first.cancel();
   const firstCancelled = await first.completion;
@@ -1299,6 +1303,7 @@ test('OrchestrationService aggregates failed children while preserving child ret
   const record = await orchestrations.run({
     prompt: 'Retry delegated work and report failures.',
     workspace,
+    assessment,
   });
 
   assert.equal(record.status, 'failed');
@@ -1356,8 +1361,8 @@ test('OrchestrationService enforces its concurrency cap across parent orchestrat
   const { orchestrations } = createServices(adapter);
 
   const [first, second] = await Promise.all([
-    orchestrations.run({ prompt: 'Review tests for request one.', workspace }),
-    orchestrations.run({ prompt: 'Review tests for request two.', workspace }),
+    orchestrations.run({ prompt: 'Review tests for request one.', workspace, assessment: oneChildAssessment }),
+    orchestrations.run({ prompt: 'Review tests for request two.', workspace, assessment: oneChildAssessment }),
   ]);
 
   assert.equal(first.status, 'succeeded');
@@ -1375,6 +1380,7 @@ test('OrchestrationService runs independent child jobs concurrently when the cap
   const record = await orchestrations.run({
     prompt: 'Review test gaps and documentation in parallel.',
     workspace,
+    assessment,
   });
 
   assert.equal(record.status, 'succeeded');
@@ -1402,6 +1408,7 @@ test('OrchestrationService refills bounded worker slots from a larger task pool'
   const record = await orchestrations.run({
     prompt: 'Run six independent scoped tasks through four worker slots.',
     workspace,
+    assessment: pooledAssessment,
   });
 
   assert.equal(record.status, 'succeeded');
@@ -1434,6 +1441,7 @@ test('OrchestrationService serializes children when the assessment marks them no
   const record = await orchestrations.run({
     prompt: 'Perform two ordered review tasks.',
     workspace,
+    assessment: { ...assessment, parallelizable: false },
   });
 
   assert.equal(record.status, 'succeeded');
@@ -1466,9 +1474,9 @@ test('OrchestrationService requires isolated jobs for automatic modes', () => {
   );
 });
 
-test('OrchestrationService cancels an admitted planner when parent persistence fails', async () => {
-  const workspace = await createGitWorkspace('agentknot-orchestration-planner-save-failure-');
-  const adapter = new PlannerAndWorkerAdapter(assessment, 5, undefined, 1_000);
+test('OrchestrationService admits no child when handoff persistence fails', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-handoff-save-failure-');
+  const adapter = new PlannerAndWorkerAdapter(assessment);
   const config = testConfig(1);
   const jobs = new Orchestrator({
     config,
@@ -1478,12 +1486,12 @@ test('OrchestrationService cancels an admitted planner when parent persistence f
   const store = new FailingOrchestrationStore(2);
   const orchestrations = new OrchestrationService({ config: config.delegation!, jobs, store });
 
-  const record = await orchestrations.run({ prompt: 'Review persistence.', workspace });
-  const planner = (await jobs.list())[0];
+  const record = await orchestrations.run({ prompt: 'Review persistence.', workspace, assessment });
+  const jobsAfterFailure = await jobs.list();
 
   assert.equal(record.status, 'failed');
   assert.match(record.error?.message ?? '', /injected orchestration save failure/);
-  assert.equal(planner?.status, 'cancelled');
+  assert.equal(jobsAfterFailure.length, 0);
   assert.equal(adapter.activeRuns, 0);
   assert.equal(store.created?.events[0]?.type, 'orchestration.queued');
   assert.equal(store.created?.events[0]?.sequence, 1);
@@ -1498,10 +1506,10 @@ test('OrchestrationService cancels an admitted child when parent persistence fai
     store: new MemoryJobStore(),
     adapters: new Map([[adapter.name, adapter]]),
   });
-  const store = new FailingOrchestrationStore(6);
+  const store = new FailingOrchestrationStore(3);
   const orchestrations = new OrchestrationService({ config: config.delegation!, jobs, store });
 
-  const record = await orchestrations.run({ prompt: 'Review persistence.', workspace });
+  const record = await orchestrations.run({ prompt: 'Review persistence.', workspace, assessment });
   const childJob = (await jobs.list()).find(
     (job) => (job.request.metadata?.agentknotDelegation as Record<string, unknown>)?.role === 'worker'
   );
@@ -1516,7 +1524,7 @@ test('OrchestrationService cancels an admitted child when parent persistence fai
 
 test('OrchestrationService aborts active work even when cancellation evidence cannot be saved', async () => {
   const workspace = await createGitWorkspace('agentknot-orchestration-cancel-save-failure-');
-  const adapter = new BlockingPlannerAdapter();
+  const adapter = new BlockingWorkerAdapter();
   const config = testConfig(1);
   const jobs = new Orchestrator({
     config,
@@ -1525,8 +1533,8 @@ test('OrchestrationService aborts active work even when cancellation evidence ca
   });
   const store = new SwitchableOrchestrationStore();
   const orchestrations = new OrchestrationService({ config: config.delegation!, jobs, store });
-  const started = await orchestrations.start({ prompt: 'Cancel despite persistence failure.', workspace });
-  await adapter.plannerStarted;
+  const started = await orchestrations.start({ prompt: 'Cancel despite persistence failure.', workspace, assessment });
+  await adapter.workerStarted;
 
   store.failNextSave = true;
   await assert.rejects(started.cancel(), /injected cancellation save failure/);
@@ -1556,7 +1564,7 @@ test('OrchestrationService propagates child control-plane persistence failure wi
   const orchestrations = new OrchestrationService({ config: config.delegation!, jobs, store });
 
   await assert.rejects(
-    orchestrations.run({ prompt: 'Propagate child persistence.', workspace }),
+    orchestrations.run({ prompt: 'Propagate child persistence.', workspace, assessment }),
     JobPersistenceError
   );
   const parent = (await store.list())[0]!;

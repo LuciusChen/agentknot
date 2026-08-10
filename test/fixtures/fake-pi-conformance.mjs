@@ -47,7 +47,7 @@ function sendFrames(frames, split, done, index = 0) {
 
 function sendSplitUtf8Frames(done) {
   const text =
-    'before🙂after\nAGENTKNOT_WORKER_COMPLETION_REPORT_V1: {"schemaVersion":1,"changedFiles":[],"checksRun":[],"remainingRisks":[],"notes":[]}';
+    'before🙂after\nAGENTKNOT_WORKER_COMPLETION_REPORT_V1: {"schemaVersion":1,"taskOutcome":"completed","changedFiles":[],"checksRun":[],"remainingRisks":[],"notes":[]}';
   const frames = [
     { id: 'prompt', type: 'response', command: 'prompt', success: true },
     { type: 'agent_start' },

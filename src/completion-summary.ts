@@ -58,8 +58,9 @@ export function validateWorkerCompletionReport(
 ): WorkerCompletionReport | undefined {
   if (!isRecord(value)) return undefined;
   if (
-    !hasOnlyKeys(value, ['schemaVersion', 'changedFiles', 'checksRun', 'remainingRisks', 'notes']) ||
+    !hasOnlyKeys(value, ['schemaVersion', 'taskOutcome', 'changedFiles', 'checksRun', 'remainingRisks', 'notes']) ||
     value.schemaVersion !== 1 ||
+    (value.taskOutcome !== 'completed' && value.taskOutcome !== 'blocked') ||
     !isStringArray(value.changedFiles) ||
     !Array.isArray(value.checksRun) ||
     !isStringArray(value.remainingRisks) ||
@@ -86,6 +87,7 @@ export function validateWorkerCompletionReport(
 
   const report: WorkerCompletionReport = {
     schemaVersion: 1,
+    taskOutcome: value.taskOutcome,
     changedFiles: [...value.changedFiles],
     checksRun,
     remainingRisks: [...value.remainingRisks],

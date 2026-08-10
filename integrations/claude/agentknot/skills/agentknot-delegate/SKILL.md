@@ -1,13 +1,11 @@
 ---
 name: agentknot-delegate
-description: Delegate bounded, independently verifiable implementation, test, analysis, repair, or documentation work through AgentKnot. Use whenever a repository task in those categories has objective acceptance criteria and requires more than one direct upstream read or action, including one substantive nonparallel task, or for explicit /agentknot:agentknot-delegate requests. Keep trivial one-read checks, informational chat, requirements and product decisions, artifact integration, commit, push, merge, and deployment upstream.
+description: Delegate bounded, independently verifiable implementation, test, analysis, repair, or documentation work through AgentKnot. Use whenever a repository task in those categories has objective acceptance criteria and requires more than one direct upstream read or action, including one substantive nonparallel task, or for explicit /agentknot:agentknot-delegate requests. Construct the parent task and strict TaskAssessment upstream before invoking the CLI. Keep trivial one-read checks, informational chat, requirements and product decisions, artifact integration, commit, push, merge, and deployment upstream.
 ---
 
 # AgentKnot bounded delegation
 
-Use this skill for bounded, independently verifiable repository work that requires more than one direct upstream read or action and can be handed to AgentKnot without an upstream decision, including one substantive task with no useful parallel split. Keep a trivial one-read check upstream because planner, worker, and review overhead would cost more. Explicit invocation may request the workflow; model-triggered use applies to eligible independent implementation, test, analysis, repair, or documentation work. Preserve the upstream controller as the decision-maker.
-
-If automatic entry reports that the exact submitted text stayed upstream because it lacked controller conversation context, use the surrounding controller context only to recover one concrete bounded repository task, then run this normal delegation workflow once for that recovered task before doing its repository work upstream. Do not resubmit the same context-free continuation text. Every eligibility, policy, artifact, and promotion boundary below still applies, and AgentKnot may retain the recovered task upstream after evaluating it normally.
+Use this skill for bounded, independently verifiable repository work that requires more than one direct upstream read or action and can execute without another upstream product decision, including one substantive task with no useful parallel split. Keep a trivial one-read check upstream because worker and review overhead would cost more. Explicit invocation may request the workflow; model-triggered use applies to eligible independent implementation, test, analysis, repair, or documentation work. The upstream controller owns intent, planning, decomposition, acceptance, and promotion decisions.
 
 ## Keep upstream
 
@@ -22,9 +20,30 @@ Keep any task with unclear acceptance criteria, shared write scope, execution-or
 
 ## Run the bounded delegation
 
-Invoke this skill explicitly as `/agentknot:agentknot-delegate` with the bounded task, or allow model-triggered use only after the eligibility checks above.
+Invoke this skill explicitly as `/agentknot:agentknot-delegate` with the bounded task, or allow implicit use after the eligibility checks above and the hook obligation. Do not send a raw user prompt as the task or ask AgentKnot to infer the assessment.
 
-1. Confirm that the task has a bounded file or component scope, acceptance criteria, and no dependency on another delegated task. Set `TASK` to the exact task text.
+1. Confirm that the task has a bounded file or component scope, acceptance criteria, and no dependency on another delegated task. Construct `TASK` as the exact bounded parent task, including scope, non-goals, and acceptance criteria. Construct `ASSESSMENT` as one strict compact JSON object with exactly this schema:
+
+   ```json
+   {
+     "schemaVersion": 1,
+     "recommendation": "delegate",
+     "complexity": "medium",
+     "parallelizable": false,
+     "taskKinds": ["implementation"],
+     "reasoning": "bounded repository work with objective acceptance criteria",
+     "subtasks": [
+       {
+         "title": "one bounded child task",
+         "kind": "implementation",
+         "prompt": "self-contained child instructions",
+         "acceptanceCriteria": ["specific verifiable outcome"]
+       }
+     ]
+   }
+   ```
+
+   Use `recommendation: "do-not-delegate"` only with an empty `subtasks` array. Use at most 20 task kinds, 20 subtasks, and 20 acceptance criteria per child, and keep every string bounded; do not add keys, routes, providers, models, or controller transcript content. Set `parallelizable` only when the proposed child tasks are independently verifiable and have no execution-order or write-scope dependency.
 2. In one shell call, confirm that the CLI exists and immediately run orchestration with the Claude audit source:
 
    ```sh
@@ -33,11 +52,12 @@ Invoke this skill explicitly as `/agentknot:agentknot-delegate` with the bounded
      exit 127
    fi
    agentknot orchestrate \
-     --source claude \
-     --workspace "$(git rev-parse --show-toplevel)" \
-     --delegation force \
-     --handoff-json \
-     --prompt "$TASK"
+      --source claude \
+      --workspace "$(git rev-parse --show-toplevel)" \
+      --delegation force \
+      --assessment-json "$ASSESSMENT" \
+      --handoff-json \
+      --prompt "$TASK"
    ```
 
    When `AGENTKNOT_SERVER_URL` is set, the CLI uses that shared AgentKnot execution owner. Do not scan the checkout for AgentKnot source, configuration, or storage in that mode, and do not launch another local runtime. If the shared server is unavailable, report the failure without falling back to a local runtime or another worker, provider, or model.

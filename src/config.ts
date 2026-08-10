@@ -110,15 +110,8 @@ export interface ArtifactValidationConfig {
   maxOutputBytes: number;
 }
 
-export const DELEGATION_FALLBACKS = ['upstream', 'fail'] as const;
-export type DelegationFallback = (typeof DELEGATION_FALLBACKS)[number];
-
 export interface DelegationConfig {
   mode: DelegationMode;
-  planner: {
-    strategy: 'hybrid';
-    route: string;
-  };
   dispatch: {
     defaultRoute: string;
     maxChildren: number;
@@ -136,7 +129,6 @@ export interface DelegationConfig {
   qualityReview?: QualityReviewConfig;
   /** Omission leaves artifact validation policy unset. */
   artifactValidation?: ArtifactValidationConfig;
-  fallback: DelegationFallback;
 }
 
 export interface LoadedConfig {
@@ -498,23 +490,23 @@ function parseDelegation(
 ): DelegationConfig | undefined {
   if (value === undefined) return undefined;
   assertRecord(value, 'config.delegation');
+  assertKnownKeys(
+    value,
+    ['mode', 'dispatch', 'policy', 'qualityReview', 'artifactValidation'],
+    'config.delegation'
+  );
   if (!DELEGATION_MODES.includes(value.mode as DelegationMode)) {
     throw new Error('config.delegation.mode must be "off", "suggest", or "auto"');
   }
 
-  if (value.planner !== undefined) assertRecord(value.planner, 'config.delegation.planner');
-  const planner = (value.planner ?? {}) as Record<string, unknown>;
-  if (planner.strategy !== undefined && planner.strategy !== 'hybrid') {
-    throw new Error('config.delegation.planner.strategy must be "hybrid"');
-  }
-  if (planner.route !== undefined) assertNonEmptyString(planner.route, 'config.delegation.planner.route');
-  const plannerRoute = (planner.route as string | undefined) ?? defaultRoute;
-  if (!hasRouteTarget(plannerRoute, routes, routePools)) {
-    throw new Error(`config.delegation.planner.route references unknown route or pool "${plannerRoute}"`);
-  }
 
   if (value.dispatch !== undefined) assertRecord(value.dispatch, 'config.delegation.dispatch');
   const dispatch = (value.dispatch ?? {}) as Record<string, unknown>;
+  assertKnownKeys(
+    dispatch,
+    ['defaultRoute', 'maxChildren', 'maxDepth', 'maxConcurrency', 'routeSelection'],
+    'config.delegation.dispatch'
+  );
   if (dispatch.defaultRoute !== undefined) {
     assertNonEmptyString(dispatch.defaultRoute, 'config.delegation.dispatch.defaultRoute');
   }
@@ -561,13 +553,8 @@ function parseDelegation(
   if (value.policy !== undefined) assertRecord(value.policy, 'config.delegation.policy');
   const policy = (value.policy ?? {}) as Record<string, unknown>;
 
-  if (value.fallback !== undefined && !DELEGATION_FALLBACKS.includes(value.fallback as DelegationFallback)) {
-    throw new Error('config.delegation.fallback must be "upstream" or "fail"');
-  }
-
   return {
     mode: value.mode as DelegationMode,
-    planner: { strategy: 'hybrid', route: plannerRoute },
     dispatch: {
       defaultRoute: defaultDispatchRoute,
       maxChildren,
@@ -589,7 +576,6 @@ function parseDelegation(
     },
     ...(qualityReview === undefined ? {} : { qualityReview }),
     ...(artifactValidation === undefined ? {} : { artifactValidation }),
-    fallback: (value.fallback as DelegationFallback | undefined) ?? 'upstream',
   };
 }
 
@@ -597,7 +583,6 @@ export function resolveDelegationConfig(config: AgentKnotConfig): DelegationConf
   return (
     config.delegation ?? {
       mode: 'off',
-      planner: { strategy: 'hybrid', route: config.defaultRoute },
       dispatch: {
         defaultRoute: config.defaultRoute,
         maxChildren: 2,
@@ -608,7 +593,6 @@ export function resolveDelegationConfig(config: AgentKnotConfig): DelegationConf
         delegate: [...DEFAULT_DELEGATE_TASK_KINDS],
         keepUpstream: [...DEFAULT_KEEP_UPSTREAM_TASK_KINDS],
       },
-      fallback: 'upstream',
     }
   );
 }

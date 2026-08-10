@@ -5,6 +5,7 @@ import type {
   OrchestrationRecord,
   PlannedSubtask,
   RouteSelectionEvidence,
+  TaskAssessment,
 } from '../src/orchestration-types.js';
 import type { JobRecord } from '../src/types.js';
 import { buildUsageReport } from '../src/usage-report.js';
@@ -90,14 +91,27 @@ function orchestration(
   mode: 'active' | 'shadow',
   subtasks: PlannedSubtask[]
 ): OrchestrationRecord {
+  const assessment: TaskAssessment = {
+    schemaVersion: 1,
+    recommendation: 'delegate',
+    complexity: 'low',
+    parallelizable: true,
+    taskKinds: ['test-gap-analysis'],
+    reasoning: 'fixture',
+    subtasks: subtasks.map(({ title, kind, prompt, acceptanceCriteria }) => ({
+      title,
+      kind,
+      prompt,
+      acceptanceCriteria,
+    })),
+  };
   return {
     id,
     schemaVersion: 1,
     status: 'succeeded',
-    request: { prompt: 'route fixture', workspace: '/tmp/usage-fixture', source: 'test' },
+    request: { prompt: 'route fixture', workspace: '/tmp/usage-fixture', source: 'test', assessment },
     policy: {
       mode: 'auto',
-      planner: { strategy: 'hybrid', route: 'luna' },
       dispatch: {
         defaultRoute: 'luna',
         maxChildren: 6,
@@ -112,7 +126,6 @@ function orchestration(
         delegate: ['test-gap-analysis'],
         keepUpstream: ['product-decision'],
       },
-      fallback: 'upstream',
     },
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -126,20 +139,7 @@ function orchestration(
       decision: 'split',
       willDispatch: true,
       reasoning: 'fixture',
-      assessment: {
-        schemaVersion: 1,
-        recommendation: 'delegate',
-        complexity: 'low',
-        parallelizable: true,
-        taskKinds: ['test-gap-analysis'],
-        reasoning: 'fixture',
-        subtasks: subtasks.map(({ title, kind, prompt, acceptanceCriteria }) => ({
-          title,
-          kind,
-          prompt,
-          acceptanceCriteria,
-        })),
-      },
+      assessment,
       subtasks,
     },
     children: [],

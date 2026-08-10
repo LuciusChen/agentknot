@@ -53,6 +53,7 @@ const childJob: JobRecord = {
       status: 'reported',
       report: {
         schemaVersion: 1,
+        taskOutcome: 'completed',
         changedFiles: ['src/example.ts'],
         checksRun: [{ command: 'npm test', outcome: 'passed' }],
         remainingRisks: [],

@@ -99,7 +99,6 @@ test('parseConfig keeps route pools above complete exact routes', () => {
     },
     delegation: {
       mode: 'auto',
-      planner: { strategy: 'hybrid', route: 'a' },
       dispatch: {
         defaultRoute: 'balanced',
         maxChildren: 2,
@@ -107,7 +106,6 @@ test('parseConfig keeps route pools above complete exact routes', () => {
         maxConcurrency: 2,
         routeSelection: { mode: 'active', rules: [{ route: 'balanced', complexities: ['high'] }] },
       },
-      fallback: 'fail',
     },
   };
   const config = parseConfig(base);
@@ -116,13 +114,6 @@ test('parseConfig keeps route pools above complete exact routes', () => {
   });
   assert.equal(config.delegation?.dispatch.defaultRoute, 'balanced');
   assert.equal(config.delegation?.dispatch.routeSelection?.rules[0]?.route, 'balanced');
-  assert.equal(
-    parseConfig({
-      ...base,
-      delegation: { ...base.delegation, planner: { strategy: 'hybrid', route: 'balanced' } },
-    }).delegation?.planner.route,
-    'balanced'
-  );
 
   assert.throws(
     () => parseConfig({ ...base, routePools: { a: base.routePools.balanced } }),
@@ -197,7 +188,6 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
     },
     delegation: {
       mode: 'auto',
-      planner: { strategy: 'hybrid', route: 'luna' },
       dispatch: {
         defaultRoute: 'secondary',
         maxChildren: 3,
@@ -216,7 +206,6 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
         keepUpstream: ['product-decision', 'artifact-integration'],
       },
       qualityReview: { route: 'luna', complexities: ['low'] },
-      fallback: 'upstream',
     },
   });
 
@@ -226,7 +215,6 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
   });
   assert.deepEqual(config.delegation, {
     mode: 'auto',
-    planner: { strategy: 'hybrid', route: 'luna' },
     dispatch: {
       defaultRoute: 'secondary',
       maxChildren: 3,
@@ -245,7 +233,6 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
       keepUpstream: ['product-decision', 'artifact-integration'],
     },
     qualityReview: { route: 'luna', complexities: ['low'] },
-    fallback: 'upstream',
   });
 
   const defaults = parseConfig({
@@ -461,7 +448,11 @@ test('parseConfig rejects unsafe or unresolved delegation settings', () => {
 
   assert.throws(
     () => parseConfig({ ...base, delegation: { mode: 'auto', planner: { route: 'missing' } } }),
-    /planner\.route references unknown route/
+    /config\.delegation contains unknown fields: planner/
+  );
+  assert.throws(
+    () => parseConfig({ ...base, delegation: { mode: 'auto', fallback: 'upstream' } }),
+    /config\.delegation contains unknown fields: fallback/
   );
   assert.throws(
     () =>
@@ -483,7 +474,7 @@ test('parseConfig rejects unsafe or unresolved delegation settings', () => {
     () =>
       parseConfig({
         ...base,
-        delegation: { mode: 'suggest', planner: { route: 'mock' } },
+        delegation: { mode: 'suggest' },
       }),
     /requires workspaceIsolation\.mode "git-worktree"/
   );

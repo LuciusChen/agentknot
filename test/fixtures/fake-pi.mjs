@@ -38,6 +38,7 @@ function completionOutput(message) {
   }
   const validReport = {
     schemaVersion: 1,
+    taskOutcome: process.env.FAKE_PI_COMPLETION_MODE === 'blocked' ? 'blocked' : 'completed',
     changedFiles: ['worker-claimed.ts'],
     checksRun: [
       { command: 'npm test', outcome: 'passed' },
@@ -49,6 +50,8 @@ function completionOutput(message) {
   const envelope = `${WORKER_COMPLETION_REPORT_MARKER}: ${JSON.stringify(validReport)}`;
   switch (process.env.FAKE_PI_COMPLETION_MODE ?? 'valid') {
     case 'valid':
+      return `${humanOutput}\n${envelope}`;
+    case 'blocked':
       return `${humanOutput}\n${envelope}`;
     case 'malformed':
       return `${humanOutput}\n${WORKER_COMPLETION_REPORT_MARKER}: {"schemaVersion":1,"changedFiles":"not-an-array"}`;

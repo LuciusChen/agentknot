@@ -2,6 +2,7 @@
 
 import process from 'node:process';
 
+import { validateTaskAssessment } from './delegation-policy.js';
 import { AgentKnotHttpClient, type AgentKnotWaitUpdate } from './http-client.js';
 import { createAgentKnotHttpServer } from './http-server.js';
 import { buildJobList } from './job-list.js';
@@ -10,13 +11,18 @@ import {
   readLocalDiscovery,
   type LocalDiscoveryRegistration,
 } from './local-discovery.js';
-import type { OrchestrationRecord } from './orchestration-types.js';
+import type {
+  OrchestrationRecord,
+  OrchestrationRequest,
+  TaskAssessment,
+} from './orchestration-types.js';
 import { limitTextSuffix } from './record-limits.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
 import type { JobEvent, JobRequest } from './types.js';
 import type { RouteSelectionModeUsage, UsageRate, UsageReport } from './usage-report.js';
 
 const MAX_HANDOFF_VALIDATION_STREAM_BYTES = 2 * 1024;
+const MAX_ASSESSMENT_JSON_BYTES = 64 * 1024;
 
 function compactArtifactValidation(
   value: OrchestrationRecord['artifactValidation']
@@ -55,12 +61,33 @@ function takeFlag(args: string[], name: string): boolean {
   return true;
 }
 
+function parseAssessmentJson(value: string): TaskAssessment {
+  const bytes = Buffer.byteLength(value, 'utf8');
+  if (bytes > MAX_ASSESSMENT_JSON_BYTES) {
+    throw new Error(`--assessment-json exceeds ${MAX_ASSESSMENT_JSON_BYTES} bytes`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    throw new Error('--assessment-json must be valid JSON');
+  }
+
+  try {
+    return validateTaskAssessment(parsed);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`--assessment-json is invalid: ${message}`, { cause: error });
+  }
+}
+
 function help(): string {
   return `AgentKnot — vendor-neutral coding-agent orchestration
 
 Usage:
   agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME]
-  agentknot orchestrate [prompt...] [--workspace PATH] [--source NAME] [--delegation MODE]
+  agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE]
   agentknot serve [--host HOST] [--port PORT]
   agentknot doctor [--route NAME] [--live]
   agentknot routes [--json]
@@ -91,6 +118,8 @@ Run options:
 
 Orchestrate options:
   --prompt TEXT       Goal instead of positional text
+  --assessment-json JSON
+                      Controller-authored TaskAssessment object (required)
   --workspace PATH    Target repository (default: current directory)
   --source NAME       Controller identity, e.g. codex, claude, or ci
   --delegation MODE   inherit, never, suggest, or force (default: inherit)
@@ -366,7 +395,6 @@ async function orchestrationHandoff(
       source: record.request.source,
       delegation: record.request.delegation,
     },
-    plannerJobId: record.plannerJobId,
     plan:
       record.plan === undefined
         ? undefined
@@ -390,7 +418,6 @@ async function orchestrationHandoff(
               route: subtask.route,
               routeSelection: subtask.routeSelection,
             })),
-            plannerError: record.plan.plannerError,
           },
     children: record.children.map((child) => ({
       subtaskId: child.subtaskId,
@@ -633,6 +660,7 @@ async function main(argv: string[]): Promise<void> {
     const workspace = takeOption(args, '--workspace') ?? process.cwd();
     const source = takeOption(args, '--source') ?? 'cli';
     const promptOption = takeOption(args, '--prompt');
+    const assessmentJson = takeOption(args, '--assessment-json');
     const delegationOption = takeOption(args, '--delegation');
     const suggest = takeFlag(args, '--suggest');
     const json = takeFlag(args, '--json');
@@ -647,11 +675,14 @@ async function main(argv: string[]): Promise<void> {
       throw new Error('--delegation must be inherit, never, suggest, or force');
     }
     if (args.some((value) => value.startsWith('--'))) throw new Error(`Unknown option: ${args.join(' ')}`);
+    if (assessmentJson === undefined) throw new Error('orchestrate requires --assessment-json');
+    const assessment = parseAssessmentJson(assessmentJson);
     const prompt = promptOption ?? args.join(' ');
-    const request = {
+    const request: OrchestrationRequest = {
       prompt,
       workspace,
       source,
+      assessment,
       ...(delegation === undefined
         ? {}
         : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),
@@ -896,7 +927,7 @@ async function main(argv: string[]): Promise<void> {
     if (json) process.stdout.write(`${JSON.stringify(policy, null, 2)}\n`);
     else {
       process.stdout.write(
-        `${policy.mode}\tplanner=${policy.planner.route}\tworker-default=${policy.dispatch.defaultRoute}\treviewer=${policy.qualityReview?.route ?? 'off'}\troute-selection=${policy.dispatch.routeSelection?.mode ?? 'off'}\tchildren<=${policy.dispatch.maxChildren}\tconcurrency<=${policy.dispatch.maxConcurrency}\n`
+        `${policy.mode}\tworker-default=${policy.dispatch.defaultRoute}\treviewer=${policy.qualityReview?.route ?? 'off'}\troute-selection=${policy.dispatch.routeSelection?.mode ?? 'off'}\tchildren<=${policy.dispatch.maxChildren}\tconcurrency<=${policy.dispatch.maxConcurrency}\n`
       );
     }
     return;

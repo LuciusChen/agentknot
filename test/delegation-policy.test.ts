@@ -2,24 +2,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { DelegationConfig } from '../src/config.js';
-import { buildPlannerPrompt, composeDelegationPlan, parseTaskAssessment } from '../src/delegation-policy.js';
+import { composeDelegationPlan, validateTaskAssessment } from '../src/delegation-policy.js';
 import type { OrchestrationRequest, TaskAssessment } from '../src/orchestration-types.js';
 
 const config: DelegationConfig = {
   mode: 'auto',
-  planner: { strategy: 'hybrid', route: 'planner' },
   dispatch: { defaultRoute: 'worker', maxChildren: 2, maxDepth: 1, maxConcurrency: 1 },
   policy: {
     delegate: ['documentation', 'repository-analysis', 'test-gap-analysis', 'independent-implementation'],
     keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
   },
-  fallback: 'upstream',
-};
-
-const request: OrchestrationRequest = {
-  prompt: 'Implement the feature, review the tests, and update the documentation',
-  workspace: '/tmp/project',
-  source: 'claude',
 };
 
 const assessment: TaskAssessment = {
@@ -45,60 +37,32 @@ const assessment: TaskAssessment = {
   ],
 };
 
-test('parseTaskAssessment accepts strict JSON and rejects fences or malformed planner output', () => {
-  const json = JSON.stringify(assessment);
-  assert.deepEqual(parseTaskAssessment(json), assessment);
-  assert.throws(() => parseTaskAssessment('```json\n' + json + '\n```'), /valid JSON object/);
-  assert.throws(() => parseTaskAssessment(`result: ${json}`), /valid JSON object/);
+const request: OrchestrationRequest = {
+  prompt: 'Implement the feature, review the tests, and update the documentation',
+  workspace: '/tmp/project',
+  assessment,
+  source: 'claude',
+};
+
+test('validateTaskAssessment accepts a strict controller handoff and returns a defensive copy', () => {
+  const validated = validateTaskAssessment(assessment);
+  assert.deepEqual(validated, assessment);
+  assert.notEqual(validated, assessment);
+  assert.notEqual(validated.subtasks, assessment.subtasks);
+  assert.notEqual(validated.subtasks[0], assessment.subtasks[0]);
+  assert.throws(() => validateTaskAssessment(JSON.stringify(assessment)), /Controller assessment must be an object/);
+  assert.throws(() => validateTaskAssessment(null), /Controller assessment must be an object/);
   assert.throws(
-    () => parseTaskAssessment(JSON.stringify({ ...assessment, parallelizable: 'yes' })),
-    /parallelizable must be a boolean/
+    () => validateTaskAssessment({ ...assessment, parallelizable: 'yes' }),
+    /Controller assessment parallelizable must be a boolean/
+  );
+  assert.throws(
+    () => validateTaskAssessment({ ...assessment, unexpected: true }),
+    /unknown: unexpected/
   );
 });
 
-test('planner instructions reserve parallelism for independent non-overlapping write scopes and structured criteria', () => {
-  const prompt = buildPlannerPrompt(request, config);
-  assert.match(prompt, /expected write scopes do not overlap/);
-  assert.match(prompt, /no execution-order dependency/);
-  assert.match(prompt, /bounded file or component scope/);
-  assert.match(
-    prompt,
-    /Every delegated subtask object must contain the four separate keys "title", "kind", "prompt", and "acceptanceCriteria"\./
-  );
-  assert.match(prompt, /The "acceptanceCriteria" key must be a separate non-empty JSON string array/);
-  assert.match(prompt, /do not put acceptance criteria only in the "prompt" text/);
-  assert.match(prompt, /only permitted text outside the assessment object/);
-});
-
-test('planner instructions delegate bounded repository deliverables and evidence-producing analysis', () => {
-  const prompt = buildPlannerPrompt(request, config);
-  assert.match(prompt, /Delegation and parallelism are separate decisions/);
-  assert.match(prompt, /exactly one nonparallel subtask/);
-  assert.match(prompt, /lack of a useful split alone must not cause a "do-not-delegate" recommendation/);
-  assert.match(prompt, /expected to create or modify a repository file must receive a "delegate" recommendation/);
-  assert.match(prompt, /even when it is small, low-complexity, or nonparallel/);
-  assert.match(prompt, /task size and generic handoff\/review overhead alone are not reasons/);
-  assert.match(prompt, /concrete repository investigation that must search, compare, or interpret project content/);
-  assert.match(prompt, /independently verifiable findings is a "repository-analysis" deliverable/);
-  assert.match(prompt, /even when it is read-only, low-complexity, or nonparallel/);
-  assert.match(prompt, /retrieving one explicit fact from one already identified location/);
-  assert.match(prompt, /do not retain evidence-producing repository analysis merely because it creates no patch/);
-  assert.match(prompt, /Authoritative primary target workspace: \/tmp\/project/);
-  assert.match(prompt, /only repository a worker may modify/);
-  assert.match(prompt, /Never reinterpret another repository named in the task as the target/);
-  assert.match(prompt, /every other repository is a read-only reference/);
-  assert.match(prompt, /requested edit target conflicts with the request workspace/);
-  assert.match(prompt, /any read-only referenced repository or "none"/);
-  assert.match(prompt, /at most five findings and 4000 characters/);
-  assert.match(prompt, /Do not request a repository inventory, exhaustive source summary/);
-  assert.match(prompt, /"parallelizable":true\|false/);
-  assert.match(prompt, /Use an empty subtasks array only when the work must remain upstream, cannot be bounded/);
-  assert.match(prompt, /genuinely trivial direct lookup of one explicit fact from one already identified location/);
-  assert.match(prompt, /never use it merely because the work is read-only, creates no patch, is small, or cannot be split/);
-  assert.doesNotMatch(prompt, /delegation would add no value/);
-});
-
-test('parseTaskAssessment strictly rejects a subtask that omits acceptanceCriteria', () => {
+test('validateTaskAssessment strictly rejects a subtask that omits acceptanceCriteria', () => {
   const withoutAcceptanceCriteria = {
     ...assessment,
     subtasks: assessment.subtasks.map((subtask) => {
@@ -107,8 +71,8 @@ test('parseTaskAssessment strictly rejects a subtask that omits acceptanceCriter
     }),
   };
   assert.throws(
-    () => parseTaskAssessment(JSON.stringify(withoutAcceptanceCriteria)),
-    /missing: acceptanceCriteria/
+    () => validateTaskAssessment(withoutAcceptanceCriteria),
+    /Controller assessment subtasks\[0\] must contain exactly \[title, kind, prompt, acceptanceCriteria\].*missing: acceptanceCriteria/
   );
 });
 
@@ -302,7 +266,7 @@ test('small low-complexity repository work is delegated once and selected by the
     ],
   };
 
-  const plan = composeDelegationPlan(request, parseTaskAssessment(JSON.stringify(single)), activeConfig);
+  const plan = composeDelegationPlan(request, validateTaskAssessment(single), activeConfig);
   assert.equal(plan.decision, 'delegate');
   assert.equal(plan.willDispatch, true);
   assert.equal(plan.subtasks.length, 1);
@@ -338,8 +302,11 @@ test('small low-complexity repository work is delegated once and selected by the
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Repository-analysis boundary:/);
   assert.match(
     analysisPlan.subtasks[0]?.executionPrompt ?? '',
-    /Authoritative primary target workspace \(the only writable repository\): \/tmp\/project/
+    /Authoritative source repository and logical target: \/tmp\/project/
   );
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /isolated execution worktree/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /active worktree\/current working directory is the only writable repository/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /do not access or modify the source checkout path directly/);
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Every other repository is a read-only reference/);
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /report the workspace mismatch/);
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /at most five findings and 4000 characters/);

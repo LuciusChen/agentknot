@@ -19,17 +19,10 @@ import {
   buildQualityReviewPrompt,
   parseQualityReview,
 } from './quality-review.js';
-import {
-  buildPlannerPrompt,
-  composeDelegationPlan,
-  parseTaskAssessment,
-  rehashDelegationPlan,
-  skippedTaskAssessment,
-} from './delegation-policy.js';
+import { composeDelegationPlan, validateTaskAssessment } from './delegation-policy.js';
 import type {
   AgentKnotDelegationMetadata,
   ArtifactValidationIdentity,
-  DelegationPlan,
   OrchestrationArtifactValidation,
   OrchestrationArtifactReview,
   OrchestrationChild,
@@ -130,6 +123,10 @@ function normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
   if (typeof request.workspace !== 'string' || request.workspace.trim() === '') {
     throw new Error('Orchestration workspace must be a non-empty string');
   }
+  if (request.assessment === undefined) {
+    throw new Error('Orchestration controller assessment is required');
+  }
+  const assessment = validateTaskAssessment(request.assessment);
   assertTextLimit('Orchestration prompt', request.prompt, MAX_PROMPT_BYTES);
   if (
     request.delegation !== undefined &&
@@ -141,6 +138,7 @@ function normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
   return {
     prompt: request.prompt,
     workspace: path.resolve(request.workspace),
+    assessment,
     ...(request.source === undefined ? {} : { source: request.source }),
     ...(request.metadata === undefined ? {} : { metadata: structuredClone(request.metadata) }),
     ...(request.delegation === undefined ? {} : { delegation: request.delegation }),
@@ -185,6 +183,7 @@ export class OrchestrationService {
   ): Promise<OrchestrationRecord[]> {
     const reconciled: OrchestrationRecord[] = [];
     for (const record of await this.#store.list()) {
+      // `planning` is accepted only for historical schemaVersion 1 snapshots.
       if (!['queued', 'planning', 'dispatching'].includes(record.status)) continue;
       if (!options.exclusiveOwner && isExecutorProcessAlive(record.execution)) continue;
 
@@ -331,19 +330,29 @@ export class OrchestrationService {
   }
 
   async #execute(record: OrchestrationRecord, signal: AbortSignal): Promise<OrchestrationRecord> {
-    record.status = 'planning';
     record.startedAt = this.#now().toISOString();
-    await this.#appendEvent(record, 'orchestration.planning', undefined, record.startedAt);
     throwIfAborted(signal);
 
-    const plan = await this.#plan(record, signal);
-    record.plan = plan;
-    await this.#appendEvent(record, 'orchestration.planned', {
-      mode: plan.mode,
-      decision: plan.decision,
-      willDispatch: plan.willDispatch,
-      subtaskCount: plan.subtasks.length,
-    });
+    const plan = composeDelegationPlan(record.request, record.request.assessment, record.policy);
+    await this.#appendEvent(
+      record,
+      'orchestration.handoff.accepted',
+      {
+        mode: plan.mode,
+        decision: plan.decision,
+        willDispatch: plan.willDispatch,
+        subtaskCount: plan.subtasks.length,
+      },
+      record.startedAt,
+      {
+        apply: () => {
+          record.plan = plan;
+        },
+        rollback: () => {
+          delete record.plan;
+        },
+      }
+    );
     throwIfAborted(signal);
 
     if (!plan.willDispatch || plan.subtasks.length === 0) {
@@ -904,75 +913,6 @@ export class OrchestrationService {
         reviewerJobId: reviewerJob.id,
         reason: 'reviewer-output-invalid',
         error: limitErrorDetails(error),
-      });
-    }
-  }
-
-  async #plan(record: OrchestrationRecord, signal: AbortSignal): Promise<DelegationPlan> {
-    if (record.policy.mode === 'off' || record.request.delegation === 'never') {
-      return composeDelegationPlan(
-        record.request,
-        skippedTaskAssessment(
-          record.policy.mode === 'off'
-            ? 'Automatic delegation is disabled by configuration.'
-            : 'The request disabled delegation.'
-        ),
-        record.policy
-      );
-    }
-
-    const releaseSlot = await this.#dispatchSlots.acquire(signal);
-    let plannerJob: JobRecord;
-    try {
-      const started = await this.#jobs.start({
-        prompt: buildPlannerPrompt(record.request, record.policy),
-        workspace: record.request.workspace,
-        route: record.policy.planner.route,
-        ...(record.request.source === undefined ? {} : { source: record.request.source }),
-        metadata: {
-          ...(record.request.metadata ?? {}),
-          agentknotDelegation: { orchestrationId: record.id, role: 'planner', depth: 0 },
-        },
-      });
-      record.plannerJobId = started.job.id;
-      try {
-        await this.#appendEvent(record, 'orchestration.planner.started', { jobId: started.job.id });
-      } catch (error) {
-        started.cancel();
-        await started.completion;
-        throw error;
-      }
-      plannerJob = await this.#awaitJob(started, signal);
-      await this.#appendEvent(record, 'orchestration.planner.completed', {
-        jobId: plannerJob.id,
-        status: plannerJob.status,
-      });
-      throwIfAborted(signal);
-    } finally {
-      releaseSlot();
-    }
-
-    try {
-      if (plannerJob.status !== 'succeeded' || !plannerJob.result) {
-        throw new Error(plannerJob.error?.message ?? `Planner job ended with status ${plannerJob.status}`);
-      }
-      return composeDelegationPlan(
-        record.request,
-        parseTaskAssessment(plannerJob.result.output),
-        record.policy
-      );
-    } catch (error) {
-      if (record.policy.fallback === 'fail') {
-        throw new Error(`Delegation planner failed: ${limitErrorDetails(error).message}`, { cause: error });
-      }
-      const details = limitErrorDetails(error);
-      return rehashDelegationPlan({
-        ...composeDelegationPlan(
-          { ...record.request, delegation: 'never' },
-          skippedTaskAssessment(`Delegation planner failed: ${details.message}`),
-          record.policy
-        ),
-        plannerError: { ...details, jobId: plannerJob.id },
       });
     }
   }

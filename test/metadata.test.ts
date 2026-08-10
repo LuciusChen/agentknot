@@ -9,6 +9,7 @@ import type { AgentKnotConfig } from '../src/config.js';
 import { createAgentKnotHttpServer } from '../src/http-server.js';
 import { OrchestrationService } from '../src/orchestration.js';
 import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
+import type { TaskAssessment } from '../src/orchestration-types.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { AgentKnotRuntime } from '../src/runtime.js';
 import { MemoryJobStore } from '../src/store.js';
@@ -21,11 +22,19 @@ const config: AgentKnotConfig = {
   routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
   delegation: {
     mode: 'off',
-    planner: { strategy: 'hybrid', route: 'mock' },
     dispatch: { defaultRoute: 'mock', maxChildren: 2, maxDepth: 1, maxConcurrency: 1 },
     policy: { delegate: ['documentation'], keepUpstream: ['commit', 'push'] },
-    fallback: 'upstream',
   },
+};
+
+const assessment: TaskAssessment = {
+  schemaVersion: 1,
+  recommendation: 'do-not-delegate',
+  complexity: 'low',
+  parallelizable: false,
+  taskKinds: ['documentation'],
+  reasoning: 'Controller-authored metadata boundary fixture.',
+  subtasks: [],
 };
 
 const invalidMetadataValues: unknown[] = [
@@ -79,7 +88,12 @@ test('Orchestration TypeScript boundary rejects the same non-JSON-compatible met
 
   for (const metadata of invalidMetadataValues) {
     await assert.rejects(
-      orchestrations.start({ prompt: 'validate metadata', workspace, metadata: asMetadata(metadata) }),
+      orchestrations.start({
+        prompt: 'validate metadata',
+        workspace,
+        assessment,
+        metadata: asMetadata(metadata),
+      }),
       /metadata must be a JSON-compatible object/
     );
   }
@@ -105,7 +119,12 @@ test('HTTP Job and Orchestration boundaries reject non-object metadata consisten
         const response = await fetch(`${baseUrl}${endpoint}`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ prompt: 'validate metadata', workspace, metadata }),
+          body: JSON.stringify({
+            prompt: 'validate metadata',
+            workspace,
+            metadata,
+            ...(endpoint === '/v1/orchestrations' ? { assessment } : {}),
+          }),
         });
         assert.equal(response.status, 400, endpoint);
         const body = (await response.json()) as { error: string };

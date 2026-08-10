@@ -1,5 +1,5 @@
 {
-  "description": "Run configured automatic AgentKnot delegation before the controller-model turn.",
+  "description": "Check configured AgentKnot delegation policy before the controller-model turn.",
   "hooks": {
     "PostToolUse": [
       {
@@ -18,8 +18,8 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" claude '/agentknot:agentknot-delegate'",
-            "timeout": 3660,
-            "statusMessage": "AgentKnot is planning, running workers, and verifying; expand for live progress",
+            "timeout": 10,
+            "statusMessage": "AgentKnot is checking workspace delegation policy",
             "additionalContextLimit": 18000
           }
         ]

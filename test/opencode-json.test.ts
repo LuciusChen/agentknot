@@ -147,6 +147,7 @@ test('OpenCode JSON preserves exact session statistics and requires a valid comp
   assert.equal(result.output, 'OpenCode conformance output');
   assert.deepEqual(result.completionReport, {
     schemaVersion: 1,
+    taskOutcome: 'completed',
     changedFiles: ['result.txt'],
     checksRun: [{ command: 'npm test', outcome: 'passed' }],
     remainingRisks: [],
@@ -164,6 +165,13 @@ test('OpenCode JSON preserves exact session statistics and requires a valid comp
       () => undefined
     ),
     /malformed required completion report/
+  );
+  await assert.rejects(
+    createAdapter('success', {
+      FAKE_OPENCODE_COMPLETION: 'valid',
+      FAKE_OPENCODE_TASK_OUTCOME: 'blocked',
+    }).run(input(new AbortController().signal), () => undefined),
+    /reported task blocked/
   );
 });
 

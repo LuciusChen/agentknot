@@ -18,6 +18,33 @@ interface CliFixture {
   workspace: string;
 }
 
+const upstreamAssessmentJson = JSON.stringify({
+  schemaVersion: 1,
+  recommendation: 'do-not-delegate',
+  complexity: 'low',
+  parallelizable: false,
+  taskKinds: [],
+  reasoning: 'Keep this bounded controller task upstream.',
+  subtasks: [],
+});
+
+const delegatedAssessmentJson = JSON.stringify({
+  schemaVersion: 1,
+  recommendation: 'delegate',
+  complexity: 'low',
+  parallelizable: false,
+  taskKinds: ['documentation'],
+  reasoning: 'One bounded repository deliverable is useful downstream.',
+  subtasks: [
+    {
+      title: 'Write reviewed fixture',
+      kind: 'documentation',
+      prompt: 'Create reviewed.txt with the reviewed fixture text.',
+      acceptanceCriteria: ['reviewed.txt contains the reviewed fixture text'],
+    },
+  ],
+});
+
 async function createModeOffFixture(): Promise<CliFixture> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-cli-orchestration-'));
   const workspace = path.join(directory, 'workspace');
@@ -90,22 +117,6 @@ async function createArtifactFixture(): Promise<CliFixture> {
 
 async function createDelegatedFixture(): Promise<CliFixture> {
   const fixture = await createArtifactFixture();
-  const plannerOutput = JSON.stringify({
-    schemaVersion: 1,
-    recommendation: 'delegate',
-    complexity: 'low',
-    parallelizable: false,
-    taskKinds: ['documentation'],
-    reasoning: 'One bounded repository deliverable is useful downstream.',
-    subtasks: [
-      {
-        title: 'Write reviewed fixture',
-        kind: 'documentation',
-        prompt: 'Create reviewed.txt with the reviewed fixture text.',
-        acceptanceCriteria: ['reviewed.txt contains the reviewed fixture text'],
-      },
-    ],
-  });
   await writeFile(
     fixture.configPath,
     `${JSON.stringify(
@@ -121,7 +132,6 @@ async function createDelegatedFixture(): Promise<CliFixture> {
             commandArgs: [path.resolve('test/fixtures/fake-pi.mjs')],
             noSession: true,
             environment: {
-              FAKE_PI_PLANNER_OUTPUT: plannerOutput,
               FAKE_PI_COMPLETION_OUTPUT: 'Delegated worker created reviewed.txt.',
               FAKE_PI_REVIEW_OUTPUT: JSON.stringify({
                 schemaVersion: 1,
@@ -134,13 +144,11 @@ async function createDelegatedFixture(): Promise<CliFixture> {
           },
         },
         routes: {
-          planner: { worker: 'pi', provider: 'test', model: 'planner' },
           worker: { worker: 'pi', provider: 'test', model: 'worker' },
           reviewer: { worker: 'pi', provider: 'test', model: 'reviewer', maxAttempts: 1 },
         },
         delegation: {
           mode: 'auto',
-          planner: { route: 'planner' },
           dispatch: { defaultRoute: 'worker', maxChildren: 1, maxConcurrency: 1, maxDepth: 1 },
           policy: {
             delegate: ['documentation'],
@@ -216,6 +224,8 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
     fixture.workspace,
     '--source',
     'test',
+    '--assessment-json',
+    upstreamAssessmentJson,
     '--delegation',
     'force',
     '--json'
@@ -227,6 +237,7 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
   assert.equal(record.request.workspace, fixture.workspace);
   assert.equal(record.request.source, 'test');
   assert.equal(record.request.delegation, 'force');
+  assert.deepEqual(record.request.assessment, JSON.parse(upstreamAssessmentJson));
   assert.equal(record.policy.mode, 'off');
   assert.equal(record.plan?.mode, 'off');
   assert.equal(record.plan?.willDispatch, false);
@@ -242,6 +253,8 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
     fixture.workspace,
     '--source',
     'test',
+    '--assessment-json',
+    upstreamAssessmentJson,
     '--handoff-json'
   );
   const handoff = JSON.parse(handoffRun.stdout) as Record<string, unknown> & {
@@ -254,6 +267,8 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
   assert.equal(handoff.status, 'succeeded');
   assert.deepEqual(handoff.request, { source: 'test' });
   assert.equal(handoff.plan.decision, 'upstream');
+  assert.equal('plannerJobId' in handoff, false);
+  assert.equal('plannerError' in handoff.plan, false);
   assert.deepEqual(handoff.children, []);
   assert.deepEqual(handoff.artifacts, []);
   assert.equal(handoff.result.action, 'upstream');
@@ -271,7 +286,7 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
   const delegation = await runCli(fixture.configPath, 'delegation', '--json');
   const policy = JSON.parse(delegation.stdout) as DelegationConfig;
   assert.equal(policy.mode, 'off');
-  assert.equal(policy.planner.route, 'mock');
+  assert.equal('planner' in policy, false);
   assert.equal(policy.dispatch.defaultRoute, 'alternate');
   assert.equal(policy.dispatch.routeSelection?.mode, 'active');
 
@@ -284,6 +299,41 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
   const shown = await runCli(fixture.configPath, 'orchestration-show', record.id);
   const shownRecord = JSON.parse(shown.stdout) as OrchestrationRecord;
   assert.deepEqual(shownRecord, record);
+});
+
+test('CLI orchestrate rejects missing, malformed, and oversized assessments before admission', async () => {
+  const fixture = await createModeOffFixture();
+  const assertFailure = async (assessmentArgs: string[], message: RegExp): Promise<void> => {
+    await assert.rejects(
+      runCli(
+        fixture.configPath,
+        'orchestrate',
+        '--prompt',
+        'This must not be admitted.',
+        '--workspace',
+        fixture.workspace,
+        ...assessmentArgs,
+        '--json'
+      ),
+      (error: unknown) => {
+        const stderr = String((error as { stderr?: unknown }).stderr ?? '');
+        assert.match(stderr, message);
+        return true;
+      }
+    );
+  };
+
+  await assertFailure([], /orchestrate requires --assessment-json/);
+  await assertFailure(['--assessment-json', '{not-json'], /--assessment-json must be valid JSON/);
+  await assertFailure(
+    ['--assessment-json', 'x'.repeat(64 * 1024 + 1)],
+    /--assessment-json exceeds 65536 bytes/
+  );
+
+  const records = JSON.parse(
+    (await runCli(fixture.configPath, 'orchestrations', '--json')).stdout
+  ) as OrchestrationRecord[];
+  assert.deepEqual(records, []);
 });
 
 test('CLI compact handoff projects delegated child and verified artifact evidence', async () => {
@@ -299,6 +349,8 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
     fixture.workspace,
     '--source',
     'test',
+    '--assessment-json',
+    delegatedAssessmentJson,
     '--handoff-json'
   );
   const handoff = JSON.parse(run.stdout) as {

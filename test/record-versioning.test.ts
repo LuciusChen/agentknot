@@ -8,6 +8,7 @@ import { createAdapters } from '../src/adapters/index.js';
 import { resolveDelegationConfig, type AgentKnotConfig } from '../src/config.js';
 import { OrchestrationService } from '../src/orchestration.js';
 import { FileOrchestrationStore } from '../src/orchestration-store.js';
+import type { TaskAssessment } from '../src/orchestration-types.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { FileJobStore } from '../src/store.js';
 import type { JobRecord } from '../src/types.js';
@@ -24,6 +25,16 @@ const config: AgentKnotConfig = {
 
 const timestamp = '2026-08-10T00:00:00.000Z';
 const temporaryDirectories: string[] = [];
+
+const assessment: TaskAssessment = {
+  schemaVersion: 1,
+  recommendation: 'do-not-delegate',
+  complexity: 'low',
+  parallelizable: false,
+  taskKinds: ['documentation'],
+  reasoning: 'Controller-authored versioning fixture assessment.',
+  subtasks: [],
+};
 
 async function createTemporaryDirectory(prefix: string): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), prefix));
@@ -147,6 +158,7 @@ test('new Job and Orchestration records persist schemaVersion 1', async () => {
   const orchestration = await orchestrations.run({
     prompt: 'create a versioned orchestration',
     workspace,
+    assessment,
     source: 'test',
   });
   assert.equal(orchestration.schemaVersion, 1);

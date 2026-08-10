@@ -31,7 +31,7 @@ if (mode === 'block') {
     : 'OpenCode conformance output';
   if (!live && process.env.FAKE_OPENCODE_COMPLETION === 'valid') {
     output +=
-      '\nAGENTKNOT_WORKER_COMPLETION_REPORT_V1: {"schemaVersion":1,"changedFiles":["result.txt"],"checksRun":[{"command":"npm test","outcome":"passed"}],"remainingRisks":[],"notes":["fixture"]}';
+      `\nAGENTKNOT_WORKER_COMPLETION_REPORT_V1: {"schemaVersion":1,"taskOutcome":"${process.env.FAKE_OPENCODE_TASK_OUTCOME ?? 'completed'}","changedFiles":["result.txt"],"checksRun":[{"command":"npm test","outcome":"passed"}],"remainingRisks":[],"notes":["fixture"]}`;
   }
   if (!live && process.env.FAKE_OPENCODE_COMPLETION === 'malformed') {
     output += '\nAGENTKNOT_WORKER_COMPLETION_REPORT_V1: {bad';

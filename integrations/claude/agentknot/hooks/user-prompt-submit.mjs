@@ -22,9 +22,7 @@ if (explicit !== undefined && (explicit === '' || Buffer.byteLength(explicit, 'u
 const explicitInvocations = explicit === undefined
   ? ['$agentknot-delegate', '/agentknot:agentknot-delegate']
   : [explicit];
-const MAX_CHILD_OUTPUT_CHARS = 24_000;
-const MAX_PREVIEW_CHARS = 32_000;
-const MAX_CONTEXT_CHARS = 60_000;
+const MAX_CONTEXT_CHARS = 8_000;
 const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const MAX_SESSION_RECORD_BYTES = 4 * 1024;
 const SESSION_DIRECTORY_MODE = 0o700;
@@ -53,21 +51,13 @@ function context(additionalContext) {
   );
 }
 
-function block(reason) {
-  process.stdout.write(
-    `${JSON.stringify({
-      decision: 'block',
-      reason: truncate(reason, MAX_CONTEXT_CHARS),
-    })}\n`
-  );
-}
-
-function run(args, cwd, options = {}) {
+function run(args, cwd) {
   return new Promise((resolve, reject) => {
     const child = execFile('agentknot', args, {
       cwd,
       env: process.env,
       encoding: 'utf8',
+      timeout: 5_000,
       maxBuffer: MAX_BUFFER_BYTES,
     }, (error, stdout, stderr) => {
       if (error !== null) {
@@ -78,9 +68,6 @@ function run(args, cwd, options = {}) {
       }
       resolve({ stdout, stderr });
     });
-    if (options.forwardStderr === true) {
-      child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
-    }
   });
 }
 
@@ -413,109 +400,29 @@ try {
   const connectionArgs = serverUrl === undefined ? ['--config', configPath] : ['--server', serverUrl];
 
   const { stdout: policyOutput } = await run(['delegation', '--json', ...connectionArgs], workspace);
-  const policy = JSON.parse(policyOutput);
+  let policy;
+  try {
+    policy = JSON.parse(policyOutput);
+  } catch (error) {
+    throw new Error('AgentKnot delegation policy returned malformed JSON', { cause: error });
+  }
+  if (
+    typeof policy !== 'object' ||
+    policy === null ||
+    Array.isArray(policy) ||
+    !['off', 'suggest', 'auto'].includes(policy.mode)
+  ) {
+    throw new Error('AgentKnot delegation policy returned an invalid mode');
+  }
   if (policy.mode !== 'auto') process.exit(0);
 
-  let handoffOutput;
-  try {
-    ({ stdout: handoffOutput } = await run(
-      [
-        'orchestrate',
-        '--source',
-        source,
-        '--workspace',
-        workspace,
-        '--delegation',
-        'inherit',
-        '--handoff-json',
-        '--progress',
-        '--prompt',
-        event.prompt,
-        ...connectionArgs,
-      ],
-      workspace,
-      { forwardStderr: true }
-    ));
-  } catch (error) {
-    handoffOutput = commandFailureStdout(error);
-  }
-  const handoff = JSON.parse(handoffOutput);
-
-  if (
-    typeof handoff === 'object' &&
-    handoff !== null &&
-    !Array.isArray(handoff) &&
-    typeof handoff.status === 'string' &&
-    handoff.status !== 'succeeded'
-  ) {
-    const orchestrationId = typeof handoff.id === 'string' && handoff.id !== ''
-      ? ` ${truncate(handoff.id, 256)}`
-      : '';
-    const detail = typeof handoff.error?.message === 'string' && handoff.error.message !== ''
-      ? `: ${truncate(handoff.error.message, 1_000)}`
-      : '';
-    throw new Error(
-      `AgentKnot orchestration${orchestrationId} ended with status ${truncate(handoff.status, 64)}${detail}`
-    );
-  }
-
-  if (handoff.plan?.willDispatch !== true) {
-    context(
-      `AgentKnot automatic entry evaluated this submitted text without controller conversation context and kept it upstream: ${handoff.plan?.reasoning ?? 'no delegatable subtask'}. Continue normally. If the surrounding controller context supplies a concrete, bounded repository task that this text is continuing, first use the normal AgentKnot delegation entry for that recovered task; do not execute that task upstream unless AgentKnot's normal policy keeps the recovered task upstream. Otherwise keep this submitted text upstream. Do not resubmit this exact context-free text.`
-    );
-    process.exit(0);
-  }
-
-  const children = Array.isArray(handoff.children) ? handoff.children : [];
-  const perChildOutputLimit = Math.max(1, Math.floor(MAX_CHILD_OUTPUT_CHARS / Math.max(1, children.length)));
-  const compactHandoff = {
-    ...handoff,
-    children: children.map((child) => ({
-      ...child,
-      ...(typeof child.output === 'string'
-        ? { output: truncate(child.output, perChildOutputLimit) }
-        : {}),
-    })),
-  };
-  const previewTargets = Array.isArray(handoff.artifacts)
-    ? handoff.artifacts.flatMap((report) =>
-        report?.status === 'verified' && Array.isArray(report.attempts)
-          ? report.attempts
-              .filter((attempt) => attempt?.valid === true && Number(attempt.size) > 0)
-              .map((attempt) => ({ jobId: report.jobId, attempt: attempt.attempt }))
-          : []
-      )
-    : [];
-  const perPreviewLimit = Math.max(1, Math.floor(MAX_PREVIEW_CHARS / Math.max(1, previewTargets.length)));
-  const previews = [];
-  for (const target of previewTargets) {
-    try {
-      const { stdout } = await run(
-        ['artifact-preview', target.jobId, String(target.attempt), '--json', ...connectionArgs],
-        workspace
-      );
-      const preview = JSON.parse(stdout);
-      previews.push({
-        jobId: target.jobId,
-        attempt: target.attempt,
-        truncated: preview.truncated === true || String(preview.content ?? '').length > perPreviewLimit,
-        content: truncate(String(preview.content ?? ''), perPreviewLimit),
-      });
-    } catch (error) {
-      previews.push({
-        jobId: target.jobId,
-        attempt: target.attempt,
-        unavailable: truncate(error instanceof Error ? error.message : String(error), 1_000),
-      });
-    }
-  }
-
   context(
-    `AGENTKNOT_AUTOMATIC_HANDOFF_V1\nAgentKnot already completed the delegated repository work before this controller-model turn. Do not repeat its repository exploration, analysis, implementation, or successful checks. Use the bounded evidence below, including optional qualityReview and controller-owned artifactValidation. Both are advisory; a passed artifactValidation covers the exact recorded patch at its recorded base, not the post-application workspace. For a read-only task, report the result directly and disclose any stated gap. For a patch, review only the supplied integrity-valid preview, decide whether to apply it, and validate the integrated workspace once after application; never apply, commit, push, merge, or deploy merely because the worker produced it.\n${JSON.stringify({ handoff: compactHandoff, previews })}`
+    'AGENTKNOT_HANDOFF_OBLIGATION_V1\n' +
+      'The upstream controller owns intent, planning, and decomposition. Keep informational, product, integration, commit, push, merge, and deploy decisions upstream. Before eligible repository execution, author one strict schemaVersion 1 TaskAssessment with recommendation, complexity, parallelizable, taskKinds, reasoning, and bounded subtasks containing title, kind, prompt, and acceptanceCriteria; then submit the parent TASK plus ASSESSMENT through the normal agentknot-delegate Skill/CLI. AgentKnot only validates, routes, schedules, and verifies. Do not choose a route or model locally.'
   );
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  block(
-    `AgentKnot automatic entry failed to return a usable handoff: ${truncate(message, 1_000)}. This submitted prompt was blocked before the controller-model request; resolve the reported prerequisite and retry. Do not silently substitute another worker, provider, or model.`
+  context(
+    `AGENTKNOT_HANDOFF_OBLIGATION_V1\nAgentKnot handoff status: unavailable. Bounded discovery/policy lookup failed: ${truncate(message, 1_000)}. Do not block this user prompt. The upstream controller still owns intent, planning, decomposition, and upstream informational, product, integration, commit, push, merge, and deploy decisions; before eligible repository execution, use the normal Skill/CLI with one strict TaskAssessment after availability is restored.`
   );
 }

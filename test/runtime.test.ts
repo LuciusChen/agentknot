@@ -9,6 +9,7 @@ import test from 'node:test';
 import { createRuntime } from '../src/runtime.js';
 import { FileOrchestrationStore } from '../src/orchestration-store.js';
 import type { OrchestrationRecord, OrchestrationStatus } from '../src/orchestration-types.js';
+import type { TaskAssessment } from '../src/orchestration-types.js';
 import { FileJobStore } from '../src/store.js';
 import type { JobRecord, JobStatus } from '../src/types.js';
 
@@ -63,20 +64,27 @@ function staleOrchestration(
   pid: number
 ): OrchestrationRecord {
   const createdAt = '2026-08-08T01:00:00.000Z';
+  const assessment: TaskAssessment = {
+    schemaVersion: 1,
+    recommendation: 'do-not-delegate',
+    complexity: 'low',
+    parallelizable: false,
+    taskKinds: ['documentation'],
+    reasoning: 'Controller-authored stale-orchestration fixture assessment.',
+    subtasks: [],
+  };
   return {
     id,
     schemaVersion: 1,
     status,
-    request: { prompt: 'stale orchestration', workspace, source: 'test' },
+    request: { prompt: 'stale orchestration', workspace, assessment, source: 'test' },
     policy: {
       mode: 'off',
-      planner: { strategy: 'hybrid', route: 'mock' },
       dispatch: { defaultRoute: 'mock', maxChildren: 2, maxDepth: 1, maxConcurrency: 1 },
       policy: {
         delegate: ['documentation'],
         keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
       },
-      fallback: 'upstream',
     },
     createdAt,
     updatedAt: createdAt,

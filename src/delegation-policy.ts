@@ -5,6 +5,7 @@ import type {
   AssessedSubtask,
   DelegationPlan,
   OrchestrationRequest,
+  PlannedSubtask,
   RouteSelectionEvidence,
   TaskAssessment,
   TaskComplexity,
@@ -47,64 +48,59 @@ function boundedString(value: unknown, label: string, maximum: number): string {
   return result;
 }
 
-export function parseTaskAssessment(output: string): TaskAssessment {
-  if (output.length > 64 * 1024) throw new Error('Planner output must contain at most 65536 characters');
-  let value: unknown;
-  try {
-    value = JSON.parse(output.trim()) as unknown;
-  } catch (error) {
-    throw new Error('Planner output must be a valid JSON object', { cause: error });
-  }
-  assertRecord(value, 'Planner output');
+export function validateTaskAssessment(value: unknown): TaskAssessment {
+  const label = 'Controller assessment';
+  assertRecord(value, label);
   assertExactKeys(
     value,
     ['schemaVersion', 'recommendation', 'complexity', 'parallelizable', 'taskKinds', 'reasoning', 'subtasks'],
-    'Planner output'
+    label
   );
 
-  if (value.schemaVersion !== 1) throw new Error('Planner output schemaVersion must be 1');
+  if (value.schemaVersion !== 1) throw new Error(`${label} schemaVersion must be 1`);
   if (value.recommendation !== 'delegate' && value.recommendation !== 'do-not-delegate') {
-    throw new Error('Planner output recommendation must be "delegate" or "do-not-delegate"');
+    throw new Error(`${label} recommendation must be "delegate" or "do-not-delegate"`);
   }
 
   if (!['low', 'medium', 'high'].includes(value.complexity as string)) {
-    throw new Error('Planner output complexity must be "low", "medium", or "high"');
+    throw new Error(`${label} complexity must be "low", "medium", or "high"`);
   }
   if (typeof value.parallelizable !== 'boolean') {
-    throw new Error('Planner output parallelizable must be a boolean');
+    throw new Error(`${label} parallelizable must be a boolean`);
   }
-  const taskKinds = stringArray(value.taskKinds, 'Planner output taskKinds');
-  if (taskKinds.length > 20) throw new Error('Planner output taskKinds must contain at most 20 entries');
-  const reasoning = boundedString(value.reasoning, 'Planner output reasoning', 2_000);
-  if (!Array.isArray(value.subtasks)) throw new Error('Planner output subtasks must be an array');
-  if (value.subtasks.length > 20) throw new Error('Planner output subtasks must contain at most 20 entries');
+  const taskKinds = stringArray(value.taskKinds, `${label} taskKinds`);
+  if (taskKinds.length > 20) throw new Error(`${label} taskKinds must contain at most 20 entries`);
+  const reasoning = boundedString(value.reasoning, `${label} reasoning`, 2_000);
+  if (!Array.isArray(value.subtasks)) throw new Error(`${label} subtasks must be an array`);
+  if (value.subtasks.length > 20) throw new Error(`${label} subtasks must contain at most 20 entries`);
 
   const subtasks: AssessedSubtask[] = value.subtasks.map((item, index) => {
-    assertRecord(item, `Planner output subtasks[${index}]`);
-    assertExactKeys(item, ['title', 'kind', 'prompt', 'acceptanceCriteria'], `Planner output subtasks[${index}]`);
+    const subtaskLabel = `${label} subtasks[${index}]`;
+    assertRecord(item, subtaskLabel);
+    assertExactKeys(item, ['title', 'kind', 'prompt', 'acceptanceCriteria'], subtaskLabel);
     const acceptanceCriteria = stringArray(
       item.acceptanceCriteria,
-      `Planner output subtasks[${index}].acceptanceCriteria`
+      `${subtaskLabel}.acceptanceCriteria`
     );
     if (acceptanceCriteria.length === 0 || acceptanceCriteria.length > 20) {
-      throw new Error(`Planner output subtasks[${index}].acceptanceCriteria must contain 1-20 entries`);
+      throw new Error(`${subtaskLabel}.acceptanceCriteria must contain 1-20 entries`);
     }
     if (acceptanceCriteria.some((criterion) => criterion.length > 1_000)) {
-      throw new Error(`Planner output subtasks[${index}].acceptanceCriteria entries are too long`);
+      throw new Error(`${subtaskLabel}.acceptanceCriteria entries are too long`);
     }
     return {
-      title: boundedString(item.title, `Planner output subtasks[${index}].title`, 200),
-      kind: boundedString(item.kind, `Planner output subtasks[${index}].kind`, 100),
-      prompt: boundedString(item.prompt, `Planner output subtasks[${index}].prompt`, 8_000),
+      title: boundedString(item.title, `${subtaskLabel}.title`, 200),
+      kind: boundedString(item.kind, `${subtaskLabel}.kind`, 100),
+      prompt: boundedString(item.prompt, `${subtaskLabel}.prompt`, 8_000),
       acceptanceCriteria,
     };
   });
 
   if (value.recommendation === 'delegate' && subtasks.length === 0) {
-    throw new Error('Planner output recommendation "delegate" requires at least one subtask');
+    throw new Error(`${label} recommendation "delegate" requires at least one subtask`);
   }
   if (value.recommendation === 'do-not-delegate' && subtasks.length !== 0) {
-    throw new Error('Planner output recommendation "do-not-delegate" requires an empty subtasks array');
+    throw new Error(`${label} recommendation "do-not-delegate" requires an empty subtasks array`);
   }
 
   return {
@@ -115,46 +111,6 @@ export function parseTaskAssessment(output: string): TaskAssessment {
     taskKinds,
     reasoning,
     subtasks,
-  };
-}
-
-export function buildPlannerPrompt(request: OrchestrationRequest, config: DelegationConfig): string {
-  return [
-    'You are AgentKnot\'s read-only task classifier. Do not edit files, execute the requested work, or delegate.',
-    'Assess whether bounded independent subtasks can be sent to background coding workers.',
-    'Delegation and parallelism are separate decisions. A single bounded eligible task may be delegated as exactly one nonparallel subtask with "parallelizable":false; lack of a useful split alone must not cause a "do-not-delegate" recommendation.',
-    'A bounded task in a preferred delegatable kind that is expected to create or modify a repository file must receive a "delegate" recommendation even when it is small, low-complexity, or nonparallel; task size and generic handoff/review overhead alone are not reasons to retain deliverable-producing work upstream.',
-    'A concrete repository investigation that must search, compare, or interpret project content and return independently verifiable findings is a "repository-analysis" deliverable and must receive a "delegate" recommendation even when it is read-only, low-complexity, or nonparallel.',
-    'The request workspace is the authoritative primary target and the only repository a worker may modify. Never reinterpret another repository named in the task as the target; every other repository is a read-only reference. If the requested edit target conflicts with the request workspace, recommend "do-not-delegate" and report the workspace mismatch instead of dispatching work against either repository.',
-    'For every "repository-analysis" subtask, name the authoritative primary target workspace, any read-only referenced repository or "none", the exact files/components to inspect, and explicit non-goals. Request only decision-relevant deltas: at most five findings and 4000 characters, each backed by concise path/line evidence and impact. Do not request a repository inventory, exhaustive source summary, or restatement of inspected material unless the user explicitly asks for one.',
-    'Keep only genuinely trivial read-only inspection or direct-answer work upstream, such as retrieving one explicit fact from one already identified location; do not retain evidence-producing repository analysis merely because it creates no patch. If work stays upstream, state that boundary rather than citing the lack of a parallel split.',
-    'Optimize for useful parallelism, not the largest task count. Mark parallelizable true only when subtasks have no execution-order dependency and their expected write scopes do not overlap.',
-    'Each parallel subtask prompt must name its bounded file or component scope, explicit non-goals, and acceptance criteria. If work must share a contract or edit the same files, keep it in one subtask or mark the plan non-parallel.',
-    'Every delegated subtask object must contain the four separate keys "title", "kind", "prompt", and "acceptanceCriteria".',
-    'The "acceptanceCriteria" key must be a separate non-empty JSON string array; do not put acceptance criteria only in the "prompt" text.',
-    `Return at most ${config.dispatch.maxChildren} useful subtasks. Final product decisions, artifact integration, commits, and pushes must remain upstream.`,
-    `Preferred delegatable kinds: ${config.policy.delegate.join(', ')}.`,
-    `Kinds that must remain upstream: ${config.policy.keepUpstream.join(', ')}.`,
-    'Return the assessment object as JSON only with exactly this shape and no markdown fence. If a later transport instruction requires a marked completion-report suffix, put that suffix on the next line; it is the only permitted text outside the assessment object:',
-    '{"schemaVersion":1,"recommendation":"delegate|do-not-delegate","complexity":"low|medium|high","parallelizable":true|false,"taskKinds":["kind"],"reasoning":"short explanation","subtasks":[{"title":"short title","kind":"kind","prompt":"self-contained bounded instruction","acceptanceCriteria":["objective check"]}]}',
-    'Use an empty subtasks array only when the work must remain upstream, cannot be bounded for a worker, or is a genuinely trivial direct lookup of one explicit fact from one already identified location; never use it merely because the work is read-only, creates no patch, is small, or cannot be split. Do not wrap the assessment JSON in commentary.',
-    '',
-    `Authoritative primary target workspace: ${request.workspace}`,
-    '',
-    'Task:',
-    request.prompt,
-  ].join('\n');
-}
-
-export function skippedTaskAssessment(reasoning: string): TaskAssessment {
-  return {
-    schemaVersion: 1,
-    recommendation: 'do-not-delegate',
-    complexity: 'low',
-    parallelizable: false,
-    taskKinds: [],
-    reasoning,
-    subtasks: [],
   };
 }
 
@@ -171,8 +127,9 @@ function executionPrompt(request: OrchestrationRequest, subtask: AssessedSubtask
   return [
     'You are executing one bounded subtask selected by AgentKnot.',
     'Do not recursively delegate. Do not commit, push, merge, or apply artifacts to another workspace.',
-    `Authoritative primary target workspace (the only writable repository): ${request.workspace}`,
-    'Every other repository is a read-only reference. If the task requires modifying another repository, report the workspace mismatch and do not edit either repository.',
+    `Authoritative source repository and logical target: ${request.workspace}`,
+    'AgentKnot has placed you in an isolated execution worktree for that repository. The active worktree/current working directory is the only writable repository; do not access or modify the source checkout path directly.',
+    'Every other repository is a read-only reference. If the task requires modifying a different repository, report the workspace mismatch and do not edit either repository.',
     'Stay within the subtask\'s stated file/component scope. Report any necessary out-of-scope or overlapping change instead of silently broadening the edit.',
     '',
     'Parent task:',
@@ -215,11 +172,6 @@ function withPlanHash(plan: Omit<DelegationPlan, 'planHash'>): DelegationPlan {
     ...plan,
     planHash: createHash('sha256').update(JSON.stringify(plan)).digest('hex'),
   };
-}
-
-export function rehashDelegationPlan(plan: DelegationPlan): DelegationPlan {
-  const { planHash: _previousHash, ...unhashed } = plan;
-  return withPlanHash(unhashed);
 }
 
 function effectiveMode(request: OrchestrationRequest, config: DelegationConfig): DelegationMode {

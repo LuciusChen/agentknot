@@ -16,7 +16,11 @@ import type { AgentKnotHttpRuntime } from '../src/http-server.js';
 import { buildJobList, MAX_JOB_LIST_RESPONSE_BYTES } from '../src/job-list.js';
 import { OrchestrationService } from '../src/orchestration.js';
 import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
-import type { OrchestrationRecord } from '../src/orchestration-types.js';
+import type {
+  OrchestrationRecord,
+  OrchestrationRequest,
+  TaskAssessment,
+} from '../src/orchestration-types.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { AgentKnotRuntime } from '../src/runtime.js';
 import { MemoryJobStore } from '../src/store.js';
@@ -24,6 +28,16 @@ import type { JobRecord, WorkerAdapter } from '../src/types.js';
 
 const execFileAsync = promisify(execFile);
 const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
+
+const upstreamAssessment: TaskAssessment = {
+  schemaVersion: 1,
+  recommendation: 'do-not-delegate',
+  complexity: 'low',
+  parallelizable: false,
+  taskKinds: [],
+  reasoning: 'Keep this bounded controller task upstream.',
+  subtasks: [],
+};
 
 async function git(directory: string, ...args: string[]): Promise<string> {
   const result = await execFileAsync('git', args, { cwd: directory, encoding: 'utf8' });
@@ -181,6 +195,43 @@ test('HTTP client distinguishes disconnects and reconnects only to the same admi
     );
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('HTTP client forwards the typed orchestration request unchanged', async () => {
+  let received: unknown;
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    received = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+    response.writeHead(202, { 'content-type': 'application/json' });
+    response.end(`${JSON.stringify({ orchestration: { id: 'orchestration_client_test', status: 'succeeded' } })}\n`);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string');
+  const request: OrchestrationRequest = {
+    prompt: 'Typed client request.',
+    workspace: '/tmp/controller-workspace',
+    source: 'codex',
+    assessment: upstreamAssessment,
+    metadata: { boundary: 'controller' },
+    delegation: 'suggest',
+  };
+
+  try {
+    const admitted = await new AgentKnotHttpClient(
+      `http://127.0.0.1:${address.port}`
+    ).startOrchestration(request);
+    assert.equal(admitted.id, 'orchestration_client_test');
+    assert.deepEqual(received, request);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    );
   }
 });
 
@@ -479,7 +530,6 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
     routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
     delegation: {
       mode: 'off',
-      planner: { strategy: 'hybrid', route: 'mock' },
       dispatch: {
         defaultRoute: 'mock',
         maxChildren: 2,
@@ -491,7 +541,6 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
         },
       },
       policy: { delegate: ['documentation'], keepUpstream: ['commit', 'push'] },
-      fallback: 'upstream',
     },
   };
   const jobs = new Orchestrator({
@@ -520,12 +569,18 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
     const createdResponse = await fetch(`${baseUrl}/v1/orchestrations`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: 'Coordinate this task.', workspace, source: 'claude' }),
+      body: JSON.stringify({
+        prompt: 'Coordinate this task.',
+        workspace,
+        source: 'claude',
+        assessment: upstreamAssessment,
+      }),
     });
     assert.equal(createdResponse.status, 202);
     const created = (await createdResponse.json()) as { orchestration: OrchestrationRecord };
     const terminal = await new AgentKnotHttpClient(baseUrl).waitForOrchestration(created.orchestration);
     assert.equal(terminal.status, 'succeeded');
+    assert.deepEqual(terminal.request.assessment, upstreamAssessment);
     assert.equal(terminal.result?.action, 'upstream');
     assert.deepEqual(
       requestedPaths.filter(
@@ -550,6 +605,54 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
   }
 });
 
+test('HTTP orchestration admission rejects missing or route-bearing assessments before runtime admission', async () => {
+  let startCalls = 0;
+  const runtime: AgentKnotHttpRuntime = {
+    routes: () => [],
+    get: async () => undefined,
+    list: async () => [],
+    listArtifacts: async () => undefined,
+    verifyArtifacts: async () => undefined,
+    previewArtifact: async () => undefined,
+    start: async () => {
+      throw new Error('job admission must not be reached');
+    },
+    startOrchestration: async () => {
+      startCalls += 1;
+      throw new Error('orchestration admission must not be reached');
+    },
+  };
+  const http = createAgentKnotHttpServer(runtime);
+  const address = await http.listen(0);
+  const baseUrl = `http://${address.host}:${address.port}`;
+  const post = (body: unknown): Promise<Response> =>
+    fetch(`${baseUrl}/v1/orchestrations`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  try {
+    const missing = await post({ prompt: 'Missing assessment.', workspace: '/tmp/workspace' });
+    assert.equal(missing.status, 400);
+    assert.match(String((await missing.json() as { error: string }).error), /assessment is required/);
+
+    const routeBearing = await post({
+      prompt: 'Route-bearing assessment.',
+      workspace: '/tmp/workspace',
+      assessment: { ...upstreamAssessment, route: 'mock' },
+    });
+    assert.equal(routeBearing.status, 400);
+    assert.match(
+      String((await routeBearing.json() as { error: string }).error),
+      /Controller assessment must contain exactly/
+    );
+    assert.equal(startCalls, 0);
+  } finally {
+    await http.close();
+  }
+});
+
 test('two independent CLI processes share one orchestration runtime without local config access', async () => {
   const config: AgentKnotConfig = {
     version: 1,
@@ -559,10 +662,8 @@ test('two independent CLI processes share one orchestration runtime without loca
     routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
     delegation: {
       mode: 'off',
-      planner: { strategy: 'hybrid', route: 'mock' },
       dispatch: { defaultRoute: 'mock', maxChildren: 2, maxDepth: 1, maxConcurrency: 1 },
       policy: { delegate: ['documentation'], keepUpstream: ['commit', 'push'] },
-      fallback: 'upstream',
     },
   };
   const jobs = new Orchestrator({
@@ -592,6 +693,8 @@ test('two independent CLI processes share one orchestration runtime without loca
           source,
           '--workspace',
           workspace,
+          '--assessment-json',
+          JSON.stringify(upstreamAssessment),
           '--handoff-json',
           '--prompt',
           prompt,

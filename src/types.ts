@@ -37,6 +37,7 @@ export interface WorkerCompletionCheck {
 /** Worker claims are kept distinct from controller-captured artifact evidence. */
 export interface WorkerCompletionReport {
   schemaVersion: 1;
+  taskOutcome: 'completed' | 'blocked';
   changedFiles: string[];
   checksRun: WorkerCompletionCheck[];
   remainingRisks: string[];

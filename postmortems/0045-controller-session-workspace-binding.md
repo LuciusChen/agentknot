@@ -74,3 +74,7 @@ The `SessionEnd` deletion decision above is superseded by [decision 0047](./0047
 ### 2026-08-10 — the binding is a target, not a model hint
 
 Persisted evidence later showed the same cross-repository comparison prompt once admitted with `/home/lucius/coding-guidelines` as its workspace and later with `/home/lucius/repos/agentknot`; the planner prompt previously called this only an “execution workspace” and allowed another named repository to become an edit target. That exceeded the actual one-workspace isolation contract and left target/reference roles open to model reinterpretation. The admitted workspace is now explicitly the sole writable primary target in planner and worker prompts; all other repositories are read-only references, and conflicting edit intent is retained upstream as a visible workspace mismatch. This adds no path-role classifier, request field, schema, or multi-workspace execution.
+
+### 2026-08-11 — distinguish the logical source from the managed worktree
+
+A worker later refused valid delegated work because its prompt called the source checkout writable while execution was correctly isolated elsewhere. The execution prompt now calls `request.workspace` the authoritative logical target but states that the active managed worktree/current working directory is the only writable repository and the source path must not be accessed directly. Decision [0053](./0053-controller-owned-planning-handoff.md) also removes the middleware planner; session binding still identifies the target, while the upstream controller authors task semantics.

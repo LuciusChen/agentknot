@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { createAdapters } from '../src/adapters/index.js';
 import { parseConfig, resolveDelegationConfig, type AgentKnotConfig } from '../src/config.js';
+import type { TaskAssessment } from '../src/orchestration-types.js';
 import { OrchestrationService } from '../src/orchestration.js';
 import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
 import { Orchestrator } from '../src/orchestrator.js';
@@ -22,6 +23,16 @@ function modeOffConfig(): AgentKnotConfig {
     delegation: { mode: 'off' },
   });
 }
+
+const assessment: TaskAssessment = {
+  schemaVersion: 1,
+  recommendation: 'do-not-delegate',
+  complexity: 'low',
+  parallelizable: false,
+  taskKinds: [],
+  reasoning: 'Keep this bounded controller task upstream.',
+  subtasks: [],
+};
 
 function directRuntime(config: AgentKnotConfig): AgentKnotRuntime {
   const jobs = new Orchestrator({
@@ -68,7 +79,12 @@ test('AgentKnotRuntime and createRuntime expose compatible mode-off public behav
     assert.deepEqual(await created.list(), await constructed.list());
     assert.deepEqual(await created.listOrchestrations(), await constructed.listOrchestrations());
 
-    const request = { prompt: 'Use the upstream path.', workspace, source: 'test' };
+    const request = {
+      prompt: 'Use the upstream path.',
+      workspace,
+      source: 'test',
+      assessment,
+    };
     const constructedRecord = await constructed.orchestrate(request);
     const createdRecord = await created.orchestrate(request);
 
@@ -76,6 +92,7 @@ test('AgentKnotRuntime and createRuntime expose compatible mode-off public behav
       assert.equal(record.status, 'succeeded');
       assert.equal(record.request.workspace, workspace);
       assert.equal(record.request.source, 'test');
+      assert.deepEqual(record.request.assessment, assessment);
       assert.equal(record.plan?.mode, 'off');
       assert.equal(record.plan?.willDispatch, false);
       assert.equal(record.result?.action, 'upstream');

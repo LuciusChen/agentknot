@@ -381,6 +381,7 @@ test('PiRpcWorkerAdapter discovers and runs a bare command from worker PATH', as
 
 const fakeCompletionReport = {
   schemaVersion: 1 as const,
+  taskOutcome: 'completed' as const,
   changedFiles: ['worker-claimed.ts'],
   checksRun: [
     { command: 'npm test', outcome: 'passed' as const },
@@ -421,7 +422,7 @@ test('Pi normal runs append the report instruction after prompt-injection text',
     const sentPrompt = await readFile(promptFile, 'utf8');
     assert.ok(sentPrompt.startsWith(injectedPrompt));
     assert.ok(sentPrompt.endsWith(PI_WORKER_COMPLETION_REPORT_INSTRUCTION));
-    assert.match(sentPrompt, /changedFiles.*checksRun.*remainingRisks.*notes/);
+    assert.match(sentPrompt, /taskOutcome.*changedFiles.*checksRun.*remainingRisks.*notes/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -460,8 +461,14 @@ test('Pi normal runs validate and strip a valid completion envelope while preser
   }
 });
 
-test('Pi normal runs reject a missing report and do not infer one from prose', async () => {
-  for (const mode of ['missing', 'prose', 'trailing'] as const) {
+test('Pi normal runs reject missing, inferred, trailing, and blocked completion reports', async () => {
+  const cases = [
+    { mode: 'missing', error: /missing required completion report/ },
+    { mode: 'prose', error: /missing required completion report/ },
+    { mode: 'trailing', error: /missing required completion report/ },
+    { mode: 'blocked', error: /reported task blocked/ },
+  ] as const;
+  for (const { mode, error } of cases) {
     const directory = await mkdtemp(path.join(os.tmpdir(), `agentknot-pi-completion-${mode}-`));
     try {
       const adapter = new PiRpcWorkerAdapter('pi', {
@@ -486,7 +493,7 @@ test('Pi normal runs reject a missing report and do not infer one from prose', a
           },
           () => undefined
         ),
-        /missing required completion report/,
+        error,
         mode
       );
     } finally {

@@ -164,3 +164,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0050](./0050-context-dependent-continuation-handoff.md) | Incident / Decision | Resolved / Accepted | Recover bounded continuation tasks without reading controller transcripts |
 | [0051](./0051-evidence-producing-repository-analysis.md) | Incident / Decision | Resolved / Accepted | Delegate bounded evidence-producing repository analysis |
 | [0052](./0052-bounded-analysis-and-observable-waiting.md) | Incident / Decision | Resolved / Accepted | Bound repository analysis and make waiting observable |
+| [0053](./0053-controller-owned-planning-handoff.md) | Incident / Decision | Resolved / Accepted | Restore controller-owned planning and use a strict handoff |

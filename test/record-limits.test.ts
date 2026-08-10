@@ -8,6 +8,7 @@ import type { AgentKnotConfig } from '../src/config.js';
 import { OrchestrationService } from '../src/orchestration.js';
 import { FileOrchestrationStore, MemoryOrchestrationStore } from '../src/orchestration-store.js';
 import type { OrchestrationRecord } from '../src/orchestration-types.js';
+import type { TaskAssessment } from '../src/orchestration-types.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import {
   MAX_EVENT_DATA_BYTES,
@@ -40,11 +41,19 @@ const config: AgentKnotConfig = {
   routes: { test: { worker: 'test', provider: 'test', model: 'test' } },
   delegation: {
     mode: 'off',
-    planner: { strategy: 'hybrid', route: 'test' },
     dispatch: { defaultRoute: 'test', maxChildren: 2, maxDepth: 1, maxConcurrency: 1 },
     policy: { delegate: [], keepUpstream: [] },
-    fallback: 'upstream',
   },
+};
+
+const assessment: TaskAssessment = {
+  schemaVersion: 1,
+  recommendation: 'do-not-delegate',
+  complexity: 'low',
+  parallelizable: false,
+  taskKinds: ['documentation'],
+  reasoning: 'Controller-authored record-limit boundary fixture.',
+  subtasks: [],
 };
 
 class ScriptedAdapter implements WorkerAdapter {
@@ -118,12 +127,14 @@ test('Job and Orchestration admission enforce shared prompt, metadata size, and 
     /Job prompt is 65537 bytes; maximum is 65536 bytes/
   );
   await assert.rejects(
-    orchestrations.start({ prompt: tooLargePrompt, workspace: directory }),
+    orchestrations.start({ prompt: tooLargePrompt, workspace: directory, assessment }),
     /Orchestration prompt is 65537 bytes; maximum is 65536 bytes/
   );
   for (const metadata of [tooLargeMetadata, tooDeepMetadata]) {
     await assert.rejects(jobs.start({ prompt: 'bounded', workspace: directory, metadata }));
-    await assert.rejects(orchestrations.start({ prompt: 'bounded', workspace: directory, metadata }));
+    await assert.rejects(
+      orchestrations.start({ prompt: 'bounded', workspace: directory, assessment, metadata })
+    );
   }
   assert.deepEqual(await jobs.list(), []);
   assert.deepEqual(await orchestrations.list(), []);
@@ -232,6 +243,7 @@ test('oversized structured worker reports are rejected without retaining them in
     output: 'ok',
     completionReport: {
       schemaVersion: 1,
+      taskOutcome: 'completed',
       changedFiles: [],
       checksRun: [],
       remainingRisks: [],
@@ -272,7 +284,7 @@ test('memory and file stores reject oversized Job and Orchestration snapshots be
     id: 'orchestration_oversized',
     schemaVersion: 1,
     status: 'queued',
-    request: { prompt: 'test', workspace: directory, metadata: { oversized } },
+    request: { prompt: 'test', workspace: directory, assessment, metadata: { oversized } },
     policy: config.delegation!,
     createdAt: now,
     updatedAt: now,
@@ -320,7 +332,7 @@ test('memory and file stores reject oversized Job and Orchestration snapshots be
   const admittedOrchestration: OrchestrationRecord = {
     ...orchestration,
     id: 'orchestration_save_boundary',
-    request: { prompt: 'last good Orchestration', workspace: directory },
+    request: { prompt: 'last good Orchestration', workspace: directory, assessment },
   };
   const rejectedOrchestration: OrchestrationRecord = {
     ...admittedOrchestration,

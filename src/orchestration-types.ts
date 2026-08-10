@@ -10,14 +10,14 @@ import type {
 
 export const ORCHESTRATION_STATUSES = [
   'queued',
-  'planning',
   'dispatching',
   'succeeded',
   'failed',
   'cancelled',
 ] as const;
 
-export type OrchestrationStatus = (typeof ORCHESTRATION_STATUSES)[number];
+/** Historical snapshots may still contain the pre-handoff planning status. */
+export type OrchestrationStatus = (typeof ORCHESTRATION_STATUSES)[number] | 'planning';
 
 export const ORCHESTRATION_DELEGATION_OVERRIDES = ['inherit', 'never', 'suggest', 'force'] as const;
 
@@ -26,6 +26,8 @@ export type OrchestrationDelegationOverride = (typeof ORCHESTRATION_DELEGATION_O
 export interface OrchestrationRequest {
   prompt: string;
   workspace: string;
+  /** Authored by the upstream controller and strictly validated before admission. */
+  assessment: TaskAssessment;
   source?: string;
   metadata?: Record<string, unknown>;
   /** May narrow automatic behavior. `force` never bypasses global off mode or keep-upstream policy. */
@@ -88,11 +90,6 @@ export interface PlannedSubtask extends AssessedSubtask {
 export type AgentKnotDelegationMetadata =
   | {
       orchestrationId: string;
-      role: 'planner';
-      depth: 0;
-    }
-  | {
-      orchestrationId: string;
       role: 'worker';
       subtaskId: string;
       depth: 1;
@@ -121,19 +118,11 @@ export interface DelegationPlan {
   reasoning: string;
   assessment: TaskAssessment;
   subtasks: PlannedSubtask[];
-  plannerError?: {
-    name: string;
-    message: string;
-    jobId?: string;
-  };
 }
 
 export const ORCHESTRATION_EVENT_TYPES = [
   'orchestration.queued',
-  'orchestration.planning',
-  'orchestration.planner.started',
-  'orchestration.planner.completed',
-  'orchestration.planned',
+  'orchestration.handoff.accepted',
   'orchestration.dispatching',
   'orchestration.child.started',
   'orchestration.child.completed',
@@ -360,7 +349,7 @@ export interface OrchestrationRecord {
   schemaVersion: 1;
   status: OrchestrationStatus;
   request: OrchestrationRequest;
-  /** Immutable effective policy captured before planning begins. */
+  /** Immutable effective policy captured before handoff composition and child dispatch. */
   policy: DelegationConfig;
   createdAt: string;
   updatedAt: string;
@@ -369,7 +358,6 @@ export interface OrchestrationRecord {
   cancelRequestedAt?: string;
   execution: JobExecution;
   events: OrchestrationEvent[];
-  plannerJobId?: string;
   plan?: DelegationPlan;
   children: OrchestrationChild[];
   /** Optional advisory evidence from one separately configured depth-one reviewer Job. */

@@ -10,12 +10,22 @@ import { promisify } from 'node:util';
 
 import { FileOrchestrationStore } from '../src/orchestration-store.js';
 import type { OrchestrationRecord, OrchestrationStatus } from '../src/orchestration-types.js';
+import type { TaskAssessment } from '../src/orchestration-types.js';
 import { FileJobStore } from '../src/store.js';
 import type { JobRecord, ThinkingLevel } from '../src/types.js';
 
 const execFileAsync = promisify(execFile);
 const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const probeFixture = path.resolve('test/fixtures/fake-pi-diagnostics.mjs');
+const upstreamAssessmentJson = JSON.stringify({
+  schemaVersion: 1,
+  recommendation: 'do-not-delegate',
+  complexity: 'low',
+  parallelizable: false,
+  taskKinds: [],
+  reasoning: 'Controller keeps this transport fixture upstream.',
+  subtasks: [],
+});
 
 interface CliResult {
   code: number;
@@ -151,20 +161,27 @@ function staleOrchestration(
   pid: number
 ): OrchestrationRecord {
   const createdAt = '2026-08-08T01:00:00.000Z';
+  const assessment: TaskAssessment = {
+    schemaVersion: 1,
+    recommendation: 'do-not-delegate',
+    complexity: 'low',
+    parallelizable: false,
+    taskKinds: ['documentation'],
+    reasoning: 'Controller-authored stale-orchestration fixture assessment.',
+    subtasks: [],
+  };
   return {
     id,
     schemaVersion: 1,
     status: 'dispatching' as Extract<OrchestrationStatus, 'dispatching'>,
-    request: { prompt: 'stale orchestration', workspace, source: 'test' },
+    request: { prompt: 'stale orchestration', workspace, assessment, source: 'test' },
     policy: {
       mode: 'off',
-      planner: { strategy: 'hybrid', route: route.name },
       dispatch: { defaultRoute: route.name, maxChildren: 2, maxDepth: 1, maxConcurrency: 1 },
       policy: {
         delegate: ['documentation'],
         keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
       },
-      fallback: 'upstream',
     },
     createdAt,
     updatedAt: createdAt,
@@ -349,7 +366,14 @@ test('execution-owning CLI commands keep startup reconciliation enabled', async 
     },
     {
       name: 'orchestrate',
-      args: ['orchestrate', '--prompt', 'keep this goal upstream', '--workspace'],
+      args: [
+        'orchestrate',
+        '--prompt',
+        'keep this goal upstream',
+        '--assessment-json',
+        upstreamAssessmentJson,
+        '--workspace',
+      ],
     },
   ];
 

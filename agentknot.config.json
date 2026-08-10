@@ -150,10 +150,6 @@
   },
   "delegation": {
     "mode": "auto",
-    "planner": {
-      "strategy": "hybrid",
-      "route": "advanced-workers"
-    },
     "dispatch": {
       "defaultRoute": "advanced-workers",
       "maxChildren": 6,
@@ -200,7 +196,6 @@
       ],
       "timeoutMs": 300000,
       "maxOutputBytes": 65536
-    },
-    "fallback": "upstream"
+    }
   }
 }

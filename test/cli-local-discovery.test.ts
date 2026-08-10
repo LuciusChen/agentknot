@@ -13,6 +13,15 @@ import { readLocalDiscovery, type LocalDiscoveryEnvironment } from '../src/local
 
 const execFileAsync = promisify(execFile);
 const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
+const upstreamAssessmentJson = JSON.stringify({
+  schemaVersion: 1,
+  recommendation: 'do-not-delegate',
+  complexity: 'low',
+  parallelizable: false,
+  taskKinds: [],
+  reasoning: 'Controller keeps this transport fixture upstream.',
+  subtasks: [],
+});
 
 interface Fixture {
   root: string;
@@ -217,6 +226,8 @@ test('two selector-free CLI processes discover and share one registered server',
         fixture.workspace,
         '--delegation',
         'never',
+        '--assessment-json',
+        upstreamAssessmentJson,
         '--handoff-json',
         '--prompt',
         prompt,

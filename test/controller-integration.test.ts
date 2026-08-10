@@ -1,14 +1,12 @@
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
 import test from 'node:test';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const execFileAsync = promisify(execFile);
 
 const integrations = [
   {
@@ -17,7 +15,6 @@ const integrations = [
     marketplace: '.agents/plugins/marketplace.json',
     marketplaceSource: './integrations/codex/agentknot',
     skill: 'integrations/codex/agentknot/skills/agentknot-delegate/SKILL.md',
-    agentMetadata: 'integrations/codex/agentknot/skills/agentknot-delegate/agents/openai.yaml',
     hook: 'integrations/codex/agentknot/hooks/hooks.json',
     hookScript: 'integrations/codex/agentknot/hooks/user-prompt-submit.mjs',
     explicitInvocation: '$agentknot-delegate',
@@ -28,32 +25,35 @@ const integrations = [
     marketplace: '.claude-plugin/marketplace.json',
     marketplaceSource: './integrations/claude/agentknot',
     skill: 'integrations/claude/agentknot/skills/agentknot-delegate/SKILL.md',
-    agentMetadata: undefined,
     hook: 'integrations/claude/agentknot/hooks/hooks.json',
     hookScript: 'integrations/claude/agentknot/hooks/user-prompt-submit.mjs',
     explicitInvocation: '/agentknot:agentknot-delegate',
   },
 ] as const;
 
-function parseSkill(source: string): { metadata: Record<string, string>; body: string } {
+interface ParsedSkill {
+  metadata: Record<string, string>;
+  body: string;
+}
+
+interface FakeCall {
+  args: string[];
+  cwd: string;
+}
+
+function parseSkill(source: string): ParsedSkill {
   const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(source);
   if (match === null || match[1] === undefined || match[2] === undefined) {
     throw new Error('skill must contain YAML frontmatter');
   }
-  const frontmatter = match[1];
   const metadata = Object.fromEntries(
-    frontmatter.split('\n').map((line) => {
+    match[1].split('\n').map((line) => {
       const separator = line.indexOf(':');
       assert.ok(separator > 0, 'frontmatter entries must contain a key and value');
       return [line.slice(0, separator).trim(), line.slice(separator + 1).trim()];
     })
   );
   return { metadata, body: match[2] };
-}
-
-function requireString(value: string | undefined, label: string): string {
-  if (value === undefined || value.length === 0) throw new Error(`${label} must be a non-empty string`);
-  return value;
 }
 
 function normalizeControllerDifferences(value: string): string {
@@ -69,17 +69,18 @@ async function runHook(
   controller: string,
   environment: NodeJS.ProcessEnv,
   payload: object,
-  explicitInvocation: string | null = integrations.find((integration) => integration.controller === controller)?.explicitInvocation ??
-    '/agentknot:delegate'
+  explicitInvocation: string | null = integrations.find(
+    (integration) => integration.controller === controller
+  )?.explicitInvocation ?? '/agentknot:delegate'
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
       [hookPath, controller, ...(explicitInvocation === null ? [] : [explicitInvocation])],
       {
-      cwd: repositoryRoot,
-      env: environment,
-      stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: repositoryRoot,
+        env: environment,
+        stdio: ['pipe', 'pipe', 'pipe'],
       }
     );
     let stdout = '';
@@ -105,30 +106,81 @@ async function writeFakeAgentKnot(directory: string): Promise<string> {
     `#!${process.execPath}\n` +
       `import { appendFileSync } from 'node:fs';\n` +
       `const args = process.argv.slice(2);\n` +
-      `appendFileSync(process.env.FAKE_AGENTKNOT_CALLS, JSON.stringify(args) + '\\n');\n` +
+      `appendFileSync(process.env.FAKE_AGENTKNOT_CALLS, JSON.stringify({ args, cwd: process.cwd() }) + '\\n');\n` +
       `if (args[0] === 'client') {\n` +
       `  process.stdout.write(process.env.FAKE_AGENTKNOT_CLIENT ?? '{"status":"unconfigured"}');\n` +
       `  if (process.env.FAKE_AGENTKNOT_CLIENT_EXIT === '1') process.exitCode = 1;\n` +
-      `} else if (args[0] === 'delegation') process.stdout.write('{"mode":"auto"}');\n` +
-      `else if (args[0] === 'orchestrate') {\n` +
-      `  process.stdout.write(process.env.FAKE_AGENTKNOT_HANDOFF);\n` +
-      `  if (process.env.FAKE_AGENTKNOT_HANDOFF_EXIT === '1') process.exitCode = 1;\n` +
-      `}\n` +
-      `else if (args[0] === 'artifact-preview') process.stdout.write(process.env.FAKE_AGENTKNOT_PREVIEW);\n` +
-      `else process.exitCode = 1;\n`
+      `} else if (args[0] === 'delegation') {\n` +
+      `  process.stdout.write(process.env.FAKE_AGENTKNOT_POLICY ?? '{"mode":"auto"}');\n` +
+      `  if (process.env.FAKE_AGENTKNOT_POLICY_EXIT === '1') process.exitCode = 1;\n` +
+      `} else {\n` +
+      `  process.stderr.write('forbidden AgentKnot command: ' + args[0] + '\\n');\n` +
+      `  process.exitCode = 42;\n` +
+      `}\n`
   );
   await chmod(executable, 0o755);
+  await writeFile(callsFile, '');
   return callsFile;
 }
 
-test('Codex and Claude plugins expose the same bounded AgentKnot delegation contract', async () => {
+async function readCalls(callsFile: string): Promise<FakeCall[]> {
+  const source = await readFile(callsFile, 'utf8');
+  if (source.trim() === '') return [];
+  return source
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as FakeCall);
+}
+
+function hookEnvironment(directory: string, callsFile: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    PATH: `${directory}:${process.env.PATH ?? ''}`,
+    XDG_RUNTIME_DIR: path.join(directory, 'runtime'),
+    AGENTKNOT_CONFIG: undefined,
+    AGENTKNOT_SERVER_URL: 'http://127.0.0.1:17394',
+    FAKE_AGENTKNOT_CALLS: callsFile,
+    FAKE_AGENTKNOT_POLICY: JSON.stringify({ mode: 'auto' }),
+  };
+}
+
+function parseHookContext(output: string): string {
+  const result = JSON.parse(output) as {
+    hookSpecificOutput?: { hookEventName?: string; additionalContext?: string };
+  };
+  assert.equal(result.hookSpecificOutput?.hookEventName, 'UserPromptSubmit');
+  assert.equal(typeof result.hookSpecificOutput?.additionalContext, 'string');
+  return result.hookSpecificOutput?.additionalContext ?? '';
+}
+
+function assertObligation(output: string): string {
+  const context = parseHookContext(output);
+  assert.match(context, /^AGENTKNOT_HANDOFF_OBLIGATION_V1\n/);
+  assert.match(context, /upstream controller owns intent, planning, and decomposition/);
+  assert.match(context, /informational, product, integration, commit, push, merge, and deploy/);
+  assert.match(context, /strict schemaVersion 1 TaskAssessment/);
+  assert.match(context, /recommendation, complexity, parallelizable, taskKinds, reasoning/);
+  assert.match(context, /title, kind, prompt, and acceptanceCriteria/);
+  assert.match(context, /normal agentknot-delegate Skill\/CLI/);
+  assert.match(context, /only validates, routes, schedules, and verifies/);
+  assert.match(context, /Do not choose a route or model locally/);
+  return context;
+}
+
+function assertNoPromptOrLegacyCalls(calls: FakeCall[], prompt: string): void {
+  assert.equal(calls.some((call) => call.args.includes(prompt)), false);
+  assert.equal(calls.some((call) => call.args[0] === 'orchestrate'), false);
+  assert.equal(calls.some((call) => call.args[0] === 'artifact-preview'), false);
+}
+
+test('Codex and Claude packages preserve parity and expose the controller-authored handoff contract', async () => {
   const packageManifest = JSON.parse(
     await readFile(path.join(repositoryRoot, 'package.json'), 'utf8')
   ) as Record<string, unknown>;
   assert.deepEqual(packageManifest.bin, { agentknot: './dist/src/cli.js' });
 
-  const skills: Array<{ description: string; body: string; hook: unknown; hookScript: string }> = [];
-
+  const skills: Array<{ description: string; body: string }> = [];
+  const hooks: string[] = [];
   for (const integration of integrations) {
     const marketplace = JSON.parse(
       await readFile(path.join(repositoryRoot, integration.marketplace), 'utf8')
@@ -154,108 +206,73 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     assert.equal('hooks' in manifest, false);
     assert.equal('mcpServers' in manifest, false);
     if (integration.controller === 'codex') assert.equal(manifest.skills, './skills/');
-    else assert.equal('skills' in manifest, false, 'Claude uses documented skill auto-discovery');
+    else assert.equal('skills' in manifest, false);
 
     const { metadata, body } = parseSkill(
       await readFile(path.join(repositoryRoot, integration.skill), 'utf8')
     );
     assert.equal(metadata.name, 'agentknot-delegate');
-    const description = requireString(metadata.description, `${integration.controller} skill description`);
-    assert.match(description, /explicit/);
+    const description = metadata.description;
+    assert.ok(description !== undefined);
     assert.match(description, /Use whenever a repository task/);
-    assert.match(description, /requires more than one direct upstream read or action/);
-    assert.match(description, /including one substantive nonparallel task/);
+    assert.match(description, /strict TaskAssessment/);
     assert.match(body, new RegExp(integration.explicitInvocation.replace('$', '\\$')));
-    assert.match(body, /requires more than one direct upstream read or action/);
-    assert.match(body, /including one substantive task with no useful parallel split/);
-    assert.match(body, /trivial one-read check upstream/);
-    assert.match(body, new RegExp(`--source ${integration.controller}`));
-    assert.match(body, /command -v agentknot/);
-    assert.match(body, /AGENTKNOT_SERVER_URL/);
-    assert.match(body, /shared AgentKnot execution owner/);
-    assert.match(body, /do not launch another local runtime/);
-    assert.match(body, /In one shell call/);
-    assert.match(body, /stop before orchestration/);
-    assert.match(body, /installed and available on PATH/);
-    assert.match(body, /do not substitute another command, worker, provider, or model/);
-    assert.match(body, /agentknot orchestrate/);
-    assert.match(body, /--handoff-json/);
+    assert.match(body, /Construct `TASK`/);
+    assert.match(body, /Construct `ASSESSMENT`/);
+    for (const field of [
+      'schemaVersion',
+      'recommendation',
+      'complexity',
+      'parallelizable',
+      'taskKinds',
+      'reasoning',
+      'subtasks',
+      'title',
+      'kind',
+      'prompt',
+      'acceptanceCriteria',
+    ]) {
+      assert.match(body, new RegExp(`"${field}"`));
+    }
+    assert.match(body, /--source (?:codex|claude)/);
     assert.match(body, /--workspace[\s\S]*git rev-parse --show-toplevel/);
+    assert.match(body, /--delegation force/);
+    assert.match(body, /--assessment-json "\$ASSESSMENT"/);
+    assert.match(body, /--handoff-json/);
+    assert.match(body, /--prompt "\$TASK"/);
     assert.match(body, /compact terminal JSON handoff/);
+    assert.match(body, /result\.artifactReview/);
     assert.match(body, /controller-owned `artifactValidation`/);
-    assert.match(body, /not the later integrated workspace/);
-    assert.match(body, /do not poll processes, relist full records, or repeat artifact verification/);
-    assert.match(body, /Do not independently repeat the delegated repository work/);
     assert.match(body, /artifact-preview/);
+    assert.match(body, /Never apply a patch automatically/);
+    assert.match(body, /informational chat/);
+    for (const upstream of ['product decisions', 'artifact integration', 'commit', 'push', 'merge', 'deployment']) {
+      assert.match(body, new RegExp(upstream));
+    }
+    assert.doesNotMatch(body, /--progress/);
     assert.doesNotMatch(body, /agentknot artifacts/);
     assert.doesNotMatch(body, /agentknot artifact-verify/);
+    skills.push({ description, body });
 
-    const contract = `${description}\n${body}`.toLowerCase();
-    for (const eligible of ['implementation', 'test', 'analysis', 'repair', 'documentation']) {
-      assert.match(contract, new RegExp(eligible));
-    }
-    for (const upstream of ['informational chat', 'product decisions', 'artifact integration', 'commit', 'push', 'merge', 'deployment']) {
-      assert.match(contract, new RegExp(upstream));
-    }
-    assert.match(contract, /never apply a patch automatically/);
-    assert.doesNotMatch(body, /git\s+(?:apply|am|commit|push|merge)\b/);
+    const hook = await readFile(path.join(repositoryRoot, integration.hookScript), 'utf8');
+    assert.match(hook, /delegation', '--json'/);
+    assert.match(hook, /AGENTKNOT_HANDOFF_OBLIGATION_V1/);
+    assert.doesNotMatch(hook, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
+    assert.doesNotMatch(hook, /artifact-preview/);
+    assert.doesNotMatch(hook, /--progress/);
+    assert.doesNotMatch(hook, /forwardStderr/);
+    assert.doesNotMatch(hook, /decision: 'block'/);
+    assert.doesNotMatch(hook, /\['orchestrate'/);
+    hooks.push(hook);
 
-    const hook = JSON.parse(await readFile(path.join(repositoryRoot, integration.hook), 'utf8')) as {
-      hooks?: {
-        PostToolUse?: Array<{ hooks?: Array<Record<string, unknown>> }>;
-        UserPromptSubmit?: Array<{ hooks?: Array<Record<string, unknown>> }>;
-        SessionEnd?: Array<{ hooks?: Array<Record<string, unknown>> }>;
-      };
-    };
-    assert.deepEqual(hook.hooks?.PostToolUse, [
-      {
-        hooks: [
-          {
-            type: 'command',
-            command: `node "\${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs" ${integration.controller} '${integration.explicitInvocation}'`,
-            timeout: 3,
-          },
-        ],
-      },
-    ]);
-    const handlers = hook.hooks?.UserPromptSubmit;
-    assert.equal(handlers?.length, 1);
-    assert.equal(handlers?.[0]?.hooks?.length, 1);
-    assert.deepEqual(handlers?.[0]?.hooks?.[0], {
-      type: 'command',
-      command: `node "\${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs" ${integration.controller} '${integration.explicitInvocation}'`,
-      timeout: 3660,
-      statusMessage: 'AgentKnot is planning, running workers, and verifying; expand for live progress',
-      additionalContextLimit: 18000,
-    });
-    assert.deepEqual(hook.hooks?.SessionEnd, [
-      {
-        hooks: [
-          {
-            type: 'command',
-            command: `node "\${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs" ${integration.controller} '${integration.explicitInvocation}'`,
-            timeout: integration.controller === 'codex' ? 3 : 5,
-          },
-        ],
-      },
-    ]);
-    const hookScript = await readFile(path.join(repositoryRoot, integration.hookScript), 'utf8');
-    assert.match(hookScript, /process\.stdin/);
-    assert.match(hookScript, /policy\.mode !== 'auto'/);
-    assert.match(hookScript, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
-    assert.match(hookScript, /artifact-preview/);
-    assert.match(hookScript, /AGENTKNOT_SERVER_URL/);
-    assert.match(hookScript, /'--server'/);
-    assert.match(hookScript, /'--progress'/);
-    assert.match(hookScript, /forwardStderr: true/);
-    assert.match(hookScript, /'inherit'/);
-    assert.doesNotMatch(hookScript, /git\s+(?:apply|am|commit|push|merge)\b/);
-    if (integration.agentMetadata !== undefined) {
-      const agentMetadata = await readFile(path.join(repositoryRoot, integration.agentMetadata), 'utf8');
-      assert.match(agentMetadata, /allow_implicit_invocation: false/);
-      assert.match(agentMetadata, /display_name: "AgentKnot Delegate"/);
-    }
-    skills.push({ description, body, hook, hookScript });
+    const hookManifest = JSON.parse(
+      await readFile(path.join(repositoryRoot, integration.hook), 'utf8')
+    ) as { hooks?: { UserPromptSubmit?: Array<{ hooks?: Array<Record<string, unknown>> }> } };
+    assert.equal(hookManifest.hooks?.UserPromptSubmit?.length, 1);
+    const promptHook = hookManifest.hooks?.UserPromptSubmit?.[0]?.hooks?.[0];
+    assert.equal(promptHook?.timeout, 10);
+    assert.equal(promptHook?.statusMessage, 'AgentKnot is checking workspace delegation policy');
+    assert.doesNotMatch(String(promptHook?.statusMessage), /planning|worker|verif/i);
   }
 
   assert.equal(
@@ -266,275 +283,214 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     normalizeControllerDifferences(skills[0]?.body ?? ''),
     normalizeControllerDifferences(skills[1]?.body ?? '')
   );
-  assert.equal(skills[0]?.hookScript, skills[1]?.hookScript);
-});
+  assert.equal(hooks[0], hooks[1]);
 
-test('repository dogfood roles use replaceable worker pools and read-only reviewer profiles', async () => {
-  const config = JSON.parse(
-    await readFile(path.join(repositoryRoot, 'agentknot.config.json'), 'utf8')
-  ) as {
-    workers: Record<
-      string,
-      { commandArgs?: string[]; environment?: Record<string, string>; unsetEnvironment?: string[] }
-    >;
-    routes: Record<string, { worker?: string }>;
-    routePools: Record<string, { routes: string[] }>;
-    delegation: {
-      planner: { route: string };
-      dispatch: { defaultRoute: string; routeSelection?: { rules: Array<{ route: string }> } };
-      policy: { delegate: string[] };
-      qualityReview?: { route?: string };
-    };
-  };
-  assert.equal(config.delegation.planner.route, 'advanced-workers');
-  assert.equal(config.delegation.dispatch.defaultRoute, 'advanced-workers');
-  assert.equal(config.delegation.dispatch.routeSelection?.rules[0]?.route, 'routine-workers');
-  assert.ok(config.delegation.policy.delegate.includes('repository-analysis'));
-  assert.equal(config.delegation.qualityReview?.route, 'review-workers');
-
-  for (const poolName of ['advanced-workers', 'routine-workers', 'review-workers']) {
-    const members = config.routePools[poolName]?.routes ?? [];
-    assert.ok(members.length >= 2);
-    assert.ok(new Set(members.map((route) => config.routes[route]?.worker)).size >= 2);
-  }
-
-  assert.deepEqual(config.workers['repository-review']?.commandArgs, [
-    '--no-skills',
-    '--tools',
-    'read,grep,find,ls',
-  ]);
-  assert.deepEqual(config.workers['opencode-readonly']?.commandArgs, ['--agent', 'plan']);
-  const continueAfterDeniedTool = {
-    OPENCODE_CONFIG_CONTENT: '{"experimental":{"continue_loop_on_deny":true}}',
-  };
-  assert.deepEqual(config.workers.opencode?.environment, continueAfterDeniedTool);
-  assert.deepEqual(config.workers['opencode-readonly']?.environment, continueAfterDeniedTool);
-  assert.deepEqual(config.workers['opencode-readonly']?.unsetEnvironment, ['OPENCODE_API_KEY']);
-});
-
-test('controller hook accepts an adapter-provided source namespace without core controller branches', async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-neutral-hook-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const callsFile = await writeFakeAgentKnot(directory);
-  const environment = {
-    ...process.env,
-    PATH: `${directory}:${process.env.PATH ?? ''}`,
-    XDG_RUNTIME_DIR: path.join(directory, 'runtime'),
-    AGENTKNOT_CONFIG: undefined,
-    AGENTKNOT_SERVER_URL: 'http://127.0.0.1:17394',
-    FAKE_AGENTKNOT_CALLS: callsFile,
-    FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
-      plan: { willDispatch: false, reasoning: 'Keep this prompt upstream.' },
-      children: [],
-      artifacts: [],
-    }),
-  };
-  const source = 'custom-controller';
-  const explicitInvocation = '/custom:delegate';
-
-  assert.match(
-    await runHook(
-      path.join(repositoryRoot, integrations[0].hookScript),
-      source,
-      environment,
-      {
-        hook_event_name: 'UserPromptSubmit',
-        session_id: 'custom-session',
-        cwd: repositoryRoot,
-        prompt: 'Perform one bounded repository task.',
-      },
-      explicitInvocation
-    ),
-    /kept it upstream/
+  const agentMetadata = await readFile(
+    path.join(repositoryRoot, 'integrations/codex/agentknot/skills/agentknot-delegate/agents/openai.yaml'),
+    'utf8'
   );
-  const calls = (await readFile(callsFile, 'utf8'))
-    .trim()
-    .split('\n')
-    .map((line) => JSON.parse(line) as string[]);
-  const orchestrate = calls.find((call) => call[0] === 'orchestrate');
-  assert.ok(orchestrate);
-  assert.equal(orchestrate[orchestrate.indexOf('--source') + 1], source);
-});
-
-test('controller hook follows the latest structured tool workspace across repositories', async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-tool-workspace-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const callsFile = await writeFakeAgentKnot(directory);
-  const runtimeDirectory = path.join(directory, 'runtime');
-  const firstWorkspace = path.join(directory, 'first');
-  const secondWorkspace = path.join(directory, 'second');
-  await Promise.all([
-    mkdir(runtimeDirectory, { mode: 0o700 }),
-    mkdir(firstWorkspace),
-    mkdir(secondWorkspace),
-  ]);
-  await Promise.all([
-    execFileAsync('git', ['init', '--quiet'], { cwd: firstWorkspace }),
-    execFileAsync('git', ['init', '--quiet'], { cwd: secondWorkspace }),
-  ]);
-  const environment = {
-    ...process.env,
-    PATH: `${directory}:${process.env.PATH ?? ''}`,
-    XDG_RUNTIME_DIR: runtimeDirectory,
-    AGENTKNOT_CONFIG: undefined,
-    AGENTKNOT_SERVER_URL: 'http://127.0.0.1:17394',
-    FAKE_AGENTKNOT_CALLS: callsFile,
-    FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
-      plan: { willDispatch: false, reasoning: 'Keep this prompt upstream.' },
-      children: [],
-      artifacts: [],
-    }),
-  };
-  const hookPath = path.join(repositoryRoot, integrations[0].hookScript);
-  const source = 'custom-controller';
-  const explicitInvocation = '/custom:delegate';
-  const sessionId = 'custom-tool-workspace-session';
-
-  assert.equal(
-    await runHook(
-      hookPath,
-      source,
-      environment,
-      {
-        hook_event_name: 'PostToolUse',
-        session_id: sessionId,
-        cwd: directory,
-        tool_input: { arguments: { workdir: pathToFileURL(firstWorkspace).href } },
-      },
-      explicitInvocation
-    ),
-    ''
-  );
-  assert.match(
-    await runHook(
-      hookPath,
-      source,
-      environment,
-      {
-        hook_event_name: 'UserPromptSubmit',
-        session_id: sessionId,
-        cwd: directory,
-        prompt: 'Continue in the current repository.',
-      },
-      explicitInvocation
-    ),
-    /kept it upstream/
-  );
-
-  assert.equal(
-    await runHook(
-      hookPath,
-      source,
-      environment,
-      {
-        hook_event_name: 'PostToolUse',
-        session_id: sessionId,
-        cwd: directory,
-        tool_input: { workspace: secondWorkspace },
-      },
-      explicitInvocation
-    ),
-    ''
-  );
-  assert.equal(
-    await runHook(
-      hookPath,
-      source,
-      environment,
-      {
-        hook_event_name: 'PostToolUse',
-        session_id: sessionId,
-        cwd: directory,
-        tool_input: { command: `cd ${firstWorkspace}` },
-      },
-      explicitInvocation
-    ),
-    ''
-  );
-  assert.match(
-    await runHook(
-      hookPath,
-      source,
-      environment,
-      {
-        hook_event_name: 'UserPromptSubmit',
-        session_id: sessionId,
-        cwd: directory,
-        prompt: 'Continue after switching repositories.',
-      },
-      explicitInvocation
-    ),
-    /kept it upstream/
-  );
-
-  const calls = (await readFile(callsFile, 'utf8'))
-    .trim()
-    .split('\n')
-    .map((line) => JSON.parse(line) as string[]);
-  const orchestrations = calls.filter((call) => call[0] === 'orchestrate');
-  assert.equal(orchestrations.length, 2);
-  const firstOrchestration = orchestrations[0];
-  const secondOrchestration = orchestrations[1];
-  assert.ok(firstOrchestration);
-  assert.ok(secondOrchestration);
-  assert.equal(firstOrchestration[firstOrchestration.indexOf('--workspace') + 1], firstWorkspace);
-  assert.equal(secondOrchestration[secondOrchestration.indexOf('--workspace') + 1], secondWorkspace);
+  assert.match(agentMetadata, /allow_implicit_invocation: true/);
+  assert.doesNotMatch(agentMetadata, /allow_implicit_invocation: false/);
 });
 
 for (const integration of integrations) {
-  test(`${integration.controller} hook binds one explicitly named repository to its controller session`, async (t) => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-session-workspace-'));
+  test(`${integration.controller} hook injects one nonblocking obligation without executing a task`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-obligation-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const environment = hookEnvironment(directory, callsFile);
+    const prompt = `SECRET_RAW_PROMPT_${integration.controller}: implement the bounded repository task`;
+    const output = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      environment,
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
+    );
+    const context = assertObligation(output);
+    assert.doesNotMatch(context, /SECRET_RAW_PROMPT/);
+    assert.equal(context.length <= 8_000, true);
+
+    const calls = await readCalls(callsFile);
+    assert.deepEqual(calls, [
+      { args: ['delegation', '--json', '--server', 'http://127.0.0.1:17394'], cwd: repositoryRoot },
+    ]);
+    assertNoPromptOrLegacyCalls(calls, prompt);
+  });
+
+  test(`${integration.controller} hook bypasses explicit Skill invocation before discovery`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-explicit-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const prompt = `${integration.explicitInvocation} delegate this bounded task`;
+    const output = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      hookEnvironment(directory, callsFile),
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
+    );
+    assert.equal(output, '');
+    assert.deepEqual(await readCalls(callsFile), []);
+  });
+
+  test(`${integration.controller} hook keeps non-auto policy upstream without a handoff context`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-policy-mode-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const environment = hookEnvironment(directory, callsFile);
+    environment.FAKE_AGENTKNOT_POLICY = JSON.stringify({ mode: 'suggest' });
+    const output = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      environment,
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt: 'Keep this upstream.' }
+    );
+    assert.equal(output, '');
+    assert.deepEqual(await readCalls(callsFile), [
+      { args: ['delegation', '--json', '--server', 'http://127.0.0.1:17394'], cwd: repositoryRoot },
+    ]);
+  });
+}
+
+for (const integration of integrations) {
+  test(`${integration.controller} hook preserves available-server and local-config discovery`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-discovery-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const serverUrl = 'http://127.0.0.1:17392';
+    const availableEnvironment = hookEnvironment(directory, callsFile);
+    availableEnvironment.AGENTKNOT_SERVER_URL = undefined;
+    availableEnvironment.FAKE_AGENTKNOT_CLIENT = JSON.stringify({ status: 'available', url: serverUrl });
+    const availableOutput = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      availableEnvironment,
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt: 'Use the discovered server.' }
+    );
+    assertObligation(availableOutput);
+    assert.deepEqual(await readCalls(callsFile), [
+      { args: ['client', '--json'], cwd: repositoryRoot },
+      { args: ['delegation', '--json', '--server', serverUrl], cwd: repositoryRoot },
+    ]);
+
+    await writeFile(callsFile, '');
+    const localEnvironment = hookEnvironment(directory, callsFile);
+    localEnvironment.AGENTKNOT_SERVER_URL = undefined;
+    localEnvironment.FAKE_AGENTKNOT_CLIENT = JSON.stringify({ status: 'unconfigured' });
+    const output = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      localEnvironment,
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt: 'Use the local repository configuration.' }
+    );
+    assertObligation(output);
+    assert.deepEqual(await readCalls(callsFile), [
+      { args: ['client', '--json'], cwd: repositoryRoot },
+      {
+        args: ['delegation', '--json', '--config', path.join(repositoryRoot, 'agentknot.config.json')],
+        cwd: repositoryRoot,
+      },
+    ]);
+  });
+}
+
+for (const integration of integrations) {
+  for (const failure of [
+    {
+      name: 'unavailable discovery',
+      environment: (environment: NodeJS.ProcessEnv) => {
+        environment.AGENTKNOT_SERVER_URL = undefined;
+        environment.FAKE_AGENTKNOT_CLIENT = JSON.stringify({
+          status: 'unavailable',
+          error: 'x'.repeat(50_000),
+        });
+        environment.FAKE_AGENTKNOT_CLIENT_EXIT = '1';
+      },
+      expectedCalls: ['client'],
+    },
+    {
+      name: 'malformed discovery',
+      environment: (environment: NodeJS.ProcessEnv) => {
+        environment.AGENTKNOT_SERVER_URL = undefined;
+        environment.FAKE_AGENTKNOT_CLIENT = '{';
+      },
+      expectedCalls: ['client'],
+    },
+    {
+      name: 'policy lookup failure',
+      environment: (environment: NodeJS.ProcessEnv) => {
+        environment.FAKE_AGENTKNOT_POLICY_EXIT = '1';
+      },
+      expectedCalls: ['delegation'],
+    },
+    {
+      name: 'malformed policy',
+      environment: (environment: NodeJS.ProcessEnv) => {
+        environment.FAKE_AGENTKNOT_POLICY = '{';
+      },
+      expectedCalls: ['delegation'],
+    },
+  ] as const) {
+    test(`${integration.controller} hook gives bounded unavailable context for ${failure.name}`, async (t) => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-unavailable-'));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const callsFile = await writeFakeAgentKnot(directory);
+      const environment = hookEnvironment(directory, callsFile);
+      failure.environment(environment);
+      const prompt = `PRIVATE_PROMPT_${integration.controller}_${failure.name}`;
+      const output = await runHook(
+        path.join(repositoryRoot, integration.hookScript),
+        integration.controller,
+        environment,
+        { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
+      );
+      const context = parseHookContext(output);
+      assert.match(context, /^AGENTKNOT_HANDOFF_OBLIGATION_V1\n/);
+      assert.match(context, /unavailable/);
+      assert.match(context, /Do not block this user prompt/);
+      assert.doesNotMatch(context, /(?:decision:\s*['"]block|blocked before the controller-model request)/);
+      assert.doesNotMatch(context, /PRIVATE_PROMPT/);
+      assert.equal(context.length <= 8_000, true);
+
+      const calls = await readCalls(callsFile);
+      assert.deepEqual(calls.map((call) => call.args[0]), failure.expectedCalls);
+      assertNoPromptOrLegacyCalls(calls, prompt);
+    });
+  }
+}
+
+for (const integration of integrations) {
+  test(`${integration.controller} session binding survives resume and ignores transcript-shaped data`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-session-'));
     t.after(() => rm(directory, { recursive: true, force: true }));
     const callsFile = await writeFakeAgentKnot(directory);
     const runtimeDirectory = path.join(directory, 'runtime');
-    const transcriptDecoy = path.join(directory, 'transcript-decoy');
-    await mkdir(runtimeDirectory, { mode: 0o700 });
-    await mkdir(transcriptDecoy);
-    await execFileAsync('git', ['init', '--quiet'], { cwd: transcriptDecoy });
+    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+    const sessionId = `session_${integration.controller}_resume`;
     const sessionHome = path.dirname(repositoryRoot);
     const explicitWorkspace = `~/${path.basename(repositoryRoot)}`;
-    const sessionId = `session_${integration.controller}_explicit_workspace`;
     const environment = {
-      ...process.env,
-      PATH: `${directory}:${process.env.PATH ?? ''}`,
+      ...hookEnvironment(directory, callsFile),
       HOME: sessionHome,
       XDG_RUNTIME_DIR: runtimeDirectory,
-      AGENTKNOT_CONFIG: undefined,
-      AGENTKNOT_SERVER_URL: 'http://127.0.0.1:17394',
-      FAKE_AGENTKNOT_CALLS: callsFile,
-      FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
-        plan: { willDispatch: false, reasoning: 'Keep this prompt upstream.' },
-        children: [],
-        artifacts: [],
-      }),
     };
     const hookPath = path.join(repositoryRoot, integration.hookScript);
-    const assertContextRecovery = (output: string) => {
-      assert.match(output, /kept it upstream/);
-      assert.match(output, /without controller conversation context/);
-      assert.match(output, /surrounding controller context supplies a concrete, bounded repository task/);
-      assert.match(output, /normal AgentKnot delegation entry for that recovered task/);
-      assert.match(output, /unless AgentKnot's normal policy keeps the recovered task upstream/);
-      assert.doesNotMatch(output, /do not invoke AgentKnot again for this prompt/);
-    };
 
-    const first = await runHook(hookPath, integration.controller, environment, {
-      hook_event_name: 'UserPromptSubmit',
-      session_id: sessionId,
-      cwd: directory,
-      prompt: `请处理 ${explicitWorkspace} 中的一个明确任务。`,
-    });
-    assertContextRecovery(first);
-
-    const continuation = '然后继续检查同一个项目。';
-    const second = await runHook(hookPath, integration.controller, environment, {
-      hook_event_name: 'UserPromptSubmit',
-      session_id: sessionId,
-      cwd: directory,
-      prompt: continuation,
-    });
-    assertContextRecovery(second);
-
+    assertObligation(
+      await runHook(hookPath, integration.controller, environment, {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: sessionId,
+        cwd: directory,
+        prompt: `Work in ${explicitWorkspace} on one bounded task.`,
+      })
+    );
+    assertObligation(
+      await runHook(hookPath, integration.controller, environment, {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: sessionId,
+        cwd: directory,
+        prompt: 'Continue the same bounded task.',
+      })
+    );
     assert.equal(
       await runHook(hookPath, integration.controller, environment, {
         hook_event_name: 'SessionEnd',
@@ -543,97 +499,141 @@ for (const integration of integrations) {
       }),
       ''
     );
-    const resumedPrompt = '恢复后继续检查同一个项目。';
-    const resumed = await runHook(
-      hookPath,
-      integration.controller,
-      environment,
-      {
+    const transcriptDecoy = path.join(directory, 'transcript-decoy');
+    await mkdir(transcriptDecoy);
+    await runGit(transcriptDecoy, 'init', '--quiet');
+    assertObligation(
+      await runHook(hookPath, integration.controller, environment, {
         hook_event_name: 'UserPromptSubmit',
         session_id: sessionId,
         cwd: directory,
-        prompt: resumedPrompt,
+        prompt: 'Resume the same bounded task.',
         transcript: [{ tool_input: { workspace: transcriptDecoy } }],
-      },
-      null
+      }, null)
     );
-    assertContextRecovery(resumed);
     assert.equal(
-      await runHook(
-        hookPath,
-        integration.controller,
-        environment,
-        {
-          hook_event_name: 'UserPromptSubmit',
-          session_id: sessionId,
-          cwd: directory,
-          prompt: `${integration.explicitInvocation} continue explicitly.`,
-        },
-        null
-      ),
+      await runHook(hookPath, integration.controller, environment, {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: sessionId,
+        cwd: directory,
+        prompt: `${integration.explicitInvocation} run explicitly`,
+      }, null),
       ''
     );
 
-    const calls = (await readFile(callsFile, 'utf8'))
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line) as string[]);
-    assert.equal(calls.length, 6);
-    for (const orchestrate of [calls[1], calls[3], calls[5]]) {
-      assert.ok(orchestrate);
-      assert.equal(orchestrate[0], 'orchestrate');
-      assert.equal(orchestrate[orchestrate.indexOf('--workspace') + 1], repositoryRoot);
-    }
-    assert.equal(calls[3]?.[calls[3].indexOf('--prompt') + 1], continuation);
-    assert.equal(calls[5]?.[calls[5].indexOf('--prompt') + 1], resumedPrompt);
+    const calls = await readCalls(callsFile);
+    assert.equal(calls.length, 3);
+    assert.equal(calls.every((call) => call.args[0] === 'delegation'), true);
+    assert.equal(calls.every((call) => call.cwd === repositoryRoot), true);
+    assertNoPromptOrLegacyCalls(calls, 'Work in');
   });
 }
 
-test('controller hooks reject a resumed binding when the repository at that path was replaced', async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-replaced-repository-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const repository = path.join(directory, 'repository');
-  await mkdir(repository);
-  await execFileAsync('git', ['init', '--quiet'], { cwd: repository });
+async function runGit(cwd: string, ...args: string[]): Promise<void> {
+  const child = spawn('git', args, { cwd, stdio: 'ignore' });
+  await new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`git exited ${String(code)}`));
+    });
+  });
+}
 
-  for (const integration of integrations) {
+for (const integration of integrations) {
+  test(`${integration.controller} PostToolUse focus follows one exact structured workspace and ignores commands`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-focus-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
     const callsFile = await writeFakeAgentKnot(directory);
-    await writeFile(callsFile, '');
-    const runtimeDirectory = path.join(directory, `runtime-${integration.controller}`);
-    await mkdir(runtimeDirectory, { mode: 0o700 });
-    const sessionId = `session_${integration.controller}_replaced_repository`;
-    const environment = {
-      ...process.env,
-      PATH: `${directory}:${process.env.PATH ?? ''}`,
-      XDG_RUNTIME_DIR: runtimeDirectory,
-      AGENTKNOT_CONFIG: undefined,
-      AGENTKNOT_SERVER_URL: 'http://127.0.0.1:17394',
-      FAKE_AGENTKNOT_CALLS: callsFile,
-      FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
-        plan: { willDispatch: false, reasoning: 'Keep this prompt upstream.' },
-        children: [],
-        artifacts: [],
+    const firstWorkspace = path.join(directory, 'first');
+    const secondWorkspace = path.join(directory, 'second');
+    await mkdir(firstWorkspace);
+    await mkdir(secondWorkspace);
+    await runGit(firstWorkspace, 'init', '--quiet');
+    await runGit(secondWorkspace, 'init', '--quiet');
+    const environment = hookEnvironment(directory, callsFile);
+    const hookPath = path.join(repositoryRoot, integration.hookScript);
+    const sessionId = `session_${integration.controller}_focus`;
+
+    assert.equal(
+      await runHook(hookPath, integration.controller, environment, {
+        hook_event_name: 'PostToolUse',
+        session_id: sessionId,
+        cwd: directory,
+        tool_input: { nested: { workdir: pathToFileURL(firstWorkspace).href } },
       }),
-    };
+      ''
+    );
+    assertObligation(
+      await runHook(hookPath, integration.controller, environment, {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: sessionId,
+        cwd: directory,
+        prompt: 'Continue in the focused repository.',
+      })
+    );
+    assert.equal(
+      await runHook(hookPath, integration.controller, environment, {
+        hook_event_name: 'PostToolUse',
+        session_id: sessionId,
+        cwd: directory,
+        tool_input: { workspace: secondWorkspace },
+      }),
+      ''
+    );
+    assert.equal(
+      await runHook(hookPath, integration.controller, environment, {
+        hook_event_name: 'PostToolUse',
+        session_id: sessionId,
+        cwd: directory,
+        tool_input: { command: `cd ${firstWorkspace}` },
+      }),
+      ''
+    );
+    assertObligation(
+      await runHook(hookPath, integration.controller, environment, {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: sessionId,
+        cwd: directory,
+        prompt: 'Continue after switching repositories.',
+      })
+    );
+
+    const calls = await readCalls(callsFile);
+    assert.deepEqual(calls.map((call) => call.cwd), [firstWorkspace, secondWorkspace]);
+    assertNoPromptOrLegacyCalls(calls, 'Continue');
+  });
+}
+
+for (const integration of integrations) {
+  test(`${integration.controller} rejects a resumed binding when the repository identity changes`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-replaced-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const repository = path.join(directory, 'repository');
+    await mkdir(repository);
+    await runGit(repository, 'init', '--quiet');
+    const environment = hookEnvironment(directory, callsFile);
+    const sessionId = `session_${integration.controller}_replaced`;
     const hookPath = path.join(repositoryRoot, integration.hookScript);
 
-    assert.match(
+    assertObligation(
       await runHook(hookPath, integration.controller, environment, {
         hook_event_name: 'UserPromptSubmit',
         session_id: sessionId,
         cwd: directory,
         prompt: `Inspect ${repository}.`,
-      }),
-      /kept it upstream/
+      })
     );
     await runHook(hookPath, integration.controller, environment, {
       hook_event_name: 'SessionEnd',
       session_id: sessionId,
       cwd: directory,
     });
+    await rm(repository, { recursive: true, force: true });
+    await mkdir(repository);
+    await runGit(repository, 'init', '--quiet');
 
-    await rm(path.join(repository, '.git'), { recursive: true, force: true });
-    await execFileAsync('git', ['init', '--quiet'], { cwd: repository });
     assert.equal(
       await runHook(hookPath, integration.controller, environment, {
         hook_event_name: 'UserPromptSubmit',
@@ -643,470 +643,9 @@ test('controller hooks reject a resumed binding when the repository at that path
       }),
       ''
     );
-  }
-});
-
-test('controller hooks bypass ambiguous explicit repositories from a non-Git cwd', async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-ambiguous-workspace-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const callsFile = await writeFakeAgentKnot(directory);
-  await writeFile(callsFile, '');
-  const otherRepository = path.join(directory, 'other-repository');
-  await mkdir(otherRepository);
-  await execFileAsync('git', ['init', '--quiet'], { cwd: otherRepository });
-
-  for (const integration of integrations) {
-    const result = await runHook(
-      path.join(repositoryRoot, integration.hookScript),
-      integration.controller,
-      {
-        ...process.env,
-        PATH: `${directory}:${process.env.PATH ?? ''}`,
-        XDG_RUNTIME_DIR: path.join(directory, 'missing-runtime'),
-        AGENTKNOT_CONFIG: undefined,
-        AGENTKNOT_SERVER_URL: 'http://127.0.0.1:17394',
-        FAKE_AGENTKNOT_CALLS: callsFile,
-        FAKE_AGENTKNOT_HANDOFF: '{}',
-      },
-      {
-        hook_event_name: 'UserPromptSubmit',
-        session_id: `session_${integration.controller}_ambiguous`,
-        cwd: directory,
-        prompt: `Compare ${repositoryRoot} with ${otherRepository}.`,
-      }
-    );
-    assert.equal(result, '');
-  }
-
-  assert.equal(await readFile(callsFile, 'utf8'), '');
-});
-
-test('controller hook runs configured automatic delegation before the model and embeds valid preview evidence', async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-hook-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const callsFile = await writeFakeAgentKnot(directory);
-  const configPath = path.join(directory, 'agentknot.config.json');
-
-  const prompt = 'Audit the bounded controller handoff and report every mismatch.';
-  const childOutput = `${'x'.repeat(4_000)}One mismatch found.`;
-  const handoff = {
-    schemaVersion: 1,
-    id: 'orchestration_test',
-    status: 'succeeded',
-    plan: { decision: 'delegate', willDispatch: true, reasoning: 'Bounded audit.' },
-    children: [{ jobId: 'job_test', status: 'succeeded', output: childOutput }],
-    qualityReview: { status: 'completed', verdict: 'accept', findings: [] },
-    artifactValidation: {
-      status: 'completed',
-      outcome: 'passed',
-      command: { argv: ['npm', 'test'], outcome: 'passed', stdoutTail: '5/5 passed' },
-      cleanup: 'cleaned',
-    },
-    artifacts: [
-      { jobId: 'job_test', status: 'verified', valid: true, attempts: [{ attempt: 1, size: 24, valid: true }] },
-    ],
-    result: { action: 'delegated' },
-  };
-  const hookPath = path.join(repositoryRoot, integrations[0].hookScript);
-  const environment = {
-    ...process.env,
-    PATH: `${directory}:${process.env.PATH ?? ''}`,
-    AGENTKNOT_CONFIG: configPath,
-    FAKE_AGENTKNOT_CALLS: callsFile,
-    FAKE_AGENTKNOT_HANDOFF: JSON.stringify(handoff),
-    FAKE_AGENTKNOT_PREVIEW: JSON.stringify({ content: 'diff --git a/a b/a\n+fixed\n', truncated: false }),
-  };
-  const result = await runHook(hookPath, 'codex', environment, {
-    hook_event_name: 'UserPromptSubmit',
-    cwd: repositoryRoot,
-    prompt,
-  });
-  const output = JSON.parse(result) as {
-    hookSpecificOutput: { hookEventName: string; additionalContext: string };
-  };
-  assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-  assert.match(output.hookSpecificOutput.additionalContext, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
-  assert.match(output.hookSpecificOutput.additionalContext, /One mismatch found/);
-  assert.match(output.hookSpecificOutput.additionalContext, /artifactValidation/);
-  assert.match(output.hookSpecificOutput.additionalContext, /5\/5 passed/);
-  assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /truncated by controller hook/);
-  assert.match(output.hookSpecificOutput.additionalContext, /diff --git a\/a b\/a/);
-
-  const calls = (await readFile(callsFile, 'utf8'))
-    .trim()
-    .split('\n')
-    .map((line) => JSON.parse(line) as string[]);
-  assert.deepEqual(calls[0], ['delegation', '--json', '--config', configPath]);
-  assert.equal(calls[1]?.[0], 'orchestrate');
-  assert.equal(calls[1]?.[calls[1].indexOf('--source') + 1], 'codex');
-  assert.equal(calls[1]?.[calls[1].indexOf('--delegation') + 1], 'inherit');
-  assert.equal(calls[1]?.[calls[1].indexOf('--prompt') + 1], prompt);
-  assert.deepEqual(calls[2]?.slice(0, 4), ['artifact-preview', 'job_test', '1', '--json']);
-
-  const explicit = await runHook(hookPath, 'codex', environment, {
-    hook_event_name: 'UserPromptSubmit',
-    cwd: repositoryRoot,
-    prompt: '$agentknot-delegate run this explicitly',
-  });
-  assert.equal(explicit, '');
-  assert.equal((await readFile(callsFile, 'utf8')).trim().split('\n').length, 3);
-});
-
-for (const integration of integrations) {
-  test(`${integration.controller} hook discovers an available server for every handoff call`, async (t) => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-discovered-'));
-    t.after(() => rm(directory, { recursive: true, force: true }));
-    const callsFile = await writeFakeAgentKnot(directory);
-    const serverUrl = 'http://127.0.0.1:17392';
-    const prompt = 'Inspect one discovered bounded component.';
-    const handoff = {
-      plan: { willDispatch: true, reasoning: 'Dispatch one bounded task.' },
-      children: [{ jobId: 'job_discovered', status: 'succeeded', output: 'Completed the task.' }],
-      artifacts: [
-        {
-          jobId: 'job_discovered',
-          status: 'verified',
-          attempts: [{ attempt: 1, size: 24, valid: true }],
-        },
-      ],
-    };
-    const result = await runHook(
-      path.join(repositoryRoot, integration.hookScript),
-      integration.controller,
-      {
-        ...process.env,
-        PATH: `${directory}:${process.env.PATH ?? ''}`,
-        AGENTKNOT_CONFIG: undefined,
-        AGENTKNOT_SERVER_URL: undefined,
-        FAKE_AGENTKNOT_CALLS: callsFile,
-        FAKE_AGENTKNOT_CLIENT: JSON.stringify({ status: 'available', url: serverUrl }),
-        FAKE_AGENTKNOT_HANDOFF: JSON.stringify(handoff),
-        FAKE_AGENTKNOT_PREVIEW: JSON.stringify({ content: 'diff --git a/discovered b/discovered\n+fixed\n', truncated: false }),
-      },
-      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
-    );
-    const output = JSON.parse(result) as {
-      hookSpecificOutput: { hookEventName: string; additionalContext: string };
-    };
-    assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-    assert.match(output.hookSpecificOutput.additionalContext, /Completed the task/);
-    assert.match(output.hookSpecificOutput.additionalContext, /diff --git a\/discovered b\/discovered/);
-
-    const calls = (await readFile(callsFile, 'utf8'))
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line) as string[]);
-    assert.deepEqual(calls, [
-      ['client', '--json'],
-      ['delegation', '--json', '--server', serverUrl],
-      [
-        'orchestrate',
-        '--source',
-        integration.controller,
-        '--workspace',
-        repositoryRoot,
-        '--delegation',
-        'inherit',
-        '--handoff-json',
-        '--progress',
-        '--prompt',
-        prompt,
-        '--server',
-        serverUrl,
-      ],
-      ['artifact-preview', 'job_discovered', '1', '--json', '--server', serverUrl],
-    ]);
-  });
-}
-
-for (const integration of integrations) {
-  test(`${integration.controller} hook keeps repository config opt-in after unconfigured discovery`, async (t) => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-unconfigured-'));
-    t.after(() => rm(directory, { recursive: true, force: true }));
-    const callsFile = await writeFakeAgentKnot(directory);
-    const configPath = path.join(repositoryRoot, 'agentknot.config.json');
-    const prompt = 'Keep this bounded prompt upstream.';
-    const result = await runHook(
-      path.join(repositoryRoot, integration.hookScript),
-      integration.controller,
-      {
-        ...process.env,
-        PATH: `${directory}:${process.env.PATH ?? ''}`,
-        AGENTKNOT_CONFIG: undefined,
-        AGENTKNOT_SERVER_URL: undefined,
-        FAKE_AGENTKNOT_CALLS: callsFile,
-        FAKE_AGENTKNOT_CLIENT: JSON.stringify({ status: 'unconfigured' }),
-        FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
-          plan: { willDispatch: false, reasoning: 'No configured automatic delegation.' },
-          children: [],
-          artifacts: [],
-        }),
-      },
-      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
-    );
-    const output = JSON.parse(result) as {
-      hookSpecificOutput: { hookEventName: string; additionalContext: string };
-    };
-    assert.match(output.hookSpecificOutput.additionalContext, /kept it upstream/);
-
-    const calls = (await readFile(callsFile, 'utf8'))
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line) as string[]);
-    assert.deepEqual(calls, [
-      ['client', '--json'],
-      ['delegation', '--json', '--config', configPath],
-      [
-        'orchestrate',
-        '--source',
-        integration.controller,
-        '--workspace',
-        repositoryRoot,
-        '--delegation',
-        'inherit',
-        '--handoff-json',
-        '--progress',
-        '--prompt',
-        prompt,
-        '--config',
-        configPath,
-      ],
-    ]);
-  });
-}
-
-for (const integration of integrations) {
-  for (const discovery of [
-    {
-      name: 'unavailable discovery',
-      output: JSON.stringify({
-        status: 'unavailable',
-        url: 'http://127.0.0.1:17393',
-        error: 'server is not reachable',
-      }),
-      exit: '1',
-    },
-    { name: 'malformed discovery JSON', output: '{', exit: undefined },
-    { name: 'malformed available discovery', output: JSON.stringify({ status: 'available' }), exit: undefined },
-  ] as const) {
-    test(`${integration.controller} hook bounds ${discovery.name} without fallback`, async (t) => {
-      const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-discovery-failure-'));
-      t.after(() => rm(directory, { recursive: true, force: true }));
-      const callsFile = await writeFakeAgentKnot(directory);
-      const result = await runHook(
-        path.join(repositoryRoot, integration.hookScript),
-        integration.controller,
-        {
-          ...process.env,
-          PATH: `${directory}:${process.env.PATH ?? ''}`,
-          AGENTKNOT_CONFIG: undefined,
-          AGENTKNOT_SERVER_URL: undefined,
-          FAKE_AGENTKNOT_CALLS: callsFile,
-          FAKE_AGENTKNOT_CLIENT: discovery.output,
-          FAKE_AGENTKNOT_CLIENT_EXIT: discovery.exit,
-          FAKE_AGENTKNOT_PREVIEW: 'FORBIDDEN_PREVIEW',
-        },
-        {
-          hook_event_name: 'UserPromptSubmit',
-          cwd: repositoryRoot,
-          prompt: 'Do not fall back from local discovery.',
-        }
-      );
-      const output = JSON.parse(result) as { decision: string; reason: string };
-      assert.equal(output.decision, 'block');
-      assert.match(output.reason, /^AgentKnot automatic entry failed to return a usable handoff:/);
-      assert.match(output.reason, /blocked before the controller-model request/);
-      assert.doesNotMatch(output.reason, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
-      assert.doesNotMatch(output.reason, /FORBIDDEN_PREVIEW/);
-      assert.ok(output.reason.length <= 60_000);
-
-      const calls = (await readFile(callsFile, 'utf8'))
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line) as string[]);
-      assert.deepEqual(calls, [['client', '--json']]);
-    });
-  }
-}
-
-for (const integration of integrations) {
-  test(`${integration.controller} hook uses one selected shared server without reading local config`, async (t) => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-server-'));
-    t.after(() => rm(directory, { recursive: true, force: true }));
-    const callsFile = await writeFakeAgentKnot(directory);
-    const serverUrl = 'http://127.0.0.1:17391';
-    const prompt = 'Inspect one bounded component.';
-    const result = await runHook(
-      path.join(repositoryRoot, integration.hookScript),
-      integration.controller,
-      {
-        ...process.env,
-        PATH: `${directory}:${process.env.PATH ?? ''}`,
-        AGENTKNOT_CONFIG: undefined,
-        AGENTKNOT_SERVER_URL: serverUrl,
-        FAKE_AGENTKNOT_CALLS: callsFile,
-        FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
-          plan: { willDispatch: false, reasoning: 'Keep this bounded prompt upstream.' },
-          children: [],
-          artifacts: [],
-        }),
-      },
-      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
-    );
-    const output = JSON.parse(result) as {
-      hookSpecificOutput: { hookEventName: string; additionalContext: string };
-    };
-    assert.match(output.hookSpecificOutput.additionalContext, /kept it upstream/);
-
-    const calls = (await readFile(callsFile, 'utf8'))
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line) as string[]);
-    assert.deepEqual(calls, [
-      ['delegation', '--json', '--server', serverUrl],
-      [
-        'orchestrate',
-        '--source',
-        integration.controller,
-        '--workspace',
-        repositoryRoot,
-        '--delegation',
-        'inherit',
-        '--handoff-json',
-        '--progress',
-        '--prompt',
-        prompt,
-        '--server',
-        serverUrl,
-      ],
-    ]);
-  });
-}
-
-for (const integration of integrations) {
-  test(`${integration.controller} hook bounds automatic handoff failure without fallback`, async (t) => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-failure-'));
-    t.after(() => rm(directory, { recursive: true, force: true }));
-    const callsFile = await writeFakeAgentKnot(directory);
-    const configPath = path.join(directory, 'agentknot.config.json');
-    const prompt = 'Audit the bounded controller handoff and report every mismatch.';
-    const result = await runHook(
-      path.join(repositoryRoot, integration.hookScript),
-      integration.controller,
-      {
-        ...process.env,
-        PATH: `${directory}:${process.env.PATH ?? ''}`,
-        AGENTKNOT_CONFIG: configPath,
-        FAKE_AGENTKNOT_CALLS: callsFile,
-        FAKE_AGENTKNOT_HANDOFF: '{',
-        FAKE_AGENTKNOT_PREVIEW: 'FORBIDDEN_PREVIEW',
-      },
-      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
-    );
-    const output = JSON.parse(result) as { decision: string; reason: string };
-    const context = output.reason;
-    assert.equal(output.decision, 'block');
-    assert.equal(context.startsWith('AgentKnot automatic entry failed to return a usable handoff:'), true);
-    assert.equal(context.includes('before dispatch'), false);
-    assert.match(context, /blocked before the controller-model request/);
-    assert.ok(context.length <= 60_000);
-    for (const forbidden of [
-      'AGENTKNOT_AUTOMATIC_HANDOFF_V1',
-      'FORBIDDEN_PREVIEW',
-      'children',
-      'artifacts',
-      'fallback-worker',
-      'fallback-provider',
-      'fallback-model',
-    ]) {
-      assert.equal(context.includes(forbidden), false);
-    }
-
-    const calls = (await readFile(callsFile, 'utf8'))
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line) as string[]);
-    assert.deepEqual(calls, [
-      ['delegation', '--json', '--config', configPath],
-      [
-        'orchestrate',
-        '--source',
-        integration.controller,
-        '--workspace',
-        repositoryRoot,
-        '--delegation',
-        'inherit',
-        '--handoff-json',
-        '--progress',
-        '--prompt',
-        prompt,
-        '--config',
-        configPath,
-      ],
-    ]);
-  });
-}
-
-for (const integration of integrations) {
-  test(`${integration.controller} hook preserves terminal orchestration failure and blocks upstream work`, async (t) => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-terminal-failure-'));
-    t.after(() => rm(directory, { recursive: true, force: true }));
-    const callsFile = await writeFakeAgentKnot(directory);
-    const configPath = path.join(directory, 'agentknot.config.json');
-    const prompt = 'Review the current repository without changing files.';
-    const orchestrationId = 'orchestration_dirty_workspace';
-    const terminalError = `Workspace repository is not clean: ${repositoryRoot}`;
-    const result = await runHook(
-      path.join(repositoryRoot, integration.hookScript),
-      integration.controller,
-      {
-        ...process.env,
-        PATH: `${directory}:${process.env.PATH ?? ''}`,
-        AGENTKNOT_CONFIG: configPath,
-        FAKE_AGENTKNOT_CALLS: callsFile,
-        FAKE_AGENTKNOT_HANDOFF_EXIT: '1',
-        FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
-          schemaVersion: 1,
-          id: orchestrationId,
-          status: 'failed',
-          children: [],
-          artifacts: [],
-          error: { name: 'Error', message: terminalError },
-        }),
-        FAKE_AGENTKNOT_PREVIEW: 'FORBIDDEN_PREVIEW',
-      },
-      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
-    );
-    const output = JSON.parse(result) as { decision: string; reason: string };
-    assert.equal(output.decision, 'block');
-    assert.match(output.reason, new RegExp(orchestrationId));
-    assert.match(output.reason, /ended with status failed/);
-    assert.match(output.reason, new RegExp(terminalError.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.match(output.reason, /blocked before the controller-model request/);
-    assert.doesNotMatch(output.reason, /AGENTKNOT_AUTOMATIC_HANDOFF_V1|FORBIDDEN_PREVIEW/);
-
-    const calls = (await readFile(callsFile, 'utf8'))
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line) as string[]);
-    assert.deepEqual(calls, [
-      ['delegation', '--json', '--config', configPath],
-      [
-        'orchestrate',
-        '--source',
-        integration.controller,
-        '--workspace',
-        repositoryRoot,
-        '--delegation',
-        'inherit',
-        '--handoff-json',
-        '--progress',
-        '--prompt',
-        prompt,
-        '--config',
-        configPath,
-      ],
-    ]);
+    const calls = await readCalls(callsFile);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.cwd, repository);
   });
 }
 
@@ -1114,90 +653,39 @@ for (const [removed, survivor] of [
   [integrations[0], integrations[1]],
   [integrations[1], integrations[0]],
 ] as const) {
-  test(
-    `temporary ${survivor.controller} install keeps its handoff after removing ${removed.controller}`,
-    async (t) => {
-      const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-install-'));
-      t.after(() => rm(directory, { recursive: true, force: true }));
-
-      await Promise.all(
-        integrations.map((integration) =>
-          cp(
-            path.join(repositoryRoot, 'integrations', integration.controller),
-            path.join(directory, integration.controller),
-            { recursive: true }
-          )
+  test(`temporary ${survivor.controller} install remains independent after removing ${removed.controller}`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-independent-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    await Promise.all(
+      integrations.map((integration) =>
+        cp(
+          path.join(repositoryRoot, 'integrations', integration.controller),
+          path.join(directory, integration.controller),
+          { recursive: true }
         )
-      );
-      const removedPackagePath = path.join(directory, removed.controller);
-      await rm(removedPackagePath, { recursive: true, force: true });
-      await assert.rejects(
-        readFile(
-          path.join(removedPackagePath, 'agentknot', 'hooks', 'user-prompt-submit.mjs'),
-          'utf8'
-        ),
-        /ENOENT/
-      );
+      )
+    );
+    await rm(path.join(directory, removed.controller), { recursive: true, force: true });
+    const survivorPackage = path.join(directory, survivor.controller, 'agentknot');
+    const survivorHook = path.join(survivorPackage, 'hooks', 'user-prompt-submit.mjs');
+    const survivorSkill = await readFile(
+      path.join(survivorPackage, 'skills', 'agentknot-delegate', 'SKILL.md'),
+      'utf8'
+    );
+    assert.match(survivorSkill, /--assessment-json "\$ASSESSMENT"/);
+    assert.doesNotMatch(survivorSkill, new RegExp(removed.controller));
 
-      const survivorPackagePath = path.join(directory, survivor.controller, 'agentknot');
-      const hookPath = path.join(survivorPackagePath, 'hooks', 'user-prompt-submit.mjs');
-      const manifest = JSON.parse(
-        await readFile(
-          path.join(
-            directory,
-            survivor.controller,
-            path.relative(path.join('integrations', survivor.controller), survivor.manifest)
-          ),
-          'utf8'
-        )
-      ) as Record<string, unknown>;
-      const skillSource = await readFile(
-        path.join(survivorPackagePath, 'skills', 'agentknot-delegate', 'SKILL.md'),
-        'utf8'
-      );
-      assert.equal(manifest.name, 'agentknot');
-      assert.match(skillSource, /agentknot orchestrate/);
-      assert.match(skillSource, new RegExp(`--source ${survivor.controller}`));
-      assert.equal(hookPath.startsWith(`${removedPackagePath}${path.sep}`), false);
-
-      const callsFile = await writeFakeAgentKnot(directory);
-      const configPath = path.join(directory, 'agentknot.config.json');
-      const prompt = 'Audit the bounded controller handoff and report every mismatch.';
-      const environment = {
-        ...process.env,
-        PATH: `${directory}:${process.env.PATH ?? ''}`,
-        AGENTKNOT_CONFIG: configPath,
-        FAKE_AGENTKNOT_CALLS: callsFile,
-        FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
-          plan: { willDispatch: true },
-          children: [],
-          artifacts: [],
-        }),
-      };
-      const result = await runHook(hookPath, survivor.controller, environment, {
-        hook_event_name: 'UserPromptSubmit',
-        cwd: repositoryRoot,
-        prompt,
-      });
-      const output = JSON.parse(result) as {
-        hookSpecificOutput: { hookEventName: string; additionalContext: string };
-      };
-      assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-      assert.match(output.hookSpecificOutput.additionalContext, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
-
-      const calls = (await readFile(callsFile, 'utf8'))
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line) as string[]);
-      assert.deepEqual(calls[0], ['delegation', '--json', '--config', configPath]);
-      const orchestrate = calls[1];
-      assert.ok(orchestrate);
-      assert.equal(orchestrate[0], 'orchestrate');
-      assert.equal(orchestrate[orchestrate.indexOf('--source') + 1], survivor.controller);
-      assert.equal(orchestrate[orchestrate.indexOf('--delegation') + 1], 'inherit');
-      assert.equal(orchestrate[orchestrate.indexOf('--prompt') + 1], prompt);
-      assert.equal(orchestrate.includes(removedPackagePath), false);
-      assert.equal(calls.length, 2);
-    }
-  );
+    const callsFile = await writeFakeAgentKnot(directory);
+    const prompt = `Independent ${survivor.controller} bounded task.`;
+    const output = await runHook(
+      survivorHook,
+      survivor.controller,
+      hookEnvironment(directory, callsFile),
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
+    );
+    assertObligation(output);
+    const calls = await readCalls(callsFile);
+    assert.deepEqual(calls.map((call) => call.args[0]), ['delegation']);
+    assertNoPromptOrLegacyCalls(calls, prompt);
+  });
 }

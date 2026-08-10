@@ -93,3 +93,7 @@ This correction does not claim semantic correctness, independent review quality,
 ## Privacy and security review
 
 The record includes Job IDs and generalized repository labels needed to reproduce the incident. It excludes prompts, source contents, credentials, auth paths, provider responses, and artifact bytes.
+
+## Addendum: 2026-08-11 — completion must state the task outcome
+
+A later worker returned a valid envelope whose notes explicitly said the requested implementation was not completed. Because the schema described files/checks/risks but not semantic task outcome, the adapter accepted it and the Job succeeded. SchemaVersion 1 `WorkerCompletionReport` now requires `taskOutcome: "completed" | "blocked"`; built-in worker instructions require `blocked` whenever the requested task was not completed, and the adapter rejects a blocked report before success. This closes false success without treating passing checks or artifact integrity as semantic completion.

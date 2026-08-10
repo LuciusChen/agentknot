@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import type { DelegationConfig } from './config.js';
+import { validateTaskAssessment } from './delegation-policy.js';
 import { assertJsonMetadata } from './metadata.js';
 import { buildJobList } from './job-list.js';
 import type {
@@ -174,6 +175,8 @@ function asOrchestrationRequest(value: unknown): OrchestrationRequest {
   const body = value as Record<string, unknown>;
   if (typeof body.prompt !== 'string') throw new Error('prompt must be a string');
   if (typeof body.workspace !== 'string') throw new Error('workspace must be a string');
+  if (body.assessment === undefined) throw new Error('assessment is required');
+  const assessment = validateTaskAssessment(body.assessment);
   if (body.source !== undefined && typeof body.source !== 'string') throw new Error('source must be a string');
   if (
     body.delegation !== undefined &&
@@ -186,6 +189,7 @@ function asOrchestrationRequest(value: unknown): OrchestrationRequest {
   return {
     prompt: body.prompt,
     workspace: body.workspace,
+    assessment,
     ...(body.source === undefined ? {} : { source: body.source as string }),
     ...(body.delegation === undefined
       ? {}

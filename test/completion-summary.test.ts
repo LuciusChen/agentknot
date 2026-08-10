@@ -37,6 +37,7 @@ after(async () => {
 
 const validReport: WorkerCompletionReport = {
   schemaVersion: 1,
+  taskOutcome: 'completed',
   changedFiles: ['worker-claimed.ts'],
   checksRun: [
     { command: 'npm test', outcome: 'passed' },
