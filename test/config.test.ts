@@ -265,6 +265,13 @@ test('parseConfig normalizes bounded automatic delegation without coupling it to
   });
   assert.equal(defaults.delegation?.dispatch.routeSelection, undefined);
   assert.equal(defaults.delegation?.qualityReview, undefined);
+  assert.deepEqual(defaults.delegation?.policy.delegate, [
+    'architecture-review',
+    'repository-analysis',
+    'test-gap-analysis',
+    'documentation',
+    'independent-implementation',
+  ]);
 });
 
 test('parseConfig validates optional artifact validation and preserves its resolved policy values', () => {

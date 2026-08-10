@@ -149,6 +149,7 @@ export interface LoadedConfig {
 
 const DEFAULT_DELEGATE_TASK_KINDS = [
   'architecture-review',
+  'repository-analysis',
   'test-gap-analysis',
   'documentation',
   'independent-implementation',

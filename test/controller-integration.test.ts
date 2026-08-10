@@ -280,12 +280,14 @@ test('repository dogfood roles use replaceable worker pools and read-only review
     delegation: {
       planner: { route: string };
       dispatch: { defaultRoute: string; routeSelection?: { rules: Array<{ route: string }> } };
+      policy: { delegate: string[] };
       qualityReview?: { route?: string };
     };
   };
   assert.equal(config.delegation.planner.route, 'advanced-workers');
   assert.equal(config.delegation.dispatch.defaultRoute, 'advanced-workers');
   assert.equal(config.delegation.dispatch.routeSelection?.rules[0]?.route, 'routine-workers');
+  assert.ok(config.delegation.policy.delegate.includes('repository-analysis'));
   assert.equal(config.delegation.qualityReview?.route, 'review-workers');
 
   for (const poolName of ['advanced-workers', 'routine-workers', 'review-workers']) {

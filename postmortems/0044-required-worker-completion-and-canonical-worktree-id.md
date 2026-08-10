@@ -38,6 +38,12 @@ A separate forced review orchestration exposed a second cause at the prompt boun
 
 Regression orchestration `orchestration_442c02cc-7eb1-43bd-8dd0-83258ca5c7e8` then completed the same boundary end to end: Pi/Luna/max planner Job `job_3625cccc-adc4-4f1f-8111-68a61e51e2c7` succeeded with its envelope, native OpenCode/Luna/max child Job `job_b178b848-a40e-4e99-89a2-ee849b0bf9dc` survived two external-path denials, returned a substantive review plus valid envelope, and produced a verified empty worker-delta artifact from the dirty source snapshot.
 
+## Follow-up: Pi/DeepSeek completion compliance remains unreliable
+
+Two later low-complexity read-only analysis runs exposed route-specific completion failures without reintroducing false success. Pi/DeepSeek Job `job_0a1795ac-26a6-4c2c-9490-add3e2219442` omitted the required report on attempt one and returned a malformed report on attempt two. A separate exact Chirp analysis, Job `job_c91d34f9-67b2-4c45-adb9-d56662a77575`, omitted the report on both attempts. Both Jobs and their parent orchestrations failed despite valid empty artifacts.
+
+A new orchestration of the same Chirp task rotated normally to the next configured pool member rather than switching routes inside a retry. Native OpenCode/DeepSeek Job `job_51d228b4-8b5f-495e-94df-81cae063f7b9` returned a substantive report plus valid completion envelope on its first attempt and succeeded with a verified empty artifact. This comparison holds provider, model, effort, prompt class, and repository constant enough to make the worker-runtime boundary a useful investigation target, but it does not isolate a deterministic Pi defect from model stochasticity. AgentKnot therefore keeps per-Job route immutability and no-fallback semantics; strict failure evidence remains preferable to silent route switching.
+
 ## Root cause
 
 The shared parser correctly distinguished valid, missing, and malformed envelopes, but both built-in adapters returned a normal `WorkerRunResult` for all three outcomes. The orchestrator therefore treated protocol/process settlement as successful execution and recorded the absent report only as advisory summary evidence.

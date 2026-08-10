@@ -162,3 +162,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0048](./0048-controller-hook-failure-blocking.md) | Incident / Decision | Resolved / Accepted | Block controller fallback after automatic-entry failure |
 | [0049](./0049-dirty-workspace-snapshot-isolation.md) | Decision | Accepted | Snapshot dirty workspaces without weakening artifact isolation |
 | [0050](./0050-context-dependent-continuation-handoff.md) | Incident / Decision | Resolved / Accepted | Recover bounded continuation tasks without reading controller transcripts |
+| [0051](./0051-evidence-producing-repository-analysis.md) | Incident / Decision | Resolved / Accepted | Delegate bounded evidence-producing repository analysis |

@@ -10,7 +10,7 @@ const config: DelegationConfig = {
   planner: { strategy: 'hybrid', route: 'planner' },
   dispatch: { defaultRoute: 'worker', maxChildren: 2, maxDepth: 1, maxConcurrency: 1 },
   policy: {
-    delegate: ['documentation', 'test-gap-analysis', 'independent-implementation'],
+    delegate: ['documentation', 'repository-analysis', 'test-gap-analysis', 'independent-implementation'],
     keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
   },
   fallback: 'upstream',
@@ -70,7 +70,7 @@ test('planner instructions reserve parallelism for independent non-overlapping w
   assert.match(prompt, /only permitted text outside the assessment object/);
 });
 
-test('planner instructions delegate bounded repository deliverables regardless of size or parallelism', () => {
+test('planner instructions delegate bounded repository deliverables and evidence-producing analysis', () => {
   const prompt = buildPlannerPrompt(request, config);
   assert.match(prompt, /Delegation and parallelism are separate decisions/);
   assert.match(prompt, /exactly one nonparallel subtask/);
@@ -78,12 +78,15 @@ test('planner instructions delegate bounded repository deliverables regardless o
   assert.match(prompt, /expected to create or modify a repository file must receive a "delegate" recommendation/);
   assert.match(prompt, /even when it is small, low-complexity, or nonparallel/);
   assert.match(prompt, /task size and generic handoff\/review overhead alone are not reasons/);
-  assert.match(prompt, /genuinely trivial read-only inspection or direct-answer work with no repository file deliverable upstream/);
-  assert.match(prompt, /state that overhead rationale rather than citing the lack of a parallel split/);
+  assert.match(prompt, /concrete repository investigation that must search, compare, or interpret project content/);
+  assert.match(prompt, /independently verifiable findings is a "repository-analysis" deliverable/);
+  assert.match(prompt, /even when it is read-only, low-complexity, or nonparallel/);
+  assert.match(prompt, /retrieving one explicit fact from one already identified location/);
+  assert.match(prompt, /do not retain evidence-producing repository analysis merely because it creates no patch/);
   assert.match(prompt, /"parallelizable":true\|false/);
   assert.match(prompt, /Use an empty subtasks array only when the work must remain upstream, cannot be bounded/);
-  assert.match(prompt, /genuinely trivial read-only inspection or direct-answer work with no repository file deliverable/);
-  assert.match(prompt, /never use it merely because the work is small or cannot be split/);
+  assert.match(prompt, /genuinely trivial direct lookup of one explicit fact from one already identified location/);
+  assert.match(prompt, /never use it merely because the work is read-only, creates no patch, is small, or cannot be split/);
   assert.doesNotMatch(prompt, /delegation would add no value/);
 });
 
@@ -264,7 +267,7 @@ test('composeDelegationPlan applies only human-configured active routes with a c
   assert.notEqual(low.planHash, medium.planHash);
 });
 
-test('a small low-complexity repository edit is delegated once and selected by the active deepseek-flash rule', () => {
+test('small low-complexity repository work is delegated once and selected by the active rule', () => {
   const activeConfig: DelegationConfig = {
     ...config,
     dispatch: {
@@ -308,6 +311,21 @@ test('a small low-complexity repository edit is delegated once and selected by t
         },
       },
     ]
+  );
+
+  const analysisPlan = composeDelegationPlan(request, {
+    ...single,
+    taskKinds: ['repository-analysis'],
+    subtasks: [{
+      title: 'Search spam keywords',
+      kind: 'repository-analysis',
+      prompt: 'Search the repository for spam-keyword evidence and report exact matches.',
+      acceptanceCriteria: ['Findings cite exact repository paths and matched evidence'],
+    }],
+  }, activeConfig);
+  assert.deepEqual(
+    analysisPlan.subtasks.map((subtask) => [subtask.kind, subtask.route, subtask.routeSelection?.basis]),
+    [['repository-analysis', 'deepseek-flash', 'rule']]
   );
 });
 
