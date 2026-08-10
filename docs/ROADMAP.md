@@ -269,6 +269,7 @@ Prove that controllers and worker runtimes can change independently without core
 - Added `--server URL` / `AGENTKNOT_SERVER_URL` CLI transport over the existing HTTP API for Job and Orchestration submission, waiting, cancellation, inspection, delegation policy, routes, and artifacts. Client mode never constructs a file runtime or runs reconciliation; server failure has no local or model fallback.
 - Codex and Claude hooks use the same selected server without repository-local config discovery, while retaining the explicitly configured local path when no server is selected. Their Skills prohibit checkout scanning and local-runtime fallback in server mode.
 - A deterministic gate starts two independent CLI processes from a directory with no configuration, submits Codex and Claude orchestration requests concurrently to one in-process runtime, and verifies two distinct successful durable records. Controller parity fixtures verify exact server arguments and no config path. No broker, new protocol, queue, service manager, or remote claim was added ([incident/decision 0038](../postmortems/0038-shared-local-controller-runtime.md)).
+- A real canonical file-backed server subsequently accepted two concurrent CLI processes through the explicit option and environment-variable paths. Both no-model acceptance requests succeeded as distinct durable records under one execution owner, proving the installed multi-session path without consuming provider quota.
 
 ### Exit gates
 

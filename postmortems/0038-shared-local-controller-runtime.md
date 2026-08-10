@@ -64,6 +64,7 @@ Current code would refuse a second execution owner before reconciliation, so thi
 - `AgentKnotHttpClient` and CLI server mode reuse the existing HTTP endpoints for submission, terminal polling, cancellation, policy/routes, record inspection, and artifact list/verify/preview. Server mode has no `createRuntime()` path.
 - Codex and Claude hooks select the exact URL with `AGENTKNOT_SERVER_URL`, never build a config path in that mode, and retain bounded failure context without fallback.
 - The deterministic HTTP suite launches two separate Node CLI processes concurrently from a directory with no AgentKnot config. Codex and Claude requests complete as two distinct records in the same `OrchestrationService`.
+- A canonical file-backed `agentknot serve` was then started on `127.0.0.1:7391`. Two separate real CLI processes connected concurrently, one with `--server` and one with `AGENTKNOT_SERVER_URL`; no-model `delegation: never` requests succeeded as distinct records `orchestration_4c8456ea-4d16-47cc-a8ef-5d57563e9645` and `orchestration_7c2fb71c-4ffb-41a2-802a-9619c9e8fc88` under the same execution owner.
 - The implementation added no broker, queue, protocol, daemon manager, storage schema, route rule, model substitution, or worker-adapter branch.
 
 ## Privacy and security review
