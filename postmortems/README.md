@@ -150,3 +150,5 @@ Incident records should also include severity, user/controller impact, immediate
 | [0036](./0036-bounded-advisory-quality-review.md) | Decision / Experiment | Accepted | Bound advisory quality review to supplied evidence |
 | [0037](./0037-controller-owned-artifact-validation.md) | Decision | Accepted | Validate one delegated patch in a disposable worktree |
 | [0038](./0038-shared-local-controller-runtime.md) | Incident / Decision | Accepted | Route concurrent controllers through one local execution owner |
+| [0039](./0039-live-plugin-cache-refresh.md) | Incident | Resolved | Do not invalidate hook paths used by active controller sessions |
+| [0040](./0040-product-owned-local-service-discovery.md) | Decision | Accepted | Discover one running local service without shell-profile edits |
