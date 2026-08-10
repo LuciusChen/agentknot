@@ -70,3 +70,7 @@ The record stores one absolute repository path, which may reveal a local project
 ### 2026-08-10 — resumed sessions retain the binding
 
 The `SessionEnd` deletion decision above is superseded by [decision 0047](./0047-resumable-controller-binding-and-replaceable-role-pools.md). Normal controller exit followed by resume is a continuation of the same source/session identity, so the binding is retained. New writes add a non-secret hash of the Git common-directory path/device/inode and revalidate it with the root before reuse, rejecting a replaced repository at the same path. The original explicit-path resolution evidence and all other containment rules remain unchanged.
+
+### 2026-08-10 — the binding is a target, not a model hint
+
+Persisted evidence later showed the same cross-repository comparison prompt once admitted with `/home/lucius/coding-guidelines` as its workspace and later with `/home/lucius/repos/agentknot`; the planner prompt previously called this only an “execution workspace” and allowed another named repository to become an edit target. That exceeded the actual one-workspace isolation contract and left target/reference roles open to model reinterpretation. The admitted workspace is now explicitly the sole writable primary target in planner and worker prompts; all other repositories are read-only references, and conflicting edit intent is retained upstream as a visible workspace mismatch. This adds no path-role classifier, request field, schema, or multi-workspace execution.

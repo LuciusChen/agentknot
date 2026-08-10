@@ -61,7 +61,7 @@ export class JobPersistenceError extends Error {
     readonly eventType: JobEventType | undefined,
     cause: unknown
   ) {
-    const details = errorDetails(cause);
+    const details = limitErrorDetails(cause);
     super(
       `Job persistence failed during ${phase}${eventType === undefined ? '' : ` (${eventType})`}: ${details.message}`,
       { cause }
@@ -99,10 +99,6 @@ export interface OrchestratorOptions {
   fetch?: typeof globalThis.fetch;
   /** The production default is the fixed 30-second control-plane probe timeout. */
   diagnosticTimeoutMs?: number;
-}
-
-function errorDetails(error: unknown): { name: string; message: string } {
-  return limitErrorDetails(error);
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -312,7 +308,7 @@ export class Orchestrator {
         return {
           checked: true,
           status: 'failed',
-          message: `Live inference probe failed: ${errorDetails(outcome.error).message}`,
+          message: `Live inference probe failed: ${limitErrorDetails(outcome.error).message}`,
         };
       }
       return { checked: true, status: 'succeeded', message: '' };
@@ -570,7 +566,7 @@ export class Orchestrator {
       async (error: unknown) => {
         if (error instanceof JobPersistenceError) throw error;
         if (job.status !== 'failed' && job.status !== 'cancelled') {
-          const details = errorDetails(error);
+          const details = limitErrorDetails(error);
           job.status = controller.signal.aborted ? 'cancelled' : 'failed';
           job.completedAt = this.#now().toISOString();
           job.error = {
@@ -717,7 +713,7 @@ export class Orchestrator {
 
       if (failure instanceof JobPersistenceError) throw failure;
 
-      const details = errorDetails(failure ?? new Error('Worker returned no result'));
+      const details = limitErrorDetails(failure ?? new Error('Worker returned no result'));
       const retryable =
         !(failure instanceof ArtifactSizeLimitError) &&
         !jobSignal.aborted &&
@@ -752,7 +748,7 @@ export class Orchestrator {
       await this.#appendEvent(job, 'job.observer.failed', {
         observedEventSequence: event.sequence,
         observedEventType: event.type,
-        ...errorDetails(error),
+        ...limitErrorDetails(error),
       });
     }
   }
@@ -832,7 +828,7 @@ export class Orchestrator {
       });
       job.callback = { delivered: response.ok, status: response.status };
     } catch (error) {
-      job.callback = { delivered: false, error: errorDetails(error).message };
+      job.callback = { delivered: false, error: limitErrorDetails(error).message };
     }
     job.updatedAt = this.#now().toISOString();
     await this.#store.save(job);

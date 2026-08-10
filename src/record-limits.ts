@@ -8,8 +8,6 @@ export const MAX_WORKER_COMPLETION_REPORT_BYTES = 256 * 1024;
 export const MAX_ERROR_NAME_BYTES = 256;
 export const MAX_ERROR_MESSAGE_BYTES = 16 * 1024;
 export const MAX_WORKER_STDERR_BYTES = 4 * 1024;
-/** @deprecated Use the route-neutral worker stderr budget. */
-export const MAX_PI_STDERR_BYTES = MAX_WORKER_STDERR_BYTES;
 export const MAX_JOB_RECORD_BYTES = 16 * 1024 * 1024;
 export const MAX_ORCHESTRATION_RECORD_BYTES = 16 * 1024 * 1024;
 export const MAX_CALLBACK_BODY_BYTES = 8 * 1024 * 1024;

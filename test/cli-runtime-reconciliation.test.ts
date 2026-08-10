@@ -290,10 +290,14 @@ test('read-oriented and invalid CLI commands do not reconcile persisted records'
       { args: ['serve', '--port', '65536'], expectedCode: 1 },
       { args: ['unknown-command'], expectedCode: 1 },
     ];
+    let jobListOutput: string | undefined;
+    let liveDiagnosticOutput: string | undefined;
 
     for (const command of commands) {
       const result = await runCli(fixture.configPath, ...command.args);
       assert.equal(result.code, command.expectedCode, `${command.args.join(' ')}: ${result.stderr}`);
+      if (command.args.join(' ') === 'jobs --json') jobListOutput = result.stdout;
+      if (command.args.join(' ') === 'doctor --live') liveDiagnosticOutput = result.stdout;
       assert.deepEqual(
         await readSnapshot(fixture.jobsDirectory, ids.jobId),
         jobSnapshot,
@@ -308,9 +312,8 @@ test('read-oriented and invalid CLI commands do not reconcile persisted records'
       assert.deepEqual(await readdir(fixture.orchestrationDirectory), orchestrationsBefore);
     }
 
-    const jobList = await runCli(fixture.configPath, 'jobs', '--json');
-    assert.equal(jobList.code, 0, jobList.stderr);
-    assert.equal(jobList.stdout, `${JSON.stringify(JSON.parse(jobList.stdout))}\n`);
+    assert.notEqual(jobListOutput, undefined);
+    assert.equal(jobListOutput, `${JSON.stringify(JSON.parse(jobListOutput!))}\n`);
 
     const usage = await runCli(fixture.configPath, 'usage');
     assert.equal(usage.code, 0, usage.stderr);
@@ -324,8 +327,8 @@ test('read-oriented and invalid CLI commands do not reconcile persisted records'
       orchestrationSnapshot
     );
 
-    const liveDiagnostic = await runCli(fixture.configPath, 'doctor', '--live');
-    const diagnostic = JSON.parse(liveDiagnostic.stdout) as {
+    assert.notEqual(liveDiagnosticOutput, undefined);
+    const diagnostic = JSON.parse(liveDiagnosticOutput!) as {
       route: string;
       liveInference: { checked: boolean; status: string };
     };

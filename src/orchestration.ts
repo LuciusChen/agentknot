@@ -118,10 +118,6 @@ class Semaphore {
   }
 }
 
-function errorDetails(error: unknown): { name: string; message: string } {
-  return limitErrorDetails(error);
-}
-
 function throwIfAborted(signal: AbortSignal): void {
   if (!signal.aborted) return;
   throw signal.reason instanceof Error ? signal.reason : new Error('Orchestration cancelled');
@@ -294,7 +290,7 @@ export class OrchestrationService {
     const completion = this.#execute(record, controller.signal).catch(async (error: unknown) => {
       if (error instanceof JobPersistenceError || error instanceof RecordSizeLimitError) throw error;
       if (record.status !== 'failed' && record.status !== 'cancelled') {
-        const details = errorDetails(error);
+        const details = limitErrorDetails(error);
         record.status = controller.signal.aborted ? 'cancelled' : 'failed';
         record.completedAt = this.#now().toISOString();
         record.error = details;
@@ -612,7 +608,7 @@ export class OrchestrationService {
         artifact,
         reason: signal.aborted ? 'parent-cancelled' : 'validation-start-failed',
         cleanup: 'not-confirmed',
-        error: errorDetails(error),
+        error: limitErrorDetails(error),
       });
       throwIfAborted(signal);
       return;
@@ -647,7 +643,7 @@ export class OrchestrationService {
         reason: execution.reason,
         cleanup: execution.cleanup,
         ...(execution.command === undefined ? {} : { command: execution.command }),
-        ...(execution.error === undefined ? {} : { error: errorDetails(execution.error) }),
+        ...(execution.error === undefined ? {} : { error: limitErrorDetails(execution.error) }),
       });
       return;
     }
@@ -813,7 +809,7 @@ export class OrchestrationService {
         route: config.route,
         childJobId: child.jobId,
         reason: 'reviewer-start-failed',
-        error: errorDetails(error),
+        error: limitErrorDetails(error),
       });
       return;
     }
@@ -907,7 +903,7 @@ export class OrchestrationService {
         childJobId: child.jobId,
         reviewerJobId: reviewerJob.id,
         reason: 'reviewer-output-invalid',
-        error: errorDetails(error),
+        error: limitErrorDetails(error),
       });
     }
   }
@@ -967,9 +963,9 @@ export class OrchestrationService {
       );
     } catch (error) {
       if (record.policy.fallback === 'fail') {
-        throw new Error(`Delegation planner failed: ${errorDetails(error).message}`, { cause: error });
+        throw new Error(`Delegation planner failed: ${limitErrorDetails(error).message}`, { cause: error });
       }
-      const details = errorDetails(error);
+      const details = limitErrorDetails(error);
       return rehashDelegationPlan({
         ...composeDelegationPlan(
           { ...record.request, delegation: 'never' },
@@ -1091,7 +1087,7 @@ export class OrchestrationService {
         if (settled.outcome.job.error) settled.item.child.error = structuredClone(settled.outcome.job.error);
       } else {
         if (settled.outcome.error instanceof JobPersistenceError) throw settled.outcome.error;
-        const details = errorDetails(settled.outcome.error);
+        const details = limitErrorDetails(settled.outcome.error);
         settled.item.child.status = signal.aborted ? 'cancelled' : 'failed';
         settled.item.child.error = { ...details, attempt: 0, retryable: false };
       }

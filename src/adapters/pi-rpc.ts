@@ -5,7 +5,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 
 import type { PiRpcWorkerConfig } from '../config.js';
-import { MAX_PI_STDERR_BYTES, limitTextSuffix } from '../record-limits.js';
+import { MAX_WORKER_STDERR_BYTES, limitTextSuffix } from '../record-limits.js';
 import type {
   ResolvedRoute,
   WorkerAdapter,
@@ -20,8 +20,10 @@ import {
   awaitChildOutput,
   childExited,
   CHILD_OUTPUT_DRAIN_WAIT_MS,
+  effectiveHomeDirectory,
   effectiveEnvironment,
   findCommand,
+  hasCredentialValue,
   StrictJsonlDecoder,
   terminateChild,
   waitForExit,
@@ -60,24 +62,6 @@ interface PiRpcEvent {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function hasCredentialValue(value: unknown): boolean {
-  if (typeof value === 'string') return value.trim() !== '';
-  if (Array.isArray(value)) return value.some((item) => hasCredentialValue(item));
-  if (isRecord(value)) {
-    return Object.entries(value)
-      .filter(([key]) => key !== 'type' && key !== 'env')
-      .some(([, item]) => hasCredentialValue(item));
-  }
-  return false;
-}
-
-function effectiveHomeDirectory(environment: EffectiveEnvironment): string {
-  // Pi resolves its default agent directory with os.homedir() inside the child. Mirror the
-  // environment-sensitive part of that lookup without mutating this process's environment.
-  if (process.platform === 'win32') return environment.USERPROFILE || os.homedir();
-  return environment.HOME || os.homedir();
 }
 
 function piAgentDirectory(environment: EffectiveEnvironment): string {
@@ -504,10 +488,10 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       for await (const chunk of child.stderr) {
         stderr = limitTextSuffix(
           `${stderr}${decoder.write(Buffer.from(chunk))}`,
-          MAX_PI_STDERR_BYTES
+          MAX_WORKER_STDERR_BYTES
         );
       }
-      stderr = limitTextSuffix(`${stderr}${decoder.end()}`, MAX_PI_STDERR_BYTES);
+      stderr = limitTextSuffix(`${stderr}${decoder.end()}`, MAX_WORKER_STDERR_BYTES);
     })().catch((error: unknown) => {
       rejectSettled(error instanceof Error ? error : new Error(String(error)));
     });
@@ -720,7 +704,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       const decoder = new StringDecoder('utf8');
       const recordStderr = async (text: string): Promise<void> => {
         if (text === '') return;
-        stderr = limitTextSuffix(`${stderr}${text}`, MAX_PI_STDERR_BYTES);
+        stderr = limitTextSuffix(`${stderr}${text}`, MAX_WORKER_STDERR_BYTES);
         await emit('worker.stderr', { text });
       };
       for await (const chunk of child.stderr) {

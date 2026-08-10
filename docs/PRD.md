@@ -71,7 +71,7 @@ A route resolves worker, provider, model, thinking level, timeout, and retry set
 
 The durable job record and its ordered events are the authority. Streaming, callbacks, dashboards, or notifications are delivery conveniences and must not become the only copy of state.
 
-Repository analysis must also remain bounded at admission: unless exhaustive coverage is explicitly requested, the planner and worker contract names the execution workspace, references, exact scope, and non-goals, then returns only a small decision-relevant evidence set rather than an inventory or source restatement.
+Each orchestration has one authoritative primary target workspace and workers may modify only its isolated copy; every other repository is a read-only reference. A requested edit target that conflicts with the admitted workspace must remain upstream as a visible mismatch. Repository analysis must also remain bounded at admission: unless exhaustive coverage is explicitly requested, the planner and worker contract names the primary target, references, exact scope, and non-goals, then returns only a small decision-relevant evidence set rather than an inventory or source restatement.
 
 ### Honest capabilities
 

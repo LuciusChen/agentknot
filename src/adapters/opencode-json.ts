@@ -22,8 +22,10 @@ import {
 } from '../worker-completion-report.js';
 import {
   awaitChildOutput,
+  effectiveHomeDirectory,
   effectiveEnvironment,
   findCommand,
+  hasCredentialValue,
   StrictJsonlDecoder,
   terminateChild,
   waitForExit,
@@ -60,22 +62,6 @@ const LIVE_PROBE_PROMPT =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function hasCredentialValue(value: unknown): boolean {
-  if (typeof value === 'string') return value.trim() !== '';
-  if (Array.isArray(value)) return value.some((item) => hasCredentialValue(item));
-  if (isRecord(value)) {
-    return Object.entries(value)
-      .filter(([key]) => key !== 'type' && key !== 'env')
-      .some(([, item]) => hasCredentialValue(item));
-  }
-  return false;
-}
-
-function effectiveHomeDirectory(environment: EffectiveEnvironment): string {
-  if (process.platform === 'win32') return environment.USERPROFILE || os.homedir();
-  return environment.HOME || os.homedir();
 }
 
 function openCodeAuthPath(environment: EffectiveEnvironment): string {

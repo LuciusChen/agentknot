@@ -213,6 +213,21 @@ function parseBoundedInteger(
   return Number(value);
 }
 
+function validateSubprocessWorker(name: string, value: Record<string, unknown>): void {
+  if (value.command !== undefined) assertNonEmptyString(value.command, `workers.${name}.command`);
+  if (value.commandArgs !== undefined) {
+    if (!Array.isArray(value.commandArgs) || !value.commandArgs.every((item) => typeof item === 'string')) {
+      throw new Error(`workers.${name}.commandArgs must be an array of strings`);
+    }
+  }
+  if (value.environment !== undefined) {
+    assertRecord(value.environment, `workers.${name}.environment`);
+    if (!Object.values(value.environment).every((item) => typeof item === 'string')) {
+      throw new Error(`workers.${name}.environment values must be strings`);
+    }
+  }
+}
+
 function parseWorker(name: string, value: unknown): WorkerConfig {
   assertRecord(value, `workers.${name}`);
   if (value.adapter === 'mock') {
@@ -229,25 +244,14 @@ function parseWorker(name: string, value: unknown): WorkerConfig {
     };
   }
   if (value.adapter === 'pi-rpc') {
-    if (value.command !== undefined) assertNonEmptyString(value.command, `workers.${name}.command`);
-    if (value.commandArgs !== undefined) {
-      if (!Array.isArray(value.commandArgs) || !value.commandArgs.every((item) => typeof item === 'string')) {
-        throw new Error(`workers.${name}.commandArgs must be an array of strings`);
-      }
-    }
-    if (value.environment !== undefined) {
-      assertRecord(value.environment, `workers.${name}.environment`);
-      if (!Object.values(value.environment).every((item) => typeof item === 'string')) {
-        throw new Error(`workers.${name}.environment values must be strings`);
-      }
-    }
+    validateSubprocessWorker(name, value);
     if (value.noSession !== undefined && typeof value.noSession !== 'boolean') {
       throw new Error(`workers.${name}.noSession must be a boolean`);
     }
     return {
       adapter: 'pi-rpc',
-      ...(value.command === undefined ? {} : { command: value.command }),
-      ...(value.commandArgs === undefined ? {} : { commandArgs: [...value.commandArgs] as string[] }),
+      ...(value.command === undefined ? {} : { command: value.command as string }),
+      ...(value.commandArgs === undefined ? {} : { commandArgs: [...(value.commandArgs as string[])] }),
       ...(value.noSession === undefined ? {} : { noSession: value.noSession }),
       ...(value.environment === undefined
         ? {}
@@ -255,18 +259,7 @@ function parseWorker(name: string, value: unknown): WorkerConfig {
     };
   }
   if (value.adapter === 'opencode-json') {
-    if (value.command !== undefined) assertNonEmptyString(value.command, `workers.${name}.command`);
-    if (value.commandArgs !== undefined) {
-      if (!Array.isArray(value.commandArgs) || !value.commandArgs.every((item) => typeof item === 'string')) {
-        throw new Error(`workers.${name}.commandArgs must be an array of strings`);
-      }
-    }
-    if (value.environment !== undefined) {
-      assertRecord(value.environment, `workers.${name}.environment`);
-      if (!Object.values(value.environment).every((item) => typeof item === 'string')) {
-        throw new Error(`workers.${name}.environment values must be strings`);
-      }
-    }
+    validateSubprocessWorker(name, value);
     if (value.unsetEnvironment !== undefined) {
       if (
         !Array.isArray(value.unsetEnvironment) ||
@@ -277,8 +270,8 @@ function parseWorker(name: string, value: unknown): WorkerConfig {
     }
     return {
       adapter: 'opencode-json',
-      ...(value.command === undefined ? {} : { command: value.command }),
-      ...(value.commandArgs === undefined ? {} : { commandArgs: [...value.commandArgs] as string[] }),
+      ...(value.command === undefined ? {} : { command: value.command as string }),
+      ...(value.commandArgs === undefined ? {} : { commandArgs: [...(value.commandArgs as string[])] }),
       ...(value.environment === undefined
         ? {}
         : { environment: { ...(value.environment as Record<string, string>) } }),

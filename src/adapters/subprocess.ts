@@ -1,10 +1,25 @@
 import { constants } from 'node:fs';
 import { access } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 
 export type EffectiveEnvironment = NodeJS.ProcessEnv;
+
+export function hasCredentialValue(value: unknown): boolean {
+  if (typeof value === 'string') return value.trim() !== '';
+  if (Array.isArray(value)) return value.some((item) => hasCredentialValue(item));
+  if (typeof value !== 'object' || value === null) return false;
+  return Object.entries(value)
+    .filter(([key]) => key !== 'type' && key !== 'env')
+    .some(([, item]) => hasCredentialValue(item));
+}
+
+export function effectiveHomeDirectory(environment: EffectiveEnvironment): string {
+  if (process.platform === 'win32') return environment.USERPROFILE || os.homedir();
+  return environment.HOME || os.homedir();
+}
 
 export class StrictJsonlDecoder {
   readonly #decoder = new StringDecoder('utf8');

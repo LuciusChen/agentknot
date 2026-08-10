@@ -83,8 +83,12 @@ test('planner instructions delegate bounded repository deliverables and evidence
   assert.match(prompt, /even when it is read-only, low-complexity, or nonparallel/);
   assert.match(prompt, /retrieving one explicit fact from one already identified location/);
   assert.match(prompt, /do not retain evidence-producing repository analysis merely because it creates no patch/);
-  assert.match(prompt, /Execution workspace: \/tmp\/project/);
-  assert.match(prompt, /any referenced repository or "none"/);
+  assert.match(prompt, /Authoritative primary target workspace: \/tmp\/project/);
+  assert.match(prompt, /only repository a worker may modify/);
+  assert.match(prompt, /Never reinterpret another repository named in the task as the target/);
+  assert.match(prompt, /every other repository is a read-only reference/);
+  assert.match(prompt, /requested edit target conflicts with the request workspace/);
+  assert.match(prompt, /any read-only referenced repository or "none"/);
   assert.match(prompt, /at most five findings and 4000 characters/);
   assert.match(prompt, /Do not request a repository inventory, exhaustive source summary/);
   assert.match(prompt, /"parallelizable":true\|false/);
@@ -332,7 +336,12 @@ test('small low-complexity repository work is delegated once and selected by the
     [['repository-analysis', 'deepseek-flash', 'rule']]
   );
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Repository-analysis boundary:/);
-  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Execution workspace: \/tmp\/project/);
+  assert.match(
+    analysisPlan.subtasks[0]?.executionPrompt ?? '',
+    /Authoritative primary target workspace \(the only writable repository\): \/tmp\/project/
+  );
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Every other repository is a read-only reference/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /report the workspace mismatch/);
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /at most five findings and 4000 characters/);
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Do not inventory the repository/);
 });
