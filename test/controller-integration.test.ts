@@ -157,6 +157,9 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     assert.match(body, /trivial one-read check upstream/);
     assert.match(body, new RegExp(`--source ${integration.controller}`));
     assert.match(body, /command -v agentknot/);
+    assert.match(body, /AGENTKNOT_SERVER_URL/);
+    assert.match(body, /shared AgentKnot execution owner/);
+    assert.match(body, /do not launch another local runtime/);
     assert.match(body, /In one shell call/);
     assert.match(body, /stop before orchestration/);
     assert.match(body, /installed and available on PATH/);
@@ -201,6 +204,8 @@ test('Codex and Claude plugins expose the same bounded AgentKnot delegation cont
     assert.match(hookScript, /policy\.mode !== 'auto'/);
     assert.match(hookScript, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
     assert.match(hookScript, /artifact-preview/);
+    assert.match(hookScript, /AGENTKNOT_SERVER_URL/);
+    assert.match(hookScript, /'--server'/);
     assert.match(hookScript, /'inherit'/);
     assert.doesNotMatch(hookScript, /git\s+(?:apply|am|commit|push|merge)\b/);
     if (integration.agentMetadata !== undefined) {
@@ -292,6 +297,59 @@ test('controller hook runs configured automatic delegation before the model and 
   assert.equal(explicit, '');
   assert.equal((await readFile(callsFile, 'utf8')).trim().split('\n').length, 3);
 });
+
+for (const integration of integrations) {
+  test(`${integration.controller} hook uses one selected shared server without reading local config`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-server-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const serverUrl = 'http://127.0.0.1:17391';
+    const prompt = 'Inspect one bounded component.';
+    const result = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ''}`,
+        AGENTKNOT_CONFIG: undefined,
+        AGENTKNOT_SERVER_URL: serverUrl,
+        FAKE_AGENTKNOT_CALLS: callsFile,
+        FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
+          plan: { willDispatch: false, reasoning: 'Keep this bounded prompt upstream.' },
+          children: [],
+          artifacts: [],
+        }),
+      },
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
+    );
+    const output = JSON.parse(result) as {
+      hookSpecificOutput: { hookEventName: string; additionalContext: string };
+    };
+    assert.match(output.hookSpecificOutput.additionalContext, /kept it upstream/);
+
+    const calls = (await readFile(callsFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[]);
+    assert.deepEqual(calls, [
+      ['delegation', '--json', '--server', serverUrl],
+      [
+        'orchestrate',
+        '--source',
+        integration.controller,
+        '--workspace',
+        repositoryRoot,
+        '--delegation',
+        'inherit',
+        '--handoff-json',
+        '--prompt',
+        prompt,
+        '--server',
+        serverUrl,
+      ],
+    ]);
+  });
+}
 
 for (const integration of integrations) {
   test(`${integration.controller} hook bounds automatic handoff failure without fallback`, async (t) => {

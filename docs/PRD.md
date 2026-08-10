@@ -53,6 +53,7 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 8. Submit one goal and have the same policy decide whether to keep it upstream, suggest a split, or dispatch bounded child jobs regardless of controller vendor.
 9. Optionally ask a separately configured route to review one bounded patch before the controller makes the final acceptance decision.
 10. Optionally obtain controller-owned test evidence for one bounded patch without first applying it to the supplied source workspace.
+11. Use one local AgentKnot execution owner concurrently from multiple upstream controller sessions without sharing file-store write authority with those clients.
 
 ## Product principles
 

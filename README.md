@@ -123,6 +123,16 @@ agentknot routes
 
 Ensure `$HOME/.local/bin` is on the controller process `PATH`.
 
+For concurrent controller sessions, start one AgentKnot server with the authoritative configuration, then give every Codex, Claude, or shell session the same URL:
+
+```bash
+agentknot serve --config /path/to/agentknot.config.json --host 127.0.0.1 --port 7391
+export AGENTKNOT_SERVER_URL=http://127.0.0.1:7391
+agentknot delegation --json
+```
+
+In this mode the CLI and both hooks submit, wait, cancel, list, verify, and preview through that server. They do not open local storage, run startup reconciliation, or discover a repository-local AgentKnot configuration. The server owns the shared task pool and configured concurrency once, so more upstream sessions do not manufacture extra worker capacity. Server failure is explicit and never falls back to a local runtime or another model. Do not also set `AGENTKNOT_CONFIG` for a controller hook; select either the shared server or a local configuration.
+
 Install the Codex plugin from a local checkout, then start a new Codex session:
 
 ```bash
@@ -141,7 +151,7 @@ claude plugin install agentknot@agentknot
 
 Invoke it explicitly as `/agentknot:agentknot-delegate`; Claude's native Skill surface remains available, while configured automatic entry uses the same pre-model hook contract. A controller's `/goal` may preserve an upstream goal, but `/goal` is not the AgentKnot protocol and does not itself bypass the plugin or orchestration API.
 
-After installation or any hook change, review and trust the plugin hook in the controller's native hook UI, then start a new session. `UserPromptSubmit` has no task-category matcher. The hook is a dependency-free I/O adapter: it finds the Git root, requires resolved delegation `mode: "auto"`, and synchronously calls `agentknot orchestrate --delegation inherit --handoff-json` before the first controller-model request. The existing Luna planner decides whether work stays upstream or dispatches; configured low children use DeepSeek Flash/max and medium/high/default children use Luna/max. Explicit Skill prompts bypass the hook, and Codex keeps implicit Skill loading disabled.
+After installation or any hook change, review and trust the plugin hook in the controller's native hook UI, then start a new session. `UserPromptSubmit` has no task-category matcher. The hook is a dependency-free I/O adapter: it finds the Git root, reads the delegation policy from the explicitly selected shared server or local configuration, and synchronously calls `agentknot orchestrate --delegation inherit --handoff-json` before the first controller-model request. The existing Luna planner decides whether work stays upstream or dispatches; configured low children use DeepSeek Flash/max and medium/high/default children use Luna/max. Explicit Skill prompts bypass the hook, and Codex keeps implicit Skill loading disabled.
 
 For delegated work, the hook supplies compact terminal evidence and integrity-valid non-empty patch previews but never applies them. All child outputs share a 24,000-character budget, previews share 32,000 characters, and total model-visible hook context is capped at 60,000 characters. A configured `auto` repository therefore forwards every non-explicit submitted prompt to the configured planner, including prompts the planner later retains upstream; use `off` or `suggest` where that latency or data boundary is unacceptable. No MCP server, wrapper daemon, local semantic classifier, learned router, or fallback model is added; see [decision 0030](postmortems/0030-pre-model-controller-dispatch.md).
 
@@ -273,8 +283,10 @@ The included `deepseek-flash` route keeps Pi and OpenCode Go but selects DeepSee
 Start the local control plane:
 
 ```bash
-agentknot serve --host 127.0.0.1 --port 7391
+agentknot serve --config /path/to/agentknot.config.json --host 127.0.0.1 --port 7391
 ```
+
+The server is the single execution and file-store owner for any number of trusted local clients. A CLI client selects it with `--server http://127.0.0.1:7391` or `AGENTKNOT_SERVER_URL`; `run`, `orchestrate`, `routes`, `jobs`, `show`, `delegation`, orchestration inspection, and artifact inspection use the existing HTTP API without constructing another runtime. `doctor`, `usage`, and live `--events` remain local-only in this slice. Server lifecycle is explicit; this is not a durable queue, remote fleet, or automatic service manager.
 
 Submit asynchronously:
 
@@ -311,7 +323,7 @@ For a completed delegated orchestration, inspect `result.artifactReview` through
 
 The deliberate handoff workflow is: inspect the parent and child records; verify every candidate artifact's size, SHA-256, and base; preview intact patches; review all overlap and unavailable evidence; then explicitly accept or reject the artifact or child set in the upstream controller. Acceptance does not apply anything. Any promotion is a separate explicit repository action after acceptance; AgentKnot has no promotion command and never mutates the source during orchestration, inspection, acceptance, or rejection.
 
-Read-oriented CLI commands, including `show`, lists, artifact inspection, route and delegation inspection, and both doctor modes, open persisted records without ownership or startup reconciliation. A TypeScript runtime created with `reconcileOnStartup: false` has the same read-only capability boundary: its execution and reconciliation methods refuse calls. `run`, `orchestrate`, and a valid `serve` invocation are execution owners. They acquire non-blocking advisory locks on the canonical Job and Orchestration storage directories before any reconciliation or admission; a second conforming owner exits clearly, while read-only commands remain available. Invalid `serve` arguments are rejected before runtime construction.
+Without shared-server mode, read-oriented CLI commands, including `show`, lists, artifact inspection, route and delegation inspection, and both doctor modes, open persisted records without ownership or startup reconciliation. A TypeScript runtime created with `reconcileOnStartup: false` has the same read-only capability boundary: its execution and reconciliation methods refuse calls. Local `run`, local `orchestrate`, and a valid `serve` invocation are execution owners. They acquire non-blocking advisory locks on the canonical Job and Orchestration storage directories before any reconciliation or admission; a second conforming owner exits clearly. Concurrent upstream sessions must use one selected server rather than multiple checkout-relative execution runtimes. Invalid `serve` arguments are rejected before runtime construction.
 
 The file-backed owner helper uses the host `flock` command and holds kernel locks for the runtime lifetime. One-shot CLI commands release them after completion; a server process crash releases them through the kernel. TypeScript callers must call `await runtime.close()` after all admitted work settles; closing while admission or completion is active is refused. After a new owner acquires both locks, all prior nonterminal snapshots are failed once without replay, regardless of recorded PID, so PID reuse or a different PID namespace is not used as takeover authority. Directly constructed stores/runtimes remain an advanced in-process API and do not bypass the documented single-writer responsibility ([decision 0022](postmortems/0022-file-runtime-single-writer-ownership.md)).
 

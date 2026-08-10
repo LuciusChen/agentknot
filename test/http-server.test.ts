@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
@@ -18,6 +19,7 @@ import { MemoryJobStore } from '../src/store.js';
 import type { WorkerAdapter } from '../src/types.js';
 
 const execFileAsync = promisify(execFile);
+const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 
 async function git(directory: string, ...args: string[]): Promise<string> {
   const result = await execFileAsync('git', args, { cwd: directory, encoding: 'utf8' });
@@ -358,5 +360,103 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
     assert.equal(events.events.at(-1)?.type, 'orchestration.succeeded');
   } finally {
     await http.close();
+  }
+});
+
+test('two independent CLI processes share one orchestration runtime without local config access', async () => {
+  const config: AgentKnotConfig = {
+    version: 1,
+    defaultRoute: 'mock',
+    storage: { directory: '.agentknot/jobs' },
+    workers: { mock: { adapter: 'mock' } },
+    routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
+    delegation: {
+      mode: 'off',
+      planner: { strategy: 'hybrid', route: 'mock' },
+      dispatch: { defaultRoute: 'mock', maxChildren: 2, maxDepth: 1, maxConcurrency: 1 },
+      policy: { delegate: ['documentation'], keepUpstream: ['commit', 'push'] },
+      fallback: 'upstream',
+    },
+  };
+  const jobs = new Orchestrator({
+    config,
+    store: new MemoryJobStore(),
+    adapters: createAdapters(config),
+  });
+  const orchestrations = new OrchestrationService({
+    config: config.delegation!,
+    jobs,
+    store: new MemoryOrchestrationStore(),
+  });
+  const http = createAgentKnotHttpServer(new AgentKnotRuntime(jobs, orchestrations));
+  const address = await http.listen(0);
+  const baseUrl = `http://${address.host}:${address.port}`;
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-shared-cli-'));
+
+  try {
+    const runClient = (source: 'codex' | 'claude', prompt: string) =>
+      execFileAsync(
+        process.execPath,
+        [
+          cliPath,
+          'orchestrate',
+          ...(source === 'codex' ? ['--server', baseUrl] : []),
+          '--source',
+          source,
+          '--workspace',
+          workspace,
+          '--handoff-json',
+          '--prompt',
+          prompt,
+        ],
+        {
+          cwd: workspace,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            AGENTKNOT_CONFIG: undefined,
+            AGENTKNOT_SERVER_URL: source === 'claude' ? baseUrl : undefined,
+          },
+        }
+      );
+    const [codexResult, claudeResult] = await Promise.all([
+      runClient('codex', 'Codex shared-runtime request.'),
+      runClient('claude', 'Claude shared-runtime request.'),
+    ]);
+    const codexHandoff = JSON.parse(String(codexResult.stdout)) as {
+      id: string;
+      status: string;
+      result?: { action: string };
+    };
+    const claudeHandoff = JSON.parse(String(claudeResult.stdout)) as typeof codexHandoff;
+    assert.notEqual(codexHandoff.id, claudeHandoff.id);
+    assert.deepEqual(
+      [codexHandoff, claudeHandoff].map((handoff) => [handoff.status, handoff.result?.action]),
+      [
+        ['succeeded', 'upstream'],
+        ['succeeded', 'upstream'],
+      ]
+    );
+
+    const persisted = await orchestrations.list();
+    assert.equal(persisted.length, 2);
+    assert.deepEqual(new Set(persisted.map((record) => record.request.source)), new Set(['codex', 'claude']));
+
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [cliPath, 'delegation', '--server', 'http://127.0.0.1:1', '--json'],
+        { cwd: workspace, encoding: 'utf8', env: { ...process.env, AGENTKNOT_CONFIG: undefined } }
+      ),
+      (error: unknown) => {
+        const stderr = String((error as { stderr?: unknown }).stderr ?? '');
+        assert.match(stderr, /AgentKnot server request failed/);
+        assert.doesNotMatch(stderr, /agentknot\.config\.json/);
+        return true;
+      }
+    );
+  } finally {
+    await http.close();
+    await rm(workspace, { recursive: true, force: true });
   }
 });

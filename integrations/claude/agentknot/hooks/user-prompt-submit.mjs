@@ -60,19 +60,29 @@ try {
     process.exit(0);
   }
   const workspace = rootOutput.trim();
+  const serverUrl = process.env.AGENTKNOT_SERVER_URL;
+  if (serverUrl !== undefined && serverUrl.trim() === '') {
+    throw new Error('AGENTKNOT_SERVER_URL must not be empty');
+  }
+  if (serverUrl !== undefined && process.env.AGENTKNOT_CONFIG !== undefined) {
+    throw new Error('AGENTKNOT_SERVER_URL and AGENTKNOT_CONFIG cannot be used together');
+  }
   const configPath =
-    process.env.AGENTKNOT_CONFIG === undefined
-      ? path.join(workspace, 'agentknot.config.json')
-      : path.resolve(cwd, process.env.AGENTKNOT_CONFIG);
-  if (process.env.AGENTKNOT_CONFIG === undefined) {
+    serverUrl === undefined
+      ? process.env.AGENTKNOT_CONFIG === undefined
+        ? path.join(workspace, 'agentknot.config.json')
+        : path.resolve(cwd, process.env.AGENTKNOT_CONFIG)
+      : undefined;
+  if (serverUrl === undefined && process.env.AGENTKNOT_CONFIG === undefined) {
     try {
       await access(configPath);
     } catch {
       process.exit(0);
     }
   }
+  const connectionArgs = serverUrl === undefined ? ['--config', configPath] : ['--server', serverUrl];
 
-  const { stdout: policyOutput } = await run(['delegation', '--json', '--config', configPath], workspace);
+  const { stdout: policyOutput } = await run(['delegation', '--json', ...connectionArgs], workspace);
   const policy = JSON.parse(policyOutput);
   if (policy.mode !== 'auto') process.exit(0);
 
@@ -88,8 +98,7 @@ try {
       '--handoff-json',
       '--prompt',
       event.prompt,
-      '--config',
-      configPath,
+      ...connectionArgs,
     ],
     workspace
   );
@@ -127,7 +136,7 @@ try {
   for (const target of previewTargets) {
     try {
       const { stdout } = await run(
-        ['artifact-preview', target.jobId, String(target.attempt), '--json', '--config', configPath],
+        ['artifact-preview', target.jobId, String(target.attempt), '--json', ...connectionArgs],
         workspace
       );
       const preview = JSON.parse(stdout);

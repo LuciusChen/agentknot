@@ -149,3 +149,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0035](./0035-delegation-first-small-repository-deliverables.md) | Decision / Experiment | Accepted | Delegate small repository deliverables before the controller model |
 | [0036](./0036-bounded-advisory-quality-review.md) | Decision / Experiment | Accepted | Bound advisory quality review to supplied evidence |
 | [0037](./0037-controller-owned-artifact-validation.md) | Decision | Accepted | Validate one delegated patch in a disposable worktree |
+| [0038](./0038-shared-local-controller-runtime.md) | Incident / Decision | Accepted | Route concurrent controllers through one local execution owner |

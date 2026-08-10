@@ -38,6 +38,8 @@ Invoke this skill explicitly as `$agentknot-delegate` with the bounded task, or 
      --prompt "$TASK"
    ```
 
+   When `AGENTKNOT_SERVER_URL` is set, the CLI uses that shared AgentKnot execution owner. Do not scan the checkout for AgentKnot source, configuration, or storage in that mode, and do not launch another local runtime. If the shared server is unavailable, report the failure without falling back to a local runtime or another worker, provider, or model.
+
    If the preflight fails, stop before orchestration and report the prerequisite; do not substitute another command, worker, provider, or model.
 3. Consume the compact terminal JSON handoff. Parse and report its `status`, `result.action`, `error`, `children`, `artifacts`, `result.artifactReview`, optional `qualityReview`, and optional controller-owned `artifactValidation`; a process exit code or worker prose alone is not a terminal record. The `artifacts` array already contains checksum, size, base, changed-file, validity, and issue evidence. Review and validation are advisory; a passed validation covers the exact recorded patch at its recorded base, not the later integrated workspace. Once this command returns a terminal status, do not poll processes, relist full records, or repeat artifact verification. Do not rerun a successful artifact-validation command before deciding on the patch.
 4. Preview each valid non-empty artifact attempt once as plain patch content with `agentknot artifact-preview "$jobId" "$attempt"`. Treat unavailable, invalid, or incomplete evidence as upstream review input rather than acceptance.

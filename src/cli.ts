@@ -2,6 +2,7 @@
 
 import process from 'node:process';
 
+import { AgentKnotHttpClient } from './http-client.js';
 import { createAgentKnotHttpServer } from './http-server.js';
 import type { OrchestrationRecord } from './orchestration-types.js';
 import { limitTextSuffix } from './record-limits.js';
@@ -69,6 +70,7 @@ Usage:
 
 Global options:
   --config PATH       Configuration file (default: agentknot.config.json)
+  --server URL        Shared AgentKnot server (or AGENTKNOT_SERVER_URL)
 
 Run options:
   --prompt TEXT       Prompt instead of positional text
@@ -371,6 +373,10 @@ async function main(argv: string[]): Promise<void> {
   }
 
   const configPath = takeOption(args, '--config');
+  const serverUrl = takeOption(args, '--server') ?? process.env.AGENTKNOT_SERVER_URL;
+  if (configPath !== undefined && serverUrl !== undefined) {
+    throw new Error('--config and --server/AGENTKNOT_SERVER_URL cannot be used together');
+  }
 
   if (command === 'run') {
     const route = takeOption(args, '--route');
@@ -382,6 +388,23 @@ async function main(argv: string[]): Promise<void> {
     const events = takeFlag(args, '--events');
     if (args.some((value) => value.startsWith('--'))) throw new Error(`Unknown option: ${args.join(' ')}`);
     const prompt = promptOption ?? args.join(' ');
+    if (serverUrl !== undefined) {
+      if (events) throw new Error('--events is not available with --server; inspect persisted events');
+      const client = new AgentKnotHttpClient(serverUrl);
+      const initial = await client.startJob({
+        prompt,
+        workspace,
+        source,
+        ...(route === undefined ? {} : { route }),
+        ...(callbackUrl === undefined ? {} : { callbackUrl }),
+      });
+      const stopCancellation = cancelOnTermination(() => client.cancelJob(initial.id));
+      const job = await client.waitForJob(initial).finally(stopCancellation);
+      if (!json) process.stdout.write(`\n${job.id}\t${job.status}\n`);
+      else process.stdout.write(`${JSON.stringify(job, null, 2)}\n`);
+      if (job.status !== 'succeeded') process.exitCode = 1;
+      return;
+    }
     const runtime = await createRuntime({
       ...(configPath === undefined ? {} : { configPath }),
       onEvent: (event) => printEvent(event, json, events),
@@ -429,6 +452,36 @@ async function main(argv: string[]): Promise<void> {
     }
     if (args.some((value) => value.startsWith('--'))) throw new Error(`Unknown option: ${args.join(' ')}`);
     const prompt = promptOption ?? args.join(' ');
+    if (serverUrl !== undefined) {
+      const client = new AgentKnotHttpClient(serverUrl);
+      const initial = await client.startOrchestration({
+        prompt,
+        workspace,
+        source,
+        ...(delegation === undefined
+          ? {}
+          : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),
+      });
+      const stopCancellation = cancelOnTermination(() => client.cancelOrchestration(initial.id));
+      const orchestration = await client.waitForOrchestration(initial).finally(stopCancellation);
+      const handoff = handoffJson
+        ? await orchestrationHandoff(client, orchestration)
+        : undefined;
+      if (handoffJson) {
+        process.stdout.write(`${JSON.stringify(handoff, null, 2)}\n`);
+      } else if (json) {
+        process.stdout.write(`${JSON.stringify(orchestration, null, 2)}\n`);
+      } else {
+        process.stdout.write(
+          `\n${orchestration.id}\t${orchestration.status}\t${orchestration.result?.action ?? 'none'}\n`
+        );
+        for (const child of orchestration.children) {
+          process.stdout.write(`${child.jobId}\t${child.status}\t${child.subtaskId}\n`);
+        }
+      }
+      if (orchestration.status !== 'succeeded') process.exitCode = 1;
+      return;
+    }
     const runtime = await createRuntime({
       ...(configPath === undefined ? {} : { configPath }),
       onEvent: (event) => printEvent(event, json || handoffJson, false),
@@ -474,6 +527,7 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (command === 'serve') {
+    if (serverUrl !== undefined) throw new Error('serve cannot be used with --server');
     const host = takeOption(args, '--host') ?? '127.0.0.1';
     const portValue = takeOption(args, '--port') ?? '7391';
     const port = Number(portValue);
@@ -499,16 +553,21 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  const runtime = await createRuntime({
-    ...(configPath === undefined ? {} : { configPath }),
-    reconcileOnStartup: false,
-  });
+  const remote = serverUrl === undefined ? undefined : new AgentKnotHttpClient(serverUrl);
+  const runtime =
+    remote === undefined
+      ? await createRuntime({
+          ...(configPath === undefined ? {} : { configPath }),
+          reconcileOnStartup: false,
+        })
+      : undefined;
 
   if (command === 'doctor') {
+    if (remote !== undefined) throw new Error('doctor is not available with --server');
     const route = takeOption(args, '--route');
     const live = takeFlag(args, '--live');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-    const result = await runtime.doctor(route, { live });
+    const result = await runtime!.doctor(route, { live });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     if (!result.ok) process.exitCode = 1;
     return;
@@ -517,7 +576,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'routes') {
     const json = takeFlag(args, '--json');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-    const routes = runtime.routes();
+    const routes = remote === undefined ? runtime!.routes() : await remote.routes();
     if (json) process.stdout.write(`${JSON.stringify(routes, null, 2)}\n`);
     else for (const route of routes) process.stdout.write(`${route.name}\t${route.worker}\t${route.provider}/${route.model}\n`);
     return;
@@ -526,16 +585,17 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'jobs') {
     const json = takeFlag(args, '--json');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-    const jobs = await runtime.list();
+    const jobs = remote === undefined ? await runtime!.list() : await remote.listJobs();
     if (json) process.stdout.write(`${JSON.stringify(jobs, null, 2)}\n`);
     else for (const job of jobs) process.stdout.write(`${job.id}\t${job.status}\t${job.route.name}\t${job.createdAt}\n`);
     return;
   }
 
   if (command === 'usage') {
+    if (remote !== undefined) throw new Error('usage is not available with --server');
     const json = takeFlag(args, '--json');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-    const report = await runtime.usage();
+    const report = await runtime!.usage();
     process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : formatUsageReport(report));
     return;
   }
@@ -544,7 +604,8 @@ async function main(argv: string[]): Promise<void> {
     const id = args.shift();
     const json = takeFlag(args, '--json');
     if (!id || args.length > 0) throw new Error('artifacts requires exactly one JOB_ID');
-    const artifacts = await runtime.listArtifacts(id);
+    const artifacts =
+      remote === undefined ? await runtime!.listArtifacts(id) : await remote.listArtifacts(id);
     if (!artifacts) {
       process.stderr.write(`Job not found: ${id}\n`);
       process.exitCode = 1;
@@ -565,7 +626,8 @@ async function main(argv: string[]): Promise<void> {
     const id = args.shift();
     const json = takeFlag(args, '--json');
     if (!id || args.length > 0) throw new Error('artifact-verify requires exactly one JOB_ID');
-    const verification = await runtime.verifyArtifacts(id);
+    const verification =
+      remote === undefined ? await runtime!.verifyArtifacts(id) : await remote.verifyArtifacts(id);
     if (!verification) {
       process.stderr.write(`Job not found: ${id}\n`);
       process.exitCode = 1;
@@ -592,7 +654,10 @@ async function main(argv: string[]): Promise<void> {
     }
     const attempt = Number(attemptValue);
     if (!Number.isSafeInteger(attempt) || attempt < 1) throw new Error('ATTEMPT must be a positive integer');
-    const preview = await runtime.previewArtifact(id, attempt);
+    const preview =
+      remote === undefined
+        ? await runtime!.previewArtifact(id, attempt)
+        : await remote.previewArtifact(id, attempt);
     if (!preview) {
       process.stderr.write(`Artifact not found: ${id} attempt ${attempt}\n`);
       process.exitCode = 1;
@@ -608,7 +673,8 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'delegation') {
     const json = takeFlag(args, '--json');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-    const policy = runtime.delegationPolicy();
+    const policy =
+      remote === undefined ? runtime!.delegationPolicy() : await remote.delegationPolicy();
     if (json) process.stdout.write(`${JSON.stringify(policy, null, 2)}\n`);
     else {
       process.stdout.write(
@@ -621,7 +687,10 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'orchestrations') {
     const json = takeFlag(args, '--json');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-    const orchestrations = await runtime.listOrchestrations();
+    const orchestrations =
+      remote === undefined
+        ? await runtime!.listOrchestrations()
+        : await remote.listOrchestrations();
     if (json) process.stdout.write(`${JSON.stringify(orchestrations, null, 2)}\n`);
     else {
       for (const orchestration of orchestrations) {
@@ -638,7 +707,10 @@ async function main(argv: string[]): Promise<void> {
     if (!id || args.length > 0) {
       throw new Error('orchestration-show requires exactly one ORCHESTRATION_ID');
     }
-    const orchestration = await runtime.getOrchestration(id);
+    const orchestration =
+      remote === undefined
+        ? await runtime!.getOrchestration(id)
+        : await remote.getOrchestration(id);
     if (!orchestration) {
       process.stderr.write(`Orchestration not found: ${id}\n`);
       process.exitCode = 1;
@@ -651,7 +723,7 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'show') {
     const id = args.shift();
     if (!id || args.length > 0) throw new Error('show requires exactly one JOB_ID');
-    const job = await runtime.get(id);
+    const job = remote === undefined ? await runtime!.get(id) : await remote.getJob(id);
     if (!job) {
       process.stderr.write(`Job not found: ${id}\n`);
       process.exitCode = 1;
