@@ -83,6 +83,70 @@ test('parseConfig registers OpenCode JSON as an independent worker runtime', () 
   });
 });
 
+test('parseConfig keeps route pools above complete exact routes', () => {
+  const base = {
+    version: 1,
+    defaultRoute: 'a',
+    storage: { directory: '.agentknot/jobs' },
+    workspaceIsolation: { mode: 'git-worktree' },
+    workers: { mock: { adapter: 'mock' } },
+    routes: {
+      a: { worker: 'mock', provider: 'p1', model: 'm1' },
+      b: { worker: 'mock', provider: 'p2', model: 'm2' },
+    },
+    routePools: {
+      balanced: { strategy: 'least-active', routes: ['a', 'b'] },
+    },
+    delegation: {
+      mode: 'auto',
+      planner: { strategy: 'hybrid', route: 'a' },
+      dispatch: {
+        defaultRoute: 'balanced',
+        maxChildren: 2,
+        maxDepth: 1,
+        maxConcurrency: 2,
+        routeSelection: { mode: 'active', rules: [{ route: 'balanced', complexities: ['high'] }] },
+      },
+      fallback: 'fail',
+    },
+  };
+  const config = parseConfig(base);
+  assert.deepEqual(config.routePools, {
+    balanced: { strategy: 'least-active', routes: ['a', 'b'] },
+  });
+  assert.equal(config.delegation?.dispatch.defaultRoute, 'balanced');
+  assert.equal(config.delegation?.dispatch.routeSelection?.rules[0]?.route, 'balanced');
+
+  assert.throws(
+    () => parseConfig({ ...base, routePools: { a: base.routePools.balanced } }),
+    /conflicts with an exact route/
+  );
+  assert.throws(
+    () => parseConfig({ ...base, routePools: { balanced: { strategy: 'least-active', routes: ['a'] } } }),
+    /2-20/
+  );
+  assert.throws(
+    () =>
+      parseConfig({
+        ...base,
+        routePools: { balanced: { strategy: 'least-active', routes: ['a', 'missing'] } },
+      }),
+    /unknown route/
+  );
+  assert.throws(
+    () => parseConfig({ ...base, routePools: { balanced: { strategy: 'random', routes: ['a', 'b'] } } }),
+    /least-active/
+  );
+  assert.throws(
+    () =>
+      parseConfig({
+        ...base,
+        delegation: { ...base.delegation, planner: { strategy: 'hybrid', route: 'balanced' } },
+      }),
+    /planner.route references unknown route/
+  );
+});
+
 test('parseConfig validates workspace isolation and preserves direct compatibility by default', () => {
   const base = {
     version: 1,

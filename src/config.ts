@@ -3,7 +3,9 @@ import path from 'node:path';
 
 import {
   THINKING_LEVELS,
+  ROUTE_POOL_STRATEGIES,
   WORKSPACE_ISOLATION_MODES,
+  type RoutePoolStrategy,
   type ResolvedRoute,
   type ThinkingLevel,
   type WorkspaceIsolationMode,
@@ -48,6 +50,11 @@ export interface RouteConfig {
   timeoutMs?: number;
 }
 
+export interface RoutePoolConfig {
+  strategy: RoutePoolStrategy;
+  routes: string[];
+}
+
 export interface AgentKnotConfig {
   version: 1;
   defaultRoute: string;
@@ -59,6 +66,7 @@ export interface AgentKnotConfig {
   workspaceIsolation?: WorkspaceIsolationConfig;
   workers: Record<string, WorkerConfig>;
   routes: Record<string, RouteConfig>;
+  routePools?: Record<string, RoutePoolConfig>;
   delegation?: DelegationConfig;
 }
 
@@ -327,6 +335,43 @@ function parseRoute(name: string, value: unknown, workers: Record<string, Worker
   };
 }
 
+function parseRoutePools(
+  value: unknown,
+  routes: Record<string, RouteConfig>
+): Record<string, RoutePoolConfig> {
+  if (value === undefined) return {};
+  assertRecord(value, 'config.routePools');
+  const pools: Record<string, RoutePoolConfig> = {};
+  for (const [name, candidate] of Object.entries(value)) {
+    assertNonEmptyString(name, 'config.routePools name');
+    if (Object.hasOwn(routes, name)) {
+      throw new Error(`config.routePools.${name} conflicts with an exact route name`);
+    }
+    const label = `config.routePools.${name}`;
+    assertRecord(candidate, label);
+    assertExactKeys(candidate, ['strategy', 'routes'], label);
+    if (!ROUTE_POOL_STRATEGIES.includes(candidate.strategy as RoutePoolStrategy)) {
+      throw new Error(`${label}.strategy must be "least-active"`);
+    }
+    const members = parseRouteSelectionStringArray(candidate.routes, `${label}.routes`);
+    if (members.length < 2 || members.length > 20) {
+      throw new Error(`${label}.routes must contain 2-20 entries`);
+    }
+    const unknown = members.find((route) => !Object.hasOwn(routes, route));
+    if (unknown) throw new Error(`${label}.routes references unknown route "${unknown}"`);
+    pools[name] = { strategy: candidate.strategy as RoutePoolStrategy, routes: members };
+  }
+  return pools;
+}
+
+function hasRouteTarget(
+  name: string,
+  routes: Record<string, RouteConfig>,
+  routePools: Record<string, RoutePoolConfig>
+): boolean {
+  return Object.hasOwn(routes, name) || Object.hasOwn(routePools, name);
+}
+
 function parseRouteSelectionStringArray(
   value: unknown,
   label: string,
@@ -350,7 +395,8 @@ function parseRouteSelectionStringArray(
 
 function parseRouteSelection(
   value: unknown,
-  routes: Record<string, RouteConfig>
+  routes: Record<string, RouteConfig>,
+  routePools: Record<string, RoutePoolConfig>
 ): RouteSelectionConfig {
   assertRecord(value, 'config.delegation.dispatch.routeSelection');
   assertKnownKeys(value, ['mode', 'rules'], 'config.delegation.dispatch.routeSelection');
@@ -366,8 +412,8 @@ function parseRouteSelection(
     assertRecord(item, label);
     assertKnownKeys(item, ['route', 'taskKinds', 'complexities'], label);
     assertNonEmptyString(item.route, `${label}.route`);
-    if (!Object.hasOwn(routes, item.route)) {
-      throw new Error(`${label}.route references unknown route "${item.route}"`);
+    if (!hasRouteTarget(item.route, routes, routePools)) {
+      throw new Error(`${label}.route references unknown route or pool "${item.route}"`);
     }
     const taskKinds =
       item.taskKinds === undefined
@@ -448,6 +494,7 @@ function parseQualityReview(
 function parseDelegation(
   value: unknown,
   routes: Record<string, RouteConfig>,
+  routePools: Record<string, RoutePoolConfig>,
   defaultRoute: string
 ): DelegationConfig | undefined {
   if (value === undefined) return undefined;
@@ -473,9 +520,9 @@ function parseDelegation(
     assertNonEmptyString(dispatch.defaultRoute, 'config.delegation.dispatch.defaultRoute');
   }
   const defaultDispatchRoute = (dispatch.defaultRoute as string | undefined) ?? defaultRoute;
-  if (!(defaultDispatchRoute in routes)) {
+  if (!hasRouteTarget(defaultDispatchRoute, routes, routePools)) {
     throw new Error(
-      `config.delegation.dispatch.defaultRoute references unknown route "${defaultDispatchRoute}"`
+      `config.delegation.dispatch.defaultRoute references unknown route or pool "${defaultDispatchRoute}"`
     );
   }
   const maxChildren = parseBoundedInteger(
@@ -501,7 +548,7 @@ function parseDelegation(
   const routeSelection =
     dispatch.routeSelection === undefined
       ? undefined
-      : parseRouteSelection(dispatch.routeSelection, routes);
+      : parseRouteSelection(dispatch.routeSelection, routes, routePools);
 
   const qualityReview =
     value.qualityReview === undefined
@@ -590,7 +637,8 @@ export function parseConfig(value: unknown): AgentKnotConfig {
   if (!(value.defaultRoute in routes)) {
     throw new Error(`config.defaultRoute references unknown route "${value.defaultRoute}"`);
   }
-  const delegation = parseDelegation(value.delegation, routes, value.defaultRoute);
+  const routePools = parseRoutePools(value.routePools, routes);
+  const delegation = parseDelegation(value.delegation, routes, routePools, value.defaultRoute);
   if (delegation && delegation.mode !== 'off' && workspaceIsolation.mode !== 'git-worktree') {
     throw new Error('config.delegation mode "suggest" or "auto" requires workspaceIsolation.mode "git-worktree"');
   }
@@ -606,6 +654,7 @@ export function parseConfig(value: unknown): AgentKnotConfig {
     workspaceIsolation,
     workers,
     routes,
+    ...(Object.keys(routePools).length === 0 ? {} : { routePools }),
     ...(delegation === undefined ? {} : { delegation }),
   };
 }

@@ -544,6 +544,47 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
   }
 });
 
+test('OrchestrationService dispatches parallel children through a complete-route pool', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-route-pool-');
+  const adapter = new PlannerAndWorkerAdapter(assessment, 20);
+  const config = testConfig(2);
+  config.routePools = {
+    balanced: { strategy: 'least-active', routes: ['worker', 'alternate'] },
+  };
+  config.delegation!.dispatch.defaultRoute = 'balanced';
+  const jobStore = new MemoryJobStore();
+  const jobs = new Orchestrator({
+    config,
+    store: jobStore,
+    adapters: new Map([[adapter.name, adapter]]),
+  });
+  const orchestrations = new OrchestrationService({
+    config: config.delegation!,
+    jobs,
+    store: new MemoryOrchestrationStore(),
+  });
+
+  const record = await orchestrations.run({
+    prompt: 'Review tests and update docs through the configured pool.',
+    workspace,
+    source: 'codex',
+  });
+  assert.equal(record.status, 'succeeded');
+  const children = await Promise.all(record.children.map((child) => jobs.get(child.jobId)));
+  assert.deepEqual(
+    children.map((child) => child?.route.name).sort(),
+    ['alternate', 'worker']
+  );
+  assert.equal(children.every((child) => child?.request.route === 'balanced'), true);
+  assert.equal(children.every((child) => child?.routePoolSelection?.pool === 'balanced'), true);
+  assert.equal(children.every((child) => child?.routePoolSelection?.selectedRoute === child?.route.name), true);
+  assert.equal(record.children.every((child) => child.routePoolSelection?.pool === 'balanced'), true);
+  assert.equal(
+    record.children.every((child) => child.routePoolSelection?.selectedRoute === child.route?.name),
+    true
+  );
+});
+
 test('OrchestrationService runs one advisory reviewer after one valid low-complexity patch', async () => {
   const workspace = await createGitWorkspace('agentknot-orchestration-quality-review-');
   const lowAssessment = singleQualityReviewAssessment('Produce reviewed file.');

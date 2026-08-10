@@ -3,7 +3,9 @@ import type {
   JobCompletionSummaryChangedFilesUnavailableReason,
   JobError,
   JobExecution,
+  JobRoutePoolSelection,
   JobStatus,
+  ResolvedRoute,
 } from './types.js';
 
 export const ORCHESTRATION_STATUSES = [
@@ -165,6 +167,10 @@ export interface OrchestrationChild {
   planHash: string;
   policyVersion: 1;
   status: JobStatus;
+  /** Exact admitted route snapshot; absent only on legacy records. */
+  route?: ResolvedRoute;
+  /** Pool admission evidence copied from the authoritative child Job when present. */
+  routePoolSelection?: JobRoutePoolSelection;
   output?: string;
   error?: JobError;
 }

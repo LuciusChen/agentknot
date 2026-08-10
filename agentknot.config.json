@@ -90,6 +90,15 @@
       "timeoutMs": 3600000
     }
   },
+  "routePools": {
+    "luna-workers": {
+      "strategy": "least-active",
+      "routes": [
+        "luna",
+        "opencode-luna"
+      ]
+    }
+  },
   "delegation": {
     "mode": "auto",
     "planner": {
@@ -97,7 +106,7 @@
       "route": "luna"
     },
     "dispatch": {
-      "defaultRoute": "luna",
+      "defaultRoute": "luna-workers",
       "maxChildren": 6,
       "maxDepth": 1,
       "maxConcurrency": 6,

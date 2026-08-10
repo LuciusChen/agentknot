@@ -199,6 +199,21 @@ function formatUsageReport(report: UsageReport): string {
   if (report.routeSelection.shadow.classifiedSelections > 0) {
     lines.push(...formatRouteMode('Shadow', report.routeSelection.shadow));
   }
+  if (report.routePools.status === 'available') {
+    lines.push(
+      reportRow(
+        'Pool selections',
+        `${formatCount(report.routePools.classifiedJobs)} / ${formatCount(report.routePools.observedJobs)} (${report.routePools.coverage})`
+      )
+    );
+    for (const selection of report.routePools.selections) {
+      lines.push(
+        reportRow(`${selection.pool} → ${selection.route}`, formatCount(selection.count), 4)
+      );
+    }
+  } else {
+    lines.push(reportRow('Pool selections', 'none'));
+  }
   lines.push(
     reportRow('Unclassified', formatCount(report.routeSelection.unavailableSelections)),
     '',
@@ -333,6 +348,8 @@ async function orchestrationHandoff(
       subtaskId: child.subtaskId,
       jobId: child.jobId,
       status: child.status,
+      route: child.route,
+      routePoolSelection: child.routePoolSelection,
       output: child.output,
       error: child.error,
     })),

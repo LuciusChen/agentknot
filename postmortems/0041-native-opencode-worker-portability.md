@@ -47,3 +47,7 @@ The user selected this portability and lifecycle evidence as the material benefi
 - **Hard-code Luna and DeepSeek in the adapter:** rejected because workers, providers, models, and effort are independent route dimensions and will change.
 - **Add route pooling inside the adapter:** rejected because heterogeneous balancing belongs above complete resolved routes and must not depend on Pi or OpenCode internals.
 - **Copy Pi auth into OpenCode:** rejected unchanged from decision 0028 because it defeats independent downstream configuration and expands the credential boundary.
+
+## Addendum: 2026-08-10
+
+[Decision 0042](./0042-complete-route-pool-balancing.md) delivered the separate generic pool layer. The repository now uses native OpenCode/Luna/max as one human-configured `luna-workers` member alongside Pi/Luna/max for medium/high/default children; the first real two-Job pool run selected and completed both routes without fallback. This does not change the native adapter's remaining repeated failure/cancellation/timeout soak gate.

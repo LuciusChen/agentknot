@@ -153,3 +153,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0039](./0039-live-plugin-cache-refresh.md) | Incident | Resolved | Do not invalidate hook paths used by active controller sessions |
 | [0040](./0040-product-owned-local-service-discovery.md) | Decision | Accepted | Discover one running local service without shell-profile edits |
 | [0041](./0041-native-opencode-worker-portability.md) | Decision / Experiment | Accepted | Add a native OpenCode worker to prove downstream portability |
+| [0042](./0042-complete-route-pool-balancing.md) | Decision | Accepted | Balance heterogeneous downstreams above complete routes |

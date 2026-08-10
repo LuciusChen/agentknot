@@ -41,6 +41,7 @@ import type {
   JobExecution,
   JobRecord,
   JobRequest,
+  JobRoutePoolSelection,
   JobStore,
   RouteDiagnostic,
   StartJobResult,
@@ -79,6 +80,12 @@ interface LiveProbeOutcome {
   checked: boolean;
   status: RouteDiagnostic['liveInference']['status'];
   message: string;
+}
+
+interface RouteReservation {
+  route: ReturnType<typeof resolveRoute>;
+  selection?: JobRoutePoolSelection;
+  release: () => void;
 }
 
 export interface OrchestratorOptions {
@@ -140,6 +147,8 @@ export class Orchestrator {
   readonly #execution: JobExecution;
   readonly #diagnosticTimeoutMs: number;
   readonly #recordMutations = new Map<string, Promise<void>>();
+  readonly #routeActivity = new Map<string, number>();
+  readonly #routePoolCursor = new Map<string, number>();
 
   constructor(options: OrchestratorOptions) {
     this.#config = options.config;
@@ -449,6 +458,58 @@ export class Orchestrator {
     return started.completion;
   }
 
+  #reserveRoute(targetName?: string): RouteReservation {
+    const target = targetName ?? this.#config.defaultRoute;
+    const pool = this.#config.routePools?.[target];
+    let routeName = target;
+    let selection: JobRoutePoolSelection | undefined;
+
+    if (pool) {
+      const activeBefore = Object.fromEntries(
+        pool.routes.map((candidate) => [candidate, this.#routeActivity.get(candidate) ?? 0])
+      );
+      const minimum = Math.min(...Object.values(activeBefore));
+      const cursor = this.#routePoolCursor.get(target) ?? 0;
+      let selectedIndex = -1;
+      for (let offset = 0; offset < pool.routes.length; offset += 1) {
+        const index = (cursor + offset) % pool.routes.length;
+        const candidate = pool.routes[index]!;
+        if (activeBefore[candidate] === minimum) {
+          selectedIndex = index;
+          break;
+        }
+      }
+      if (selectedIndex < 0) throw new Error(`Route pool "${target}" has no selectable member`);
+      routeName = pool.routes[selectedIndex]!;
+      this.#routePoolCursor.set(target, (selectedIndex + 1) % pool.routes.length);
+      selection = {
+        pool: target,
+        strategy: pool.strategy,
+        candidates: [...pool.routes],
+        selectedRoute: routeName,
+        activeBefore,
+        cursorBefore: cursor,
+        selectedMemberIndex: selectedIndex,
+        tieBreak: 'rotating-order',
+      };
+    }
+
+    const route = resolveRoute(this.#config, routeName);
+    this.#routeActivity.set(route.name, (this.#routeActivity.get(route.name) ?? 0) + 1);
+    let released = false;
+    return {
+      route,
+      ...(selection === undefined ? {} : { selection }),
+      release: () => {
+        if (released) return;
+        released = true;
+        const active = this.#routeActivity.get(route.name) ?? 0;
+        if (active <= 1) this.#routeActivity.delete(route.name);
+        else this.#routeActivity.set(route.name, active - 1);
+      },
+    };
+  }
+
   async start(request: JobRequest): Promise<StartJobResult> {
     const normalized = normalizeRequest(request);
     const workspace = await stat(normalized.workspace).catch(() => undefined);
@@ -458,9 +519,13 @@ export class Orchestrator {
         ? await this.#workspaceIsolation.inspect(normalized.workspace)
         : undefined;
 
-    const route = resolveRoute(this.#config, normalized.route);
+    const reservation = this.#reserveRoute(normalized.route);
+    const route = reservation.route;
     const adapter = this.#adapters.get(route.worker);
-    if (!adapter) throw new Error(`No adapter registered for worker "${route.worker}"`);
+    if (!adapter) {
+      reservation.release();
+      throw new Error(`No adapter registered for worker "${route.worker}"`);
+    }
 
     const now = this.#now().toISOString();
     const id = `job_${randomUUID()}`;
@@ -470,6 +535,9 @@ export class Orchestrator {
       status: 'queued',
       request: normalized,
       route,
+      ...(reservation.selection === undefined
+        ? {}
+        : { routePoolSelection: structuredClone(reservation.selection) }),
       createdAt: now,
       updatedAt: now,
       attempt: 0,
@@ -488,9 +556,15 @@ export class Orchestrator {
     try {
       await this.#store.create(job);
     } catch (error) {
+      reservation.release();
       throw new JobPersistenceError('admission', undefined, error);
     }
-    await this.#notifyObserver(job, job.events[0]!);
+    try {
+      await this.#notifyObserver(job, job.events[0]!);
+    } catch (error) {
+      reservation.release();
+      throw error;
+    }
 
     const execution = this.#execute(job, adapter, controller.signal, inspection).catch(
       async (error: unknown) => {
@@ -510,7 +584,7 @@ export class Orchestrator {
         }
       }
     );
-    const completion = execution.then(async () => {
+    const completion = execution.finally(reservation.release).then(async () => {
       await this.#deliverCallback(job);
       return structuredClone(job);
     });

@@ -263,6 +263,47 @@ test('usage report keeps valid zero stats distinct from missing evidence', () =>
   assert.equal(report.routeSelection.status, 'unavailable');
 });
 
+test('usage report exposes exact persisted route-pool distribution', () => {
+  const first = job('job_pool_a', stats(1, 1, 0, 0, 2, 0));
+  const second = job('job_pool_b', stats(1, 1, 0, 0, 2, 0));
+  first.request.route = 'luna-workers';
+  first.routePoolSelection = {
+    pool: 'luna-workers',
+    strategy: 'least-active',
+    candidates: ['luna', 'opencode-luna'],
+    selectedRoute: 'luna',
+    activeBefore: { luna: 0, 'opencode-luna': 0 },
+    cursorBefore: 0,
+    selectedMemberIndex: 0,
+    tieBreak: 'rotating-order',
+  };
+  second.request.route = 'luna-workers';
+  second.route = { ...second.route, name: 'opencode-luna', worker: 'opencode' };
+  second.routePoolSelection = {
+    pool: 'luna-workers',
+    strategy: 'least-active',
+    candidates: ['luna', 'opencode-luna'],
+    selectedRoute: 'opencode-luna',
+    activeBefore: { luna: 1, 'opencode-luna': 0 },
+    cursorBefore: 1,
+    selectedMemberIndex: 1,
+    tieBreak: 'rotating-order',
+  };
+
+  const report = buildUsageReport([first, second], []);
+  assert.deepEqual(report.routePools, {
+    status: 'available',
+    coverage: 'complete',
+    observedJobs: 2,
+    classifiedJobs: 2,
+    unavailableJobs: 0,
+    selections: [
+      { pool: 'luna-workers', route: 'luna', count: 1 },
+      { pool: 'luna-workers', route: 'opencode-luna', count: 1 },
+    ],
+  });
+});
+
 test('usage report aggregates route-neutral advisory review evidence without inferring controller acceptance', () => {
   const completedAccept = orchestration('orchestration_review_accept', 'active', []);
   completedAccept.policy.qualityReview = { route: 'reviewer-a', complexities: ['low'] };

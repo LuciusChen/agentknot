@@ -83,6 +83,30 @@ export type RouteSelectionUsage =
       reason: 'no-classified-route-selections';
     });
 
+export interface RoutePoolSelectionCount {
+  pool: string;
+  route: string;
+  count: number;
+}
+
+export type RoutePoolUsage =
+  | {
+      status: 'available';
+      coverage: 'complete' | 'partial';
+      observedJobs: number;
+      classifiedJobs: number;
+      unavailableJobs: number;
+      selections: RoutePoolSelectionCount[];
+    }
+  | {
+      status: 'unavailable';
+      reason: 'no-route-pool-selections';
+      observedJobs: 0;
+      classifiedJobs: 0;
+      unavailableJobs: 0;
+      selections: [];
+    };
+
 export interface QualityReviewReasonCount {
   status: 'skipped' | 'unavailable';
   reason: string;
@@ -143,6 +167,7 @@ export interface UsageReport {
   };
   downstream: DownstreamUsage;
   routeSelection: RouteSelectionUsage;
+  routePools: RoutePoolUsage;
   qualityReview: QualityReviewUsage;
   upstream: {
     status: 'unavailable';
@@ -415,6 +440,63 @@ function routeSelectionUsage(orchestrations: readonly OrchestrationRecord[]): {
   };
 }
 
+function routePoolUsage(jobs: readonly JobRecord[]): RoutePoolUsage {
+  const observed = jobs.filter((job) => job.routePoolSelection !== undefined);
+  if (observed.length === 0) {
+    return {
+      status: 'unavailable',
+      reason: 'no-route-pool-selections',
+      observedJobs: 0,
+      classifiedJobs: 0,
+      unavailableJobs: 0,
+      selections: [],
+    };
+  }
+  const counts = new Map<string, RoutePoolSelectionCount>();
+  let classifiedJobs = 0;
+  for (const job of observed) {
+    const selection = job.routePoolSelection;
+    if (
+      !selection ||
+      typeof selection.pool !== 'string' ||
+      selection.pool.trim() === '' ||
+      selection.strategy !== 'least-active' ||
+      !Array.isArray(selection.candidates) ||
+      !selection.candidates.includes(selection.selectedRoute) ||
+      !isNonNegativeSafeInteger(selection.cursorBefore) ||
+      !isNonNegativeSafeInteger(selection.selectedMemberIndex) ||
+      selection.candidates[selection.selectedMemberIndex] !== selection.selectedRoute ||
+      selection.selectedRoute !== job.route.name ||
+      selection.tieBreak !== 'rotating-order'
+    ) {
+      continue;
+    }
+    classifiedJobs += 1;
+    const key = `${selection.pool}\u0000${selection.selectedRoute}`;
+    const existing = counts.get(key);
+    if (existing) existing.count += 1;
+    else {
+      counts.set(key, {
+        pool: selection.pool,
+        route: selection.selectedRoute,
+        count: 1,
+      });
+    }
+  }
+  const unavailableJobs = observed.length - classifiedJobs;
+  return {
+    status: 'available',
+    coverage: unavailableJobs === 0 ? 'complete' : 'partial',
+    observedJobs: observed.length,
+    classifiedJobs,
+    unavailableJobs,
+    selections: [...counts.values()].sort((left, right) => {
+      if (left.pool !== right.pool) return left.pool.localeCompare(right.pool);
+      return left.route.localeCompare(right.route);
+    }),
+  };
+}
+
 type ClassifiedQualityReview = Exclude<OrchestrationQualityReview, { status: 'pending' }>;
 
 function includesString(values: readonly string[], value: unknown): value is string {
@@ -558,6 +640,7 @@ export function buildUsageReport(
 ): UsageReport {
   const downstream = downstreamUsage(jobs);
   const routeSelection = routeSelectionUsage(orchestrations);
+  const routePools = routePoolUsage(jobs);
   const qualityReview = qualityReviewUsage(orchestrations);
   return {
     schemaVersion: 1,
@@ -571,6 +654,7 @@ export function buildUsageReport(
     },
     downstream: downstream.downstream,
     routeSelection: routeSelection.routeSelection,
+    routePools,
     qualityReview,
     upstream: { status: 'unavailable', reason: 'controller-usage-not-persisted' },
     proportions: { status: 'unavailable', reason: 'controller-usage-not-persisted' },

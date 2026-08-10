@@ -87,6 +87,22 @@ export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhig
 
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
+export const ROUTE_POOL_STRATEGIES = ['least-active'] as const;
+
+export type RoutePoolStrategy = (typeof ROUTE_POOL_STRATEGIES)[number];
+
+/** Immutable admission evidence for a logical pool target resolved to one concrete route. */
+export interface JobRoutePoolSelection {
+  pool: string;
+  strategy: RoutePoolStrategy;
+  candidates: string[];
+  selectedRoute: string;
+  activeBefore: Record<string, number>;
+  cursorBefore: number;
+  selectedMemberIndex: number;
+  tieBreak: 'rotating-order';
+}
+
 export interface JobRequest {
   prompt: string;
   workspace: string;
@@ -237,6 +253,8 @@ export interface JobRecord {
   status: JobStatus;
   request: JobRequest;
   route: ResolvedRoute;
+  /** Present only when request.route named a configured route pool. */
+  routePoolSelection?: JobRoutePoolSelection;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;

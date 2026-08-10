@@ -1037,6 +1037,10 @@ export class OrchestrationService {
           planHash: plan.planHash,
           policyVersion: plan.policyVersion,
           status: started.job.status,
+          route: structuredClone(started.job.route),
+          ...(started.job.routePoolSelection === undefined
+            ? {}
+            : { routePoolSelection: structuredClone(started.job.routePoolSelection) }),
         };
         record.children.push(child);
         try {
