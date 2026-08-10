@@ -12,6 +12,17 @@ const HTTP_OPERATION_TIMEOUT_MS = 10_000;
 const MAX_HTTP_RESPONSE_BYTES = 17 * 1024 * 1024;
 const POLL_INTERVAL_MS = 100;
 
+export interface AgentKnotHealthResponse {
+  readonly ok: true;
+  readonly service: 'agentknot';
+  readonly status: 'live';
+  readonly checks: {
+    readonly storage: 'not-checked';
+    readonly routes: 'not-checked';
+    readonly inference: 'not-checked';
+  };
+}
+
 export class AgentKnotHttpClientError extends Error {
   readonly name = 'AgentKnotHttpClientError';
 
@@ -123,6 +134,35 @@ export class AgentKnotHttpClient {
       );
     }
     return body;
+  }
+
+  async health(): Promise<AgentKnotHealthResponse> {
+    const body = asObject(await this.#request('/health/live'), 'health response');
+    if (body.ok !== true) throw new AgentKnotHttpClientError('health response.ok must be true');
+    if (body.service !== 'agentknot') {
+      throw new AgentKnotHttpClientError('health response.service must be agentknot');
+    }
+    if (body.status !== 'live') {
+      throw new AgentKnotHttpClientError('health response.status must be live');
+    }
+    const checks = asObject(body.checks, 'health response.checks');
+    if (
+      checks.storage !== 'not-checked' ||
+      checks.routes !== 'not-checked' ||
+      checks.inference !== 'not-checked'
+    ) {
+      throw new AgentKnotHttpClientError('health response.checks must report all checks as not-checked');
+    }
+    return {
+      ok: true,
+      service: 'agentknot',
+      status: 'live',
+      checks: {
+        storage: 'not-checked',
+        routes: 'not-checked',
+        inference: 'not-checked',
+      },
+    };
   }
 
   async routes(): Promise<Array<{ name: string; worker: string; provider: string; model: string }>> {

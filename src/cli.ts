@@ -4,10 +4,15 @@ import process from 'node:process';
 
 import { AgentKnotHttpClient } from './http-client.js';
 import { createAgentKnotHttpServer } from './http-server.js';
+import {
+  createLocalDiscoveryRegistration,
+  readLocalDiscovery,
+  type LocalDiscoveryRegistration,
+} from './local-discovery.js';
 import type { OrchestrationRecord } from './orchestration-types.js';
 import { limitTextSuffix } from './record-limits.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
-import type { JobEvent } from './types.js';
+import type { JobEvent, JobRequest } from './types.js';
 import type { RouteSelectionModeUsage, UsageRate, UsageReport } from './usage-report.js';
 
 const MAX_HANDOFF_VALIDATION_STREAM_BYTES = 2 * 1024;
@@ -65,6 +70,7 @@ Usage:
   agentknot artifact-verify JOB_ID [--json]
   agentknot artifact-preview JOB_ID ATTEMPT [--json]
   agentknot delegation [--json]
+  agentknot client [--json]
   agentknot orchestrations [--json]
   agentknot orchestration-show ORCHESTRATION_ID
 
@@ -364,6 +370,129 @@ function cancelOnTermination(cancel: () => void | Promise<void>): () => void {
   };
 }
 
+type CliTransport =
+  | { readonly kind: 'local'; readonly configPath: string | undefined }
+  | { readonly kind: 'remote'; readonly client: AgentKnotHttpClient };
+
+type ClientStatusReport =
+  | { readonly status: 'unconfigured' }
+  | { readonly status: 'available'; readonly url: string }
+  | { readonly status: 'unavailable'; readonly url?: string; readonly error: string };
+
+function isClientCapableCommand(command: string): boolean {
+  return new Set([
+    'run',
+    'orchestrate',
+    'routes',
+    'jobs',
+    'show',
+    'delegation',
+    'orchestrations',
+    'orchestration-show',
+    'artifacts',
+    'artifact-verify',
+    'artifact-preview',
+  ]).has(command);
+}
+
+async function resolveClientTransport(
+  configPath: string | undefined,
+  explicitServerUrl: string | undefined,
+  environmentServerUrl: string | undefined
+): Promise<CliTransport> {
+  if (configPath !== undefined) return { kind: 'local', configPath };
+  if (explicitServerUrl !== undefined) {
+    return { kind: 'remote', client: new AgentKnotHttpClient(explicitServerUrl) };
+  }
+  if (environmentServerUrl !== undefined) {
+    return { kind: 'remote', client: new AgentKnotHttpClient(environmentServerUrl) };
+  }
+  if (process.env.AGENTKNOT_CONFIG !== undefined) {
+    return { kind: 'local', configPath: undefined };
+  }
+  const record = await readLocalDiscovery();
+  return record === undefined
+    ? { kind: 'local', configPath: undefined }
+    : { kind: 'remote', client: new AgentKnotHttpClient(record.url) };
+}
+
+async function readClientStatus(
+  configPath: string | undefined,
+  explicitServerUrl: string | undefined,
+  environmentServerUrl: string | undefined
+): Promise<ClientStatusReport> {
+  let endpoint = configPath === undefined ? explicitServerUrl ?? environmentServerUrl : undefined;
+  if (endpoint === undefined && configPath === undefined && process.env.AGENTKNOT_CONFIG === undefined) {
+    try {
+      endpoint = (await readLocalDiscovery())?.url;
+    } catch (error: unknown) {
+      return {
+        status: 'unavailable',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+  if (endpoint === undefined) return { status: 'unconfigured' };
+
+  try {
+    await new AgentKnotHttpClient(endpoint).health();
+    return { status: 'available', url: endpoint };
+  } catch (error: unknown) {
+    return {
+      status: 'unavailable',
+      url: endpoint,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function printClientStatus(report: ClientStatusReport, json: boolean): void {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return;
+  }
+  if (report.status === 'unconfigured') {
+    process.stdout.write('AgentKnot client: unconfigured\n');
+  } else if (report.status === 'available') {
+    process.stdout.write(`AgentKnot client: available (${report.url})\n`);
+  } else {
+    process.stdout.write(
+      `AgentKnot client: unavailable${report.url === undefined ? '' : ` (${report.url})`}: ${report.error}\n`
+    );
+  }
+}
+
+async function closeServeResources(
+  http: ReturnType<typeof createAgentKnotHttpServer> | undefined,
+  runtime: AgentKnotRuntime | undefined,
+  discovery: LocalDiscoveryRegistration | undefined
+): Promise<void> {
+  const errors: unknown[] = [];
+  if (http?.server.listening) {
+    try {
+      await http.close();
+    } catch (error: unknown) {
+      errors.push(error);
+    }
+  }
+  if (runtime !== undefined) {
+    try {
+      await runtime.close();
+    } catch (error: unknown) {
+      errors.push(error);
+    }
+  }
+  if (discovery !== undefined) {
+    try {
+      await discovery.close();
+    } catch (error: unknown) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, 'AgentKnot serve cleanup failed');
+}
+
 async function main(argv: string[]): Promise<void> {
   const args = [...argv];
   const command = args.shift();
@@ -373,10 +502,15 @@ async function main(argv: string[]): Promise<void> {
   }
 
   const configPath = takeOption(args, '--config');
-  const serverUrl = takeOption(args, '--server') ?? process.env.AGENTKNOT_SERVER_URL;
-  if (configPath !== undefined && serverUrl !== undefined) {
-    throw new Error('--config and --server/AGENTKNOT_SERVER_URL cannot be used together');
+  const explicitServerUrl = takeOption(args, '--server');
+  const environmentServerUrl = process.env.AGENTKNOT_SERVER_URL;
+  if (configPath !== undefined && explicitServerUrl !== undefined) {
+    throw new Error('--config and --server cannot be used together');
   }
+  const transport = isClientCapableCommand(command)
+    ? await resolveClientTransport(configPath, explicitServerUrl, environmentServerUrl)
+    : undefined;
+  const remote = transport?.kind === 'remote' ? transport.client : undefined;
 
   if (command === 'run') {
     const route = takeOption(args, '--route');
@@ -388,18 +522,18 @@ async function main(argv: string[]): Promise<void> {
     const events = takeFlag(args, '--events');
     if (args.some((value) => value.startsWith('--'))) throw new Error(`Unknown option: ${args.join(' ')}`);
     const prompt = promptOption ?? args.join(' ');
-    if (serverUrl !== undefined) {
-      if (events) throw new Error('--events is not available with --server; inspect persisted events');
-      const client = new AgentKnotHttpClient(serverUrl);
-      const initial = await client.startJob({
-        prompt,
-        workspace,
-        source,
-        ...(route === undefined ? {} : { route }),
-        ...(callbackUrl === undefined ? {} : { callbackUrl }),
-      });
-      const stopCancellation = cancelOnTermination(() => client.cancelJob(initial.id));
-      const job = await client.waitForJob(initial).finally(stopCancellation);
+    const request: JobRequest = {
+      prompt,
+      workspace,
+      source,
+      ...(route === undefined ? {} : { route }),
+      ...(callbackUrl === undefined ? {} : { callbackUrl }),
+    };
+    if (remote !== undefined) {
+      if (events) throw new Error('--events is not available with a selected server; inspect persisted events');
+      const initial = await remote.startJob(request);
+      const stopCancellation = cancelOnTermination(() => remote.cancelJob(initial.id));
+      const job = await remote.waitForJob(initial).finally(stopCancellation);
       if (!json) process.stdout.write(`\n${job.id}\t${job.status}\n`);
       else process.stdout.write(`${JSON.stringify(job, null, 2)}\n`);
       if (job.status !== 'succeeded') process.exitCode = 1;
@@ -411,13 +545,7 @@ async function main(argv: string[]): Promise<void> {
       reconcileOnStartup: true,
     });
     const started = await runtime
-      .start({
-        prompt,
-        workspace,
-        source,
-        ...(route === undefined ? {} : { route }),
-        ...(callbackUrl === undefined ? {} : { callbackUrl }),
-      })
+      .start(request)
       .catch(async (error: unknown) => {
         await runtime.close();
         throw error;
@@ -452,20 +580,20 @@ async function main(argv: string[]): Promise<void> {
     }
     if (args.some((value) => value.startsWith('--'))) throw new Error(`Unknown option: ${args.join(' ')}`);
     const prompt = promptOption ?? args.join(' ');
-    if (serverUrl !== undefined) {
-      const client = new AgentKnotHttpClient(serverUrl);
-      const initial = await client.startOrchestration({
-        prompt,
-        workspace,
-        source,
-        ...(delegation === undefined
-          ? {}
-          : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),
-      });
-      const stopCancellation = cancelOnTermination(() => client.cancelOrchestration(initial.id));
-      const orchestration = await client.waitForOrchestration(initial).finally(stopCancellation);
+    const request = {
+      prompt,
+      workspace,
+      source,
+      ...(delegation === undefined
+        ? {}
+        : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),
+    };
+    if (remote !== undefined) {
+      const initial = await remote.startOrchestration(request);
+      const stopCancellation = cancelOnTermination(() => remote.cancelOrchestration(initial.id));
+      const orchestration = await remote.waitForOrchestration(initial).finally(stopCancellation);
       const handoff = handoffJson
-        ? await orchestrationHandoff(client, orchestration)
+        ? await orchestrationHandoff(remote, orchestration)
         : undefined;
       if (handoffJson) {
         process.stdout.write(`${JSON.stringify(handoff, null, 2)}\n`);
@@ -487,15 +615,7 @@ async function main(argv: string[]): Promise<void> {
       onEvent: (event) => printEvent(event, json || handoffJson, false),
       reconcileOnStartup: true,
     });
-    const started = await runtime
-      .startOrchestration({
-        prompt,
-        workspace,
-        source,
-        ...(delegation === undefined
-          ? {}
-          : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),
-      })
+    const started = await runtime.startOrchestration(request)
       .catch(async (error: unknown) => {
         await runtime.close();
         throw error;
@@ -527,33 +647,55 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (command === 'serve') {
-    if (serverUrl !== undefined) throw new Error('serve cannot be used with --server');
+    if (explicitServerUrl !== undefined || environmentServerUrl !== undefined) {
+      throw new Error('serve cannot be used with --server');
+    }
     const host = takeOption(args, '--host') ?? '127.0.0.1';
     const portValue = takeOption(args, '--port') ?? '7391';
     const port = Number(portValue);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('--port must be 0-65535');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-    const runtime = await createRuntime({
-      ...(configPath === undefined ? {} : { configPath }),
-      reconcileOnStartup: true,
-    });
-    const http = createAgentKnotHttpServer(runtime);
-    const address = await http.listen(port, host).catch(async (error: unknown) => {
-      await runtime.close();
-      throw error;
-    });
-    cancelOnTermination(async () => {
+
+    const discovery = host === '127.0.0.1' ? await createLocalDiscoveryRegistration() : undefined;
+    let runtime: AgentKnotRuntime | undefined;
+    let http: ReturnType<typeof createAgentKnotHttpServer> | undefined;
+    try {
+      runtime = await createRuntime({
+        ...(configPath === undefined ? {} : { configPath }),
+        reconcileOnStartup: true,
+      });
+      http = createAgentKnotHttpServer(runtime);
+      const address = await http.listen(port, host);
+      if (discovery !== undefined) await discovery.publish(address.port);
+      cancelOnTermination(() => closeServeResources(http, runtime, discovery));
+      process.stdout.write(`AgentKnot listening on http://${address.host}:${address.port}\n`);
+    } catch (error: unknown) {
       try {
-        await http.close();
-      } finally {
-        await runtime.close();
+        await closeServeResources(http, runtime, discovery);
+      } catch (cleanupError: unknown) {
+        throw new AggregateError([error, cleanupError], 'AgentKnot serve startup cleanup failed');
       }
-    });
-    process.stdout.write(`AgentKnot listening on http://${address.host}:${address.port}\n`);
+      throw error;
+    }
     return;
   }
 
-  const remote = serverUrl === undefined ? undefined : new AgentKnotHttpClient(serverUrl);
+  if (command === 'client') {
+    const json = takeFlag(args, '--json');
+    if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
+    const report = await readClientStatus(configPath, explicitServerUrl, environmentServerUrl);
+    printClientStatus(report, json);
+    if (report.status === 'unavailable') process.exitCode = 1;
+    return;
+  }
+
+  if (
+    (command === 'doctor' || command === 'usage') &&
+    (explicitServerUrl !== undefined || environmentServerUrl !== undefined)
+  ) {
+    throw new Error(`${command} is not available with --server`);
+  }
+
   const runtime =
     remote === undefined
       ? await createRuntime({
@@ -563,7 +705,6 @@ async function main(argv: string[]): Promise<void> {
       : undefined;
 
   if (command === 'doctor') {
-    if (remote !== undefined) throw new Error('doctor is not available with --server');
     const route = takeOption(args, '--route');
     const live = takeFlag(args, '--live');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
@@ -592,7 +733,6 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (command === 'usage') {
-    if (remote !== undefined) throw new Error('usage is not available with --server');
     const json = takeFlag(args, '--json');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
     const report = await runtime!.usage();
