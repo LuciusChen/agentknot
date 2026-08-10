@@ -248,7 +248,7 @@ test('OpenCode JSON timeout uses core semantics and removes the exact child', as
         thinkingLevel: 'max',
         requiredEnv: ['FAKE_OPENCODE_KEY'],
         maxAttempts: 1,
-        timeoutMs: 30,
+        timeoutMs: 500,
       },
     },
   };
@@ -262,7 +262,7 @@ test('OpenCode JSON timeout uses core semantics and removes the exact child', as
     const pid = await waitForPid(pidFile);
     const terminal = await started.completion;
     assert.equal(terminal.status, 'failed');
-    assert.match(terminal.error?.message ?? '', /timed out after 30ms/);
+    assert.match(terminal.error?.message ?? '', /timed out after 500ms/);
     assertProcessGone(pid);
   } finally {
     await rm(directory, { recursive: true, force: true });

@@ -35,7 +35,7 @@ The user selected this portability and lifecycle evidence as the material benefi
 
 ## Consequences and remaining gates
 
-- Pi is no longer privileged by the runtime architecture: two real built-in worker protocols can reach the same core contract. Pi remains the promoted default/reference path; native OpenCode is experimental and manually selected.
+- Pi is no longer privileged by the runtime architecture: two real built-in worker protocols can reach the same core contract. At this decision point Pi remained the promoted default/reference path and native OpenCode remained experimental pending the real lifecycle soak.
 - `--pure` disables plugins, while explicit workdir and AgentKnot worktrees isolate repository mutations. OpenCode's ordinary data directory remains OpenCode-owned because it also contains the independently provisioned auth entry; this slice does not claim full config/data/cache isolation or an OS sandbox.
 - The pinned JSON surface reports completed text/tool parts and process exit, not Pi-equivalent lifecycle fidelity. Exact child ownership does not imply arbitrary descendant cleanup.
 - Stage 2 remains in progress until repeated real native success/failure/cancellation/timeout soak evidence is retained and the generic heterogeneous route-pool decision is implemented separately. No efficiency, completion-rate, model-quality, capacity, fallback, or automatic-routing claim is made here.
@@ -51,3 +51,7 @@ The user selected this portability and lifecycle evidence as the material benefi
 ## Addendum: 2026-08-10
 
 [Decision 0042](./0042-complete-route-pool-balancing.md) delivered the separate generic pool layer. The repository now uses native OpenCode/Luna/max as one human-configured `luna-workers` member alongside Pi/Luna/max for medium/high/default children; the first real two-Job pool run selected and completed both routes without fallback. This does not change the native adapter's remaining repeated failure/cancellation/timeout soak gate.
+
+## Addendum: native promotion gate closed
+
+[Decision 0043](./0043-native-opencode-lifecycle-soak.md) closes that remaining adapter gate with repeated real error/nonzero, cancellation, timeout, cleanup, and non-empty artifact evidence. Native OpenCode is now a promoted supported adapter and pool member while Pi remains the exact reference/planner path. The same evidence records OpenCode's upstream 40-byte `.git/opencode` project-ID write as an explicit Git common-directory boundary; AgentKnot adds no racing cleanup shim.

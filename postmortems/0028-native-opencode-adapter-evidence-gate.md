@@ -70,3 +70,7 @@ The independent `opencode-go` credential remains in OpenCode's own mode-0600 aut
 ## Addendum: 2026-08-10
 
 [Decision 0041](./0041-native-opencode-worker-portability.md) supersedes this record's implementation deferral after the product requirement changed from finding a repeatable efficiency advantage to demonstrating whole-worker runtime portability. The earlier mixed token/elapsed A/B evidence remains unchanged and supports no savings claim. Native OpenCode is now implemented as an experimental, manually selected adapter with deterministic lifecycle/artifact coverage, independent auth, exact-route live inference, and one real isolated Job; Pi remains the promoted default while repeated real failure/cancellation/timeout soaks remain open. Full OpenCode data-directory isolation is not claimed because the OpenCode-owned data store also contains its independent credential.
+
+## Addendum: 2026-08-10 lifecycle promotion
+
+[Decision 0043](./0043-native-opencode-lifecycle-soak.md) subsequently closed the real lifecycle/artifact gate. Native OpenCode is now a promoted supported adapter and human-configured pool member; Pi remains the reference/planner path. The earlier efficiency result remains mixed and supports no savings claim. OpenCode's first-use `.git/opencode` project-ID metadata write is documented rather than misreported as complete Git-directory immutability.

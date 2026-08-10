@@ -154,3 +154,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0040](./0040-product-owned-local-service-discovery.md) | Decision | Accepted | Discover one running local service without shell-profile edits |
 | [0041](./0041-native-opencode-worker-portability.md) | Decision / Experiment | Accepted | Add a native OpenCode worker to prove downstream portability |
 | [0042](./0042-complete-route-pool-balancing.md) | Decision | Accepted | Balance heterogeneous downstreams above complete routes |
+| [0043](./0043-native-opencode-lifecycle-soak.md) | Decision / Experiment | Accepted | Close native OpenCode lifecycle gate and document Git metadata boundary |
