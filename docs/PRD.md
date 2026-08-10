@@ -54,6 +54,7 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 9. Optionally ask a separately configured route to review one bounded patch before the controller makes the final acceptance decision.
 10. Optionally obtain controller-owned test evidence for one bounded patch without first applying it to the supplied source workspace.
 11. Use one local AgentKnot execution owner concurrently from multiple upstream controller sessions without sharing file-store write authority with those clients.
+12. Start one exact `127.0.0.1` AgentKnot server once, then let later CLI, Codex, and Claude sessions discover it without shell-profile edits or repeated server flags while retaining deliberate local/server overrides.
 
 ## Product principles
 
@@ -120,7 +121,8 @@ Version 0.0.1 currently implements:
 - additive delegated-parent artifact review that compares controller-captured terminal paths, reports exact path overlap as potential integration-conflict evidence, and marks missing child evidence incomplete;
 - additive schemaVersion 1 terminal Job completion summaries with terminal outcome/attempt, controller-captured artifact path provenance, and explicit unavailable states; strict worker completion reports are accepted from custom adapters and normal Pi runs, with missing or malformed Pi envelopes remaining advisory; deterministic coverage and a real Pi/OpenCode Go/Luna/max dogfood emission satisfy the evidence gate;
 - configuration validation and explicit configuration-only and opt-in live route diagnostics;
-- canonical HTTP process liveness that explicitly reports storage, routes, and inference as not checked, without claiming route readiness.
+- canonical HTTP process liveness that explicitly reports storage, routes, and inference as not checked, without claiming route readiness;
+- one exact `127.0.0.1` `serve` process publishing a product-owned per-user record after listen, with `agentknot client --json` reporting `unconfigured`, `available`, or `unavailable`; later CLI and Codex/Claude hooks discover the record without shell-profile edits or repeated server flags, while stale or malformed records fail without local or model fallback;
 - controller-neutral orchestration through CLI, HTTP, and TypeScript;
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
 - strict planner assessments followed by deterministic task-kind policy;
@@ -156,6 +158,7 @@ AgentKnot is not intended to become:
 - an implicit provider optimizer that silently changes models or falls back across providers;
 - an automatic or learned model/provider ranking system: human-authored active rules do not claim measured intelligence and any optimizer still requires separate scorecards and a new gate;
 - a system that automatically applies patches, creates branches or pull requests, merges, commits, or pushes;
+- a daemon manager, service installer, new transport protocol, repository scanner, or shell-profile mutator;
 - a reimplementation of Pi, MCP, OpenCode, Codex, Claude Code, or Relay.
 
 Remote workers, dependency graphs, scheduling, and dashboards may be evaluated later, but only after the local single-job contract is dependable and a concrete use case justifies them.
@@ -190,6 +193,7 @@ The product remains on course when all of the following are true:
 - changing `source` from Codex to Claude changes audit metadata, not execution behavior;
 - changing provider or model is a route change unless a genuinely new worker runtime is required;
 - configuration-only `doctor` explicitly says live inference was not checked, while `doctor --live` performs only the bounded exact selected-route probe and leaves no Job or artifact record;
+- one exact `127.0.0.1` server publishes its product-owned per-user record only after listen; `agentknot client --json` reports `unconfigured`, `available`, or `unavailable`; later CLI and Codex/Claude hook calls discover it without shell-profile edits or repeated flags, explicit config/server selection retains documented precedence, stale/malformed records fail without local or model fallback, `doctor` and `usage` stay local, and non-127 binds require explicit selection;
 - the same Job API works through CLI, HTTP, and TypeScript entry points;
 - the same orchestration policy and record shape work through CLI, HTTP, and TypeScript without controller-name branches;
 - every automatically dispatched child is admitted through the ordinary Job API only after its plan is persisted;

@@ -2,6 +2,7 @@
 
 - Type: Decision
 - Status: Accepted
+- Implementation: Delivered in `15663f5`, `003ff92`, and `712cc27`
 - Date: 2026-08-10
 - Owners: AgentKnot maintainers
 - Related: [decision 0038](./0038-shared-local-controller-runtime.md), [incident 0039](./0039-live-plugin-cache-refresh.md), [PRD](../docs/PRD.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md)
@@ -25,6 +26,12 @@ The correctness requirement remains unchanged. Many clients may exist, but exact
 - Codex and Claude hooks first honor their existing explicit environment. Without it, they consult client status once; a registered endpoint removes repository-config discovery and is passed explicitly to the remaining CLI calls. Without a record, the existing repository-local opt-in remains unchanged.
 - Neither server registration nor client discovery starts a daemon, installs an operating-system service, edits shell configuration, scans AgentKnot source, adds a broker, or creates a second protocol.
 
+## Delivered implementation
+
+The delivered slice implements the decision: one exact `127.0.0.1` `agentknot serve` process publishes the product-owned per-user record only after listen succeeds, and later client-capable CLI commands plus Codex and Claude hooks discover the actual URL without shell-profile edits, per-session exports, or repeated server flags. `agentknot client --json` reports `unconfigured`, `available`, or `unavailable`; explicit `--config`, `--server`, and `AGENTKNOT_SERVER_URL` selection remains available with documented precedence, while `doctor` and `usage` stay local. Non-127 binds are explicit only.
+
+A stale endpoint or malformed record is an explicit unavailable/failure result and never permits local storage access, a local runtime, or another worker/provider/model fallback. The hook consults client status once when no explicit environment is selected; `unconfigured` preserves the existing exact repository-local opt-in, while `available` is passed explicitly to every remaining server call and `unavailable`/malformed discovery fails without fallback. No daemon manager, service installer, new protocol, repository scan, or shell mutation was added.
+
 ## Consequences
 
 - Starting the one local server is sufficient for later Codex, Claude, and CLI sessions to find it; per-session exports are optional overrides rather than setup.
@@ -38,3 +45,7 @@ The correctness requirement remains unchanged. Many clients may exist, but exact
 - Deterministic tests cover record permissions and schema, strict URL/file validation, discovery-lock contention, atomic replacement identity, exact-owner cleanup, explicit precedence, graceful unregister, stale endpoint failure without local fallback, and non-`127.0.0.1` non-registration.
 - Separate CLI processes with no server option or environment discover one registered server and complete distinct requests through its single runtime.
 - Codex and Claude parity fixtures prove registered mode skips repository config access and preserves exact source, workspace, prompt, handoff, and artifact behavior.
+
+## Delivered verification
+
+The deterministic suite passes 213 of 213 tests. Its cross-process gate proves selector-free CLI clients discover one registered server and complete distinct requests through one runtime; its Codex/Claude hook-parity gate covers available, unconfigured, unavailable/stale, and malformed discovery with no local or model fallback and no artifact preview on failure.
