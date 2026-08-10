@@ -31,6 +31,13 @@
         "--no-context-files"
       ],
       "noSession": true
+    },
+    "opencode": {
+      "adapter": "opencode-json",
+      "command": "/home/lucius/.local/lib/agentknot/workers/opencode/1.18.15/opencode",
+      "unsetEnvironment": [
+        "OPENCODE_API_KEY"
+      ]
     }
   },
   "routes": {
@@ -72,6 +79,14 @@
         "OPENCODE_API_KEY"
       ],
       "maxAttempts": 2,
+      "timeoutMs": 3600000
+    },
+    "opencode-luna": {
+      "worker": "opencode",
+      "provider": "opencode-go",
+      "model": "gpt-5.6-luna",
+      "thinkingLevel": "max",
+      "maxAttempts": 1,
       "timeoutMs": 3600000
     }
   },

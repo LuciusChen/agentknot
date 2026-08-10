@@ -1,17 +1,14 @@
-import { constants } from 'node:fs';
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 
-import { validateWorkerCompletionReport } from '../completion-summary.js';
 import type { PiRpcWorkerConfig } from '../config.js';
 import { MAX_PI_STDERR_BYTES, limitTextSuffix } from '../record-limits.js';
 import type {
   ResolvedRoute,
   WorkerAdapter,
-  WorkerCompletionReport,
   WorkerEventSink,
   WorkerHealth,
   WorkerProbeInput,
@@ -19,6 +16,24 @@ import type {
   WorkerRunInput,
   WorkerRunResult,
 } from '../types.js';
+import {
+  awaitChildOutput,
+  childExited,
+  CHILD_OUTPUT_DRAIN_WAIT_MS,
+  effectiveEnvironment,
+  findCommand,
+  StrictJsonlDecoder,
+  terminateChild,
+  waitForExit,
+  waitForPromiseOrTimeout,
+  waitForSpawn,
+  type EffectiveEnvironment,
+} from './subprocess.js';
+import {
+  parseWorkerCompletionOutput,
+  WORKER_COMPLETION_REPORT_INSTRUCTION,
+  WORKER_COMPLETION_REPORT_MARKER,
+} from '../worker-completion-report.js';
 
 interface PiRpcEvent {
   id?: string;
@@ -41,66 +56,6 @@ interface PiRpcEvent {
   isError?: boolean;
   attempt?: number;
   delayMs?: number;
-}
-
-class StrictJsonlDecoder {
-  readonly #decoder = new StringDecoder('utf8');
-  #buffer = '';
-
-  push(chunk: Buffer): string[] {
-    this.#buffer += this.#decoder.write(chunk);
-    return this.#takeLines();
-  }
-
-  end(): string[] {
-    this.#buffer += this.#decoder.end();
-    const lines = this.#takeLines();
-    if (this.#buffer !== '') {
-      lines.push(this.#buffer.endsWith('\r') ? this.#buffer.slice(0, -1) : this.#buffer);
-      this.#buffer = '';
-    }
-    return lines;
-  }
-
-  #takeLines(): string[] {
-    const lines: string[] = [];
-    let index: number;
-    while ((index = this.#buffer.indexOf('\n')) !== -1) {
-      let line = this.#buffer.slice(0, index);
-      this.#buffer = this.#buffer.slice(index + 1);
-      if (line.endsWith('\r')) line = line.slice(0, -1);
-      if (line !== '') lines.push(line);
-    }
-    return lines;
-  }
-}
-
-type EffectiveEnvironment = NodeJS.ProcessEnv;
-
-function effectiveEnvironment(configuredEnvironment?: Record<string, string>): EffectiveEnvironment {
-  return { ...process.env, ...configuredEnvironment };
-}
-
-function commandCandidates(command: string, environment: EffectiveEnvironment): string[] {
-  // A relative command containing a path separator is still resolved from AgentKnot's process
-  // directory. Relative PATH entries have the same limitation. Configuration-only doctor has
-  // no worker workspace, so it cannot evaluate either form against the eventual run workspace
-  // without changing the existing boundary.
-  if (command.includes(path.sep)) return [path.resolve(command)];
-  const searchPath = environment.PATH ?? '';
-  return searchPath.split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, command));
-}
-
-async function findCommand(command: string, environment: EffectiveEnvironment): Promise<string | undefined> {
-  for (const candidate of commandCandidates(command, environment)) {
-    try {
-      await access(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Try the next PATH entry.
-    }
-  }
-  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -152,9 +107,6 @@ async function hasPiAuth(provider: string, environment: EffectiveEnvironment): P
   }
 }
 
-const CHILD_SIGTERM_GRACE_MS = 100;
-const CHILD_SIGKILL_WAIT_MS = 1_000;
-const CHILD_OUTPUT_DRAIN_GRACE_MS = 1_000;
 const SESSION_STATS_WAIT_MS = 1_000;
 const SESSION_STATS_REQUEST_ID = 'agentknot-session-stats';
 const AMBIENT_DISCOVERY_DISABLE_FLAGS = [
@@ -314,60 +266,6 @@ function extractAssistantError(messages: unknown[] | undefined): string | undefi
   return undefined;
 }
 
-function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onSpawn = () => {
-      child.off('error', onError);
-      resolve();
-    };
-    const onError = (error: Error) => {
-      child.off('spawn', onSpawn);
-      reject(error);
-    };
-    child.once('spawn', onSpawn);
-    child.once('error', onError);
-  });
-}
-
-function childExited(child: ChildProcessWithoutNullStreams): boolean {
-  return child.exitCode !== null || child.signalCode !== null;
-}
-
-function waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {
-  if (childExited(child)) return Promise.resolve();
-  return new Promise((resolve) => {
-    const done = () => {
-      child.off('error', done);
-      child.off('exit', done);
-      resolve();
-    };
-    child.once('error', done);
-    child.once('exit', done);
-  });
-}
-
-function waitForPromiseOrTimeout(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      resolve(false);
-    }, timeoutMs);
-    void promise.then(
-      () => {
-        if (timedOut) return;
-        clearTimeout(timer);
-        resolve(true);
-      },
-      () => {
-        if (timedOut) return;
-        clearTimeout(timer);
-        resolve(true);
-      }
-    );
-  });
-}
-
 function waitForRpcResponse(
   response: Promise<PiRpcEvent | undefined>,
   timeoutMs: number
@@ -418,44 +316,6 @@ async function requestSessionStats(
   return stats ?? { unavailableReason: 'invalid' };
 }
 
-async function terminateChild(
-  child: ChildProcessWithoutNullStreams,
-  exit: Promise<void>
-): Promise<void> {
-  if (childExited(child)) return;
-  try {
-    child.kill('SIGTERM');
-  } catch {
-    // The owned child may have exited between the state check and kill.
-  }
-  if (await waitForPromiseOrTimeout(exit, CHILD_SIGTERM_GRACE_MS)) return;
-  if (!childExited(child)) {
-    try {
-      child.kill('SIGKILL');
-    } catch {
-      // The owned child may have exited between the state check and kill.
-    }
-  }
-  await waitForPromiseOrTimeout(exit, CHILD_SIGKILL_WAIT_MS);
-}
-
-async function awaitChildOutput(
-  child: ChildProcessWithoutNullStreams,
-  stdoutTask: Promise<void>,
-  stderrTask: Promise<void>
-): Promise<void> {
-  const output = Promise.allSettled([stdoutTask, stderrTask]);
-  if (!(await waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_GRACE_MS))) {
-    // Only the exact streams owned by this child are closed. The child itself has already
-    // received the bounded SIGTERM/SIGKILL sequence above; this releases inherited pipe ends
-    // without attempting broad process cleanup.
-    child.stdout.destroy();
-    child.stderr.destroy();
-    return;
-  }
-  await output;
-}
-
 function childExitError(
   label: string,
   code: number | null,
@@ -476,49 +336,9 @@ function childExitError(
 const LIVE_PROBE_PROMPT =
   'This is a bounded AgentKnot live inference probe. Reply with exactly "AgentKnot live inference probe succeeded." and do not use tools or modify files.';
 
-/** The only machine suffix recognized by normal Pi runs. */
-export const PI_WORKER_COMPLETION_REPORT_MARKER = 'AGENTKNOT_WORKER_COMPLETION_REPORT_V1';
-
-/**
- * This instruction is intentionally route-neutral and is appended only by `run`, never by the
- * configuration doctor or live probe paths.
- */
-export const PI_WORKER_COMPLETION_REPORT_INSTRUCTION = [
-  'End your final assistant message with exactly one single-line marked JSON envelope.',
-  `The line must begin "${PI_WORKER_COMPLETION_REPORT_MARKER}: " and contain schemaVersion 1 WorkerCompletionReport JSON with changedFiles as a string array, checksRun entries with command, outcome (passed, failed, or unknown), and optional notes, remainingRisks as a string array, and notes as a string array.`,
-  'Do not add any text after that line. All values are worker-reported claims, not AgentKnot verification.',
-].join(' ');
-
-interface ParsedWorkerCompletionOutput {
-  output: string;
-  completionReport?: WorkerCompletionReport | null;
-}
-
-const WORKER_COMPLETION_REPORT_SUFFIX = new RegExp(
-  `(^|\\r?\\n)${PI_WORKER_COMPLETION_REPORT_MARKER}: ([^\\r\\n]*)(?![\\s\\S])`
-);
-
-function parseWorkerCompletionOutput(output: string): ParsedWorkerCompletionOutput {
-  const match = WORKER_COMPLETION_REPORT_SUFFIX.exec(output);
-  if (!match) return { output };
-
-  const separator = match[1] ?? '';
-  const payload = match[2] ?? '';
-  let value: unknown;
-  try {
-    value = JSON.parse(payload);
-  } catch {
-    return { output, completionReport: null };
-  }
-
-  const report = validateWorkerCompletionReport(value);
-  if (!report) return { output, completionReport: null };
-
-  return {
-    output: output.slice(0, (match.index ?? 0) + separator.length),
-    completionReport: report,
-  };
-}
+/** Backward-compatible names for the route-neutral worker completion contract. */
+export const PI_WORKER_COMPLETION_REPORT_MARKER = WORKER_COMPLETION_REPORT_MARKER;
+export const PI_WORKER_COMPLETION_REPORT_INSTRUCTION = WORKER_COMPLETION_REPORT_INSTRUCTION;
 
 export class PiRpcWorkerAdapter implements WorkerAdapter {
   readonly name: string;
@@ -697,7 +517,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     });
     child.once('exit', (code, signal) => {
       const output = Promise.allSettled([stdoutTask, stderrTask]);
-      void waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_GRACE_MS)
+      void waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_WAIT_MS)
         .then(() => {
           if (!protocolSettled) {
             rejectSettled(childExitError('Pi RPC live probe', code, signal, agentEnded, stderr));
@@ -921,7 +741,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     child.once('exit', (code, signal) => {
       resolveStatsResponse(undefined);
       const output = Promise.allSettled([stdoutTask, stderrTask]);
-      void waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_GRACE_MS)
+      void waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_WAIT_MS)
         .then(() => {
           if (!completed) rejectSettled(childExitError('Pi RPC', code, signal, agentEnded, stderr));
         })

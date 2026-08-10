@@ -102,8 +102,8 @@ Version 0.0.1 currently implements:
 - a compact CLI orchestration handoff projection for controller consumption that omits duplicated prompts, policy snapshots, and event history without changing the persisted full record or artifact-review authority;
 - experimental thin Codex and Claude plugin packages whose explicit Skill or pre-model hook submits through the existing orchestration CLI and returns terminal/artifact evidence without moving classification, route policy, or promotion into the controller adapter; the separately installed `agentknot` executable is a checked prerequisite, pre-model entry is restricted to repositories whose resolved delegation mode is `auto`, and a failed CLI/handoff returns bounded phase-neutral context without silent worker/provider/model substitution;
 - immutable resolved route snapshots with worker, provider, and model dimensions;
-- deterministic mock and Pi RPC worker adapters;
-- a reusable route-neutral adapter unit contract for healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and already-aborted runs; Mock supplies deterministic coverage but is not the second real adapter required for Stage 2;
+- deterministic Mock, Pi RPC, and OpenCode JSON worker adapters;
+- a reusable route-neutral adapter unit contract for healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and already-aborted runs; Pi and OpenCode are the two real protocol implementations while Mock remains deterministic-only evidence;
 - OpenCode Go/Luna and OpenCode Go/DeepSeek V4 Flash routes through Pi configuration;
 - file-backed or in-memory job snapshots and ordered events;
 - atomic leaf admission containing the queued snapshot and first event, with later persistence failures isolated from worker retry and terminal-result fabrication;
@@ -141,7 +141,7 @@ The current file stores provide persistent audit snapshots. After acquiring excl
 
 Provider and model independence are currently routing properties implemented by the selected worker. AgentKnot does not yet expose an independent provider-runtime interface.
 
-A pinned OpenCode CLI probe established a plausible native worker protocol and independent credential path, but two same-task Luna/max A/B pairs found no repeatable token or elapsed-time benefit over Pi. A native adapter therefore remains proposed rather than implemented; it must not read or translate Pi credentials, and it requires repeatable benefit plus the Stage 2 conformance and soak gates before promotion ([decision 0028](../postmortems/0028-native-opencode-adapter-evidence-gate.md)).
+A native OpenCode JSON adapter now provides the second real worker-runtime implementation needed to demonstrate that Pi is replaceable. Portability and independent lifecycle evidence—not a claim of repeatable token or elapsed-time savings—superseded the implementation deferral in decision 0028. The adapter uses an independent OpenCode credential path, keeps provider/model/effort as route data, and changes no core Job semantics. It remains an experimental manually selected route until repeated real failure/cancellation/timeout soaks close the remaining Stage 2 gate ([decision 0041](../postmortems/0041-native-opencode-worker-portability.md)).
 
 Pi extensions are optional worker-profile inputs, not portable core dependencies. A community package can enter the repository dogfood route only after source/supply-chain review and repeated same-task comparison against the minimal Pi route show no regression in terminal completion, artifact validity, or tests and a measurable improvement in upstream intervention, token use, or elapsed work. Trials must use an exact version or immutable external path without global or repository-local installation, and must preserve the selected provider, model, and thinking level. AgentKnot never silently selects an extension or model fallback.
 

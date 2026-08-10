@@ -66,3 +66,7 @@ Removing the unused Grok route narrows repository dogfood configuration but does
 ## Privacy and security review
 
 The independent `opencode-go` credential remains in OpenCode's own mode-0600 auth store; its value is not recorded here, and AgentKnot does not read or translate it. The direct `--pure` probe did not read Pi auth, load a repository plugin, or mutate the source repository. The pinned executable is retained outside the repository. A future experiment must isolate OpenCode config/data/cache paths and continue to keep credential values out of config, records, events, logs, and artifacts.
+
+## Addendum: 2026-08-10
+
+[Decision 0041](./0041-native-opencode-worker-portability.md) supersedes this record's implementation deferral after the product requirement changed from finding a repeatable efficiency advantage to demonstrating whole-worker runtime portability. The earlier mixed token/elapsed A/B evidence remains unchanged and supports no savings claim. Native OpenCode is now implemented as an experimental, manually selected adapter with deterministic lifecycle/artifact coverage, independent auth, exact-route live inference, and one real isolated Job; Pi remains the promoted default while repeated real failure/cancellation/timeout soaks remain open. Full OpenCode data-directory isolation is not claimed because the OpenCode-owned data store also contains its independent credential.

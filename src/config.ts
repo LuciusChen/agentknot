@@ -23,7 +23,15 @@ export interface PiRpcWorkerConfig {
   environment?: Record<string, string>;
 }
 
-export type WorkerConfig = MockWorkerConfig | PiRpcWorkerConfig;
+export interface OpenCodeJsonWorkerConfig {
+  adapter: 'opencode-json';
+  command?: string;
+  commandArgs?: string[];
+  environment?: Record<string, string>;
+  unsetEnvironment?: string[];
+}
+
+export type WorkerConfig = MockWorkerConfig | PiRpcWorkerConfig | OpenCodeJsonWorkerConfig;
 
 export interface WorkspaceIsolationConfig {
   mode: WorkspaceIsolationMode;
@@ -237,7 +245,40 @@ function parseWorker(name: string, value: unknown): WorkerConfig {
         : { environment: { ...(value.environment as Record<string, string>) } }),
     };
   }
-  throw new Error(`workers.${name}.adapter must be "mock" or "pi-rpc"`);
+  if (value.adapter === 'opencode-json') {
+    if (value.command !== undefined) assertNonEmptyString(value.command, `workers.${name}.command`);
+    if (value.commandArgs !== undefined) {
+      if (!Array.isArray(value.commandArgs) || !value.commandArgs.every((item) => typeof item === 'string')) {
+        throw new Error(`workers.${name}.commandArgs must be an array of strings`);
+      }
+    }
+    if (value.environment !== undefined) {
+      assertRecord(value.environment, `workers.${name}.environment`);
+      if (!Object.values(value.environment).every((item) => typeof item === 'string')) {
+        throw new Error(`workers.${name}.environment values must be strings`);
+      }
+    }
+    if (value.unsetEnvironment !== undefined) {
+      if (
+        !Array.isArray(value.unsetEnvironment) ||
+        !value.unsetEnvironment.every((item) => typeof item === 'string' && item.trim() !== '')
+      ) {
+        throw new Error(`workers.${name}.unsetEnvironment must be an array of non-empty strings`);
+      }
+    }
+    return {
+      adapter: 'opencode-json',
+      ...(value.command === undefined ? {} : { command: value.command }),
+      ...(value.commandArgs === undefined ? {} : { commandArgs: [...value.commandArgs] as string[] }),
+      ...(value.environment === undefined
+        ? {}
+        : { environment: { ...(value.environment as Record<string, string>) } }),
+      ...(value.unsetEnvironment === undefined
+        ? {}
+        : { unsetEnvironment: [...new Set(value.unsetEnvironment as string[])] }),
+    };
+  }
+  throw new Error(`workers.${name}.adapter must be "mock", "pi-rpc", or "opencode-json"`);
 }
 
 function parseWorkspaceIsolation(value: unknown): WorkspaceIsolationConfig {
