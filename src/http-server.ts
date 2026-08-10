@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import type { DelegationConfig } from './config.js';
 import { assertJsonMetadata } from './metadata.js';
+import { buildJobList } from './job-list.js';
 import type {
   OrchestrationRecord,
   OrchestrationRequest,
@@ -134,7 +135,35 @@ export interface AgentKnotHttpServer {
 export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentKnotHttpServer {
   const activeJobs = new Map<string, StartJobResult>();
   const activeOrchestrations = new Map<string, StartOrchestrationResult>();
+  let closing = false;
+  let admissionsInFlight = 0;
+  let admissionsDrained: (() => void) | undefined;
+  let closePromise: Promise<void> | undefined;
+
+  const beginAdmission = (response: ServerResponse): (() => void) | undefined => {
+    if (closing) {
+      sendJson(response, 503, { error: 'AgentKnot server is shutting down' });
+      return undefined;
+    }
+    admissionsInFlight += 1;
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      admissionsInFlight -= 1;
+      if (admissionsInFlight === 0) admissionsDrained?.();
+    };
+  };
+
+  const waitForAdmissions = (): Promise<void> =>
+    admissionsInFlight === 0
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          admissionsDrained = resolve;
+        });
+
   const server = createServer(async (request, response) => {
+    response.once('error', () => undefined);
     try {
       const method = request.method ?? 'GET';
       const pathname = requestPath(request);
@@ -148,17 +177,23 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
         return;
       }
       if (method === 'GET' && pathname === '/v1/jobs') {
-        sendJson(response, 200, { jobs: await runtime.list() });
+        sendJson(response, 200, buildJobList(await runtime.list()));
         return;
       }
       if (method === 'POST' && pathname === '/v1/jobs') {
-        const started = await runtime.start(asJobRequest(await readJson(request)));
-        activeJobs.set(started.job.id, started);
-        void started.completion.then(
-          () => activeJobs.delete(started.job.id),
-          () => activeJobs.delete(started.job.id)
-        );
-        sendJson(response, 202, { job: started.job });
+        const finishAdmission = beginAdmission(response);
+        if (finishAdmission === undefined) return;
+        try {
+          const started = await runtime.start(asJobRequest(await readJson(request)));
+          activeJobs.set(started.job.id, started);
+          void started.completion.then(
+            () => activeJobs.delete(started.job.id),
+            () => activeJobs.delete(started.job.id)
+          );
+          sendJson(response, 202, { job: started.job });
+        } finally {
+          finishAdmission();
+        }
         return;
       }
 
@@ -217,17 +252,23 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
         return;
       }
       if (method === 'POST' && pathname === '/v1/orchestrations') {
-        if (!runtime.startOrchestration) {
-          sendJson(response, 501, { error: 'Orchestration is not available on this runtime' });
-          return;
+        const finishAdmission = beginAdmission(response);
+        if (finishAdmission === undefined) return;
+        try {
+          if (!runtime.startOrchestration) {
+            sendJson(response, 501, { error: 'Orchestration is not available on this runtime' });
+            return;
+          }
+          const started = await runtime.startOrchestration(asOrchestrationRequest(await readJson(request)));
+          activeOrchestrations.set(started.orchestration.id, started);
+          void started.completion.then(
+            () => activeOrchestrations.delete(started.orchestration.id),
+            () => activeOrchestrations.delete(started.orchestration.id)
+          );
+          sendJson(response, 202, { orchestration: started.orchestration });
+        } finally {
+          finishAdmission();
         }
-        const started = await runtime.startOrchestration(asOrchestrationRequest(await readJson(request)));
-        activeOrchestrations.set(started.orchestration.id, started);
-        void started.completion.then(
-          () => activeOrchestrations.delete(started.orchestration.id),
-          () => activeOrchestrations.delete(started.orchestration.id)
-        );
-        sendJson(response, 202, { orchestration: started.orchestration });
         return;
       }
 
@@ -308,6 +349,10 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
 
       sendJson(response, 404, { error: 'Not found' });
     } catch (error) {
+      if (response.headersSent || response.destroyed) {
+        response.destroy();
+        return;
+      }
       sendJson(response, 400, { error: error instanceof Error ? error.message : String(error) });
     }
   });
@@ -329,20 +374,24 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
         });
       });
     },
-    async close() {
-      const serverClosed = new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
-      await serverClosed;
-      const active = [
-        ...[...activeOrchestrations.values()].map((item) => item.completion),
-        ...[...activeJobs.values()].map((item) => item.completion),
-      ];
-      await Promise.allSettled([
-        ...[...activeOrchestrations.values()].map((item) => item.cancel()),
-        ...[...activeJobs.values()].map(async (item) => item.cancel()),
-      ]);
-      await Promise.allSettled(active);
+    close() {
+      closePromise ??= (async () => {
+        closing = true;
+        await waitForAdmissions();
+        const active = [
+          ...[...activeOrchestrations.values()].map((item) => item.completion),
+          ...[...activeJobs.values()].map((item) => item.completion),
+        ];
+        await Promise.allSettled([
+          ...[...activeOrchestrations.values()].map((item) => item.cancel()),
+          ...[...activeJobs.values()].map(async (item) => item.cancel()),
+        ]);
+        await Promise.allSettled(active);
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+      })();
+      return closePromise;
     },
   };
 }

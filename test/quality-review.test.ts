@@ -103,7 +103,8 @@ const subtask: PlannedSubtask = {
 test('quality review prompt separates verified patch evidence from worker test claims', () => {
   const prompt = buildQualityReviewPrompt({ parentGoal: 'Implement the example.', subtask, childJob, preview });
   assert.match(prompt, /independent advisory quality reviewer/);
-  assert.match(prompt, /Judge only the bounded evidence supplied below\. Do not use tools/);
+  assert.match(prompt, /Use repository inspection tools when available/);
+  assert.match(prompt, /Do not edit files, apply the patch, execute repository commands/);
   assert.match(prompt, /Worker completion\/test claims \(unverified\)/);
   assert.match(prompt, /"command":"npm test","outcome":"passed"/);
   assert.match(prompt, /Verified patch preview:/);

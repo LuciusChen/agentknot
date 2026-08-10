@@ -308,6 +308,10 @@ test('read-oriented and invalid CLI commands do not reconcile persisted records'
       assert.deepEqual(await readdir(fixture.orchestrationDirectory), orchestrationsBefore);
     }
 
+    const jobList = await runCli(fixture.configPath, 'jobs', '--json');
+    assert.equal(jobList.code, 0, jobList.stderr);
+    assert.equal(jobList.stdout, `${JSON.stringify(JSON.parse(jobList.stdout))}\n`);
+
     const usage = await runCli(fixture.configPath, 'usage');
     assert.equal(usage.code, 0, usage.stderr);
     assert.match(usage.stdout, /^AgentKnot usage report/);

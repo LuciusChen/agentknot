@@ -9,14 +9,16 @@ import { promisify } from 'node:util';
 
 import { createAdapters } from '../src/adapters/index.js';
 import type { AgentKnotConfig } from '../src/config.js';
+import { AgentKnotHttpClient } from '../src/http-client.js';
 import { createAgentKnotHttpServer } from '../src/http-server.js';
 import type { AgentKnotHttpRuntime } from '../src/http-server.js';
+import { buildJobList, MAX_JOB_LIST_RESPONSE_BYTES } from '../src/job-list.js';
 import { OrchestrationService } from '../src/orchestration.js';
 import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
 import { Orchestrator } from '../src/orchestrator.js';
 import { AgentKnotRuntime } from '../src/runtime.js';
 import { MemoryJobStore } from '../src/store.js';
-import type { WorkerAdapter } from '../src/types.js';
+import type { JobRecord, WorkerAdapter } from '../src/types.js';
 
 const execFileAsync = promisify(execFile);
 const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
@@ -161,6 +163,14 @@ test('HTTP close cancels and awaits active jobs before returning', async () => {
   const started = new Promise<void>((resolve) => {
     runStarted = resolve;
   });
+  let abortObserved!: () => void;
+  const aborted = new Promise<void>((resolve) => {
+    abortObserved = resolve;
+  });
+  let releaseRun!: () => void;
+  const released = new Promise<void>((resolve) => {
+    releaseRun = resolve;
+  });
   const adapter: WorkerAdapter = {
     name: 'mock',
     async doctor() {
@@ -172,6 +182,8 @@ test('HTTP close cancels and awaits active jobs before returning', async () => {
         if (input.signal.aborted) resolve();
         else input.signal.addEventListener('abort', () => resolve(), { once: true });
       });
+      abortObserved();
+      await released;
       return { output: 'must not succeed after server close' };
     },
   };
@@ -189,8 +201,10 @@ test('HTTP close cancels and awaits active jobs before returning', async () => {
   });
   const http = createAgentKnotHttpServer(orchestrator);
   const address = await http.listen(0);
+  const baseUrl = `http://${address.host}:${address.port}`;
+  let closing: Promise<void> | undefined;
   try {
-    const response = await fetch(`http://${address.host}:${address.port}/v1/jobs`, {
+    const response = await fetch(`${baseUrl}/v1/jobs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: 'block until close', workspace }),
@@ -199,14 +213,108 @@ test('HTTP close cancels and awaits active jobs before returning', async () => {
     const body = (await response.json()) as { job: { id: string } };
     await started;
 
-    await http.close();
+    closing = http.close();
+    await aborted;
+    assert.equal(http.server.listening, true);
+    assert.equal((await fetch(`${baseUrl}/health/live`)).status, 200);
+    const refused = await fetch(`${baseUrl}/v1/jobs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'must not be admitted during shutdown', workspace }),
+    });
+    assert.equal(refused.status, 503);
+    assert.deepEqual(await refused.json(), { error: 'AgentKnot server is shutting down' });
+
+    releaseRun();
+    await closing;
 
     const job = await store.get(body.job.id);
     assert.equal(job?.status, 'cancelled');
     assert.equal(job?.events.at(-1)?.type, 'job.cancelled');
   } finally {
+    releaseRun();
+    await closing?.catch(() => undefined);
     if (http.server.listening) await http.close();
     await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('HTTP job listing returns bounded summaries instead of cumulative full records', async () => {
+  const largeOutput = 'x'.repeat(6 * 1024 * 1024);
+  const jobs: JobRecord[] = Array.from({ length: 3 }, (_, index) => ({
+    schemaVersion: 1,
+    id: `job_large_${index}`,
+    status: 'succeeded',
+    request: { prompt: `private prompt ${index}`, workspace: '/private/workspace' },
+    route: {
+      name: 'mock',
+      worker: 'mock',
+      provider: 'mock',
+      model: 'deterministic',
+      requiredEnv: [],
+      maxAttempts: 1,
+      timeoutMs: 30_000,
+    },
+    createdAt: `2026-08-10T00:00:0${index}.000Z`,
+    updatedAt: `2026-08-10T00:00:0${index}.000Z`,
+    completedAt: `2026-08-10T00:00:0${index}.000Z`,
+    attempt: 1,
+    events: [],
+    result: {
+      output: largeOutput,
+      attempt: 1,
+      worker: 'mock',
+      provider: 'mock',
+      model: 'deterministic',
+    },
+  }));
+  const runtime: AgentKnotHttpRuntime = {
+    routes: () => [],
+    get: async () => undefined,
+    list: async () => jobs,
+    listArtifacts: async () => undefined,
+    verifyArtifacts: async () => undefined,
+    previewArtifact: async () => undefined,
+    start: async () => {
+      throw new Error('listing must not start work');
+    },
+  };
+  const http = createAgentKnotHttpServer(runtime);
+  const address = await http.listen(0);
+  const baseUrl = `http://${address.host}:${address.port}`;
+  try {
+    const response = await fetch(`${baseUrl}/v1/jobs`);
+    assert.equal(response.status, 200);
+    assert.ok(Number(response.headers.get('content-length')) <= MAX_JOB_LIST_RESPONSE_BYTES);
+    const page = await new AgentKnotHttpClient(baseUrl).listJobs();
+    assert.equal(page.schemaVersion, 1);
+    assert.equal(page.total, 3);
+    assert.equal(page.truncated, false);
+    assert.equal(page.jobs.length, 3);
+    assert.deepEqual(page.jobs[0], {
+      schemaVersion: 1,
+      id: 'job_large_0',
+      status: 'succeeded',
+      route: 'mock',
+      createdAt: '2026-08-10T00:00:00.000Z',
+      updatedAt: '2026-08-10T00:00:00.000Z',
+      completedAt: '2026-08-10T00:00:00.000Z',
+      attempt: 1,
+    });
+    assert.doesNotMatch(JSON.stringify(page), /private prompt|private\/workspace/);
+    assert.doesNotMatch(JSON.stringify(page), /xxxx/);
+
+    const oversizedSummaryJobs = jobs.slice(0, 2).map((job, index) => ({
+      ...job,
+      route: { ...job.route, name: String(index).repeat(600 * 1024) },
+    }));
+    const capped = buildJobList(oversizedSummaryJobs);
+    assert.equal(capped.jobs.length, 1);
+    assert.equal(capped.total, 2);
+    assert.equal(capped.truncated, true);
+    assert.ok(Buffer.byteLength(`${JSON.stringify(capped)}\n`) <= MAX_JOB_LIST_RESPONSE_BYTES);
+  } finally {
+    await http.close();
   }
 });
 

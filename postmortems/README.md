@@ -157,3 +157,5 @@ Incident records should also include severity, user/controller impact, immediate
 | [0043](./0043-native-opencode-lifecycle-soak.md) | Decision / Experiment | Accepted | Close native OpenCode lifecycle gate and document Git metadata boundary |
 | [0044](./0044-required-worker-completion-and-canonical-worktree-id.md) | Incident / Decision | Resolved / Accepted | Require real-worker completion and canonicalize worktree identity |
 | [0045](./0045-controller-session-workspace-binding.md) | Incident / Decision | Resolved / Accepted | Bind an explicit repository to the controller session |
+| [0046](./0046-clutch-review-listing-and-shutdown-gaps.md) | Incident / Decision | Resolved / Accepted | Close Clutch review, listing, and shutdown gaps |
+| [0047](./0047-resumable-controller-binding-and-replaceable-role-pools.md) | Incident / Decision | Resolved / Accepted | Resume controller bindings and make orchestration roles replaceable |

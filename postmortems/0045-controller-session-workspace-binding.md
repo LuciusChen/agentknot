@@ -64,3 +64,9 @@ The hook still forwards every non-explicit prompt in a resolved `auto` workspace
 ## Privacy and security review
 
 The record stores one absolute repository path, which may reveal a local project name. It stores no prompt, transcript, credential, provider/model, route, Job ID, artifact, or source content. The incident evidence omits the original task details beyond the repository path needed to explain the resolution failure.
+
+## Addenda
+
+### 2026-08-10 — resumed sessions retain the binding
+
+The `SessionEnd` deletion decision above is superseded by [decision 0047](./0047-resumable-controller-binding-and-replaceable-role-pools.md). Normal controller exit followed by resume is a continuation of the same source/session identity, so the binding is retained. New writes add a non-secret hash of the Git common-directory path/device/inode and revalidate it with the root before reuse, rejecting a replaced repository at the same path. The original explicit-path resolution evidence and all other containment rules remain unchanged.

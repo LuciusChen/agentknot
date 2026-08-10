@@ -98,7 +98,7 @@ export interface ActiveRouteSelectionConfig {
 export type RouteSelectionConfig = ShadowRouteSelectionConfig | ActiveRouteSelectionConfig;
 
 export interface QualityReviewConfig {
-  /** Human-selected advisory reviewer route. The referenced route must use exactly one attempt. */
+  /** Human-selected advisory reviewer route or pool. Every candidate must use exactly one attempt. */
   route: string;
   /** Only parent assessments with one of these complexities are eligible. */
   complexities: RouteSelectionComplexity[];
@@ -468,18 +468,23 @@ function parseArtifactValidation(value: unknown): ArtifactValidationConfig {
 
 function parseQualityReview(
   value: unknown,
-  routes: Record<string, RouteConfig>
+  routes: Record<string, RouteConfig>,
+  routePools: Record<string, RoutePoolConfig>
 ): QualityReviewConfig {
   assertRecord(value, 'config.delegation.qualityReview');
   assertKnownKeys(value, ['route', 'complexities'], 'config.delegation.qualityReview');
   assertNonEmptyString(value.route, 'config.delegation.qualityReview.route');
-  if (!Object.hasOwn(routes, value.route)) {
+  const target = value.route;
+  if (!hasRouteTarget(target, routes, routePools)) {
     throw new Error(
-      `config.delegation.qualityReview.route references unknown route "${value.route}"`
+      `config.delegation.qualityReview.route references unknown route or pool "${target}"`
     );
   }
-  if ((routes[value.route]?.maxAttempts ?? 1) !== 1) {
-    throw new Error('config.delegation.qualityReview.route must reference a route with maxAttempts 1');
+  const candidates = Object.hasOwn(routes, target) ? [target] : routePools[target]!.routes;
+  if (candidates.some((candidate) => (routes[candidate]?.maxAttempts ?? 1) !== 1)) {
+    throw new Error(
+      'config.delegation.qualityReview.route must reference a route or pool whose candidates have maxAttempts 1'
+    );
   }
   return {
     route: value.route,
@@ -510,8 +515,8 @@ function parseDelegation(
   }
   if (planner.route !== undefined) assertNonEmptyString(planner.route, 'config.delegation.planner.route');
   const plannerRoute = (planner.route as string | undefined) ?? defaultRoute;
-  if (!(plannerRoute in routes)) {
-    throw new Error(`config.delegation.planner.route references unknown route "${plannerRoute}"`);
+  if (!hasRouteTarget(plannerRoute, routes, routePools)) {
+    throw new Error(`config.delegation.planner.route references unknown route or pool "${plannerRoute}"`);
   }
 
   if (value.dispatch !== undefined) assertRecord(value.dispatch, 'config.delegation.dispatch');
@@ -553,7 +558,7 @@ function parseDelegation(
   const qualityReview =
     value.qualityReview === undefined
       ? undefined
-      : parseQualityReview(value.qualityReview, routes);
+      : parseQualityReview(value.qualityReview, routes, routePools);
   const artifactValidation =
     value.artifactValidation === undefined
       ? undefined

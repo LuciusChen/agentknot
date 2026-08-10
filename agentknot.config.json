@@ -22,19 +22,30 @@
       ],
       "noSession": true
     },
-    "bounded-review": {
+    "repository-review": {
       "adapter": "pi-rpc",
       "command": "pi",
       "commandArgs": [
         "--no-skills",
-        "--no-tools",
-        "--no-context-files"
+        "--tools",
+        "read,grep,find,ls"
       ],
       "noSession": true
     },
     "opencode": {
       "adapter": "opencode-json",
       "command": "/home/lucius/.local/lib/agentknot/workers/opencode/1.18.15/opencode",
+      "unsetEnvironment": [
+        "OPENCODE_API_KEY"
+      ]
+    },
+    "opencode-readonly": {
+      "adapter": "opencode-json",
+      "command": "/home/lucius/.local/lib/agentknot/workers/opencode/1.18.15/opencode",
+      "commandArgs": [
+        "--agent",
+        "plan"
+      ],
       "unsetEnvironment": [
         "OPENCODE_API_KEY"
       ]
@@ -60,7 +71,7 @@
       "timeoutMs": 3600000
     },
     "quality-review": {
-      "worker": "bounded-review",
+      "worker": "repository-review",
       "provider": "opencode-go",
       "model": "gpt-5.6-luna",
       "thinkingLevel": "max",
@@ -88,14 +99,46 @@
       "thinkingLevel": "max",
       "maxAttempts": 1,
       "timeoutMs": 3600000
+    },
+    "opencode-deepseek-flash": {
+      "worker": "opencode",
+      "provider": "opencode-go",
+      "model": "deepseek-v4-flash",
+      "thinkingLevel": "max",
+      "maxAttempts": 1,
+      "timeoutMs": 3600000
+    },
+    "opencode-quality-review": {
+      "worker": "opencode-readonly",
+      "provider": "opencode-go",
+      "model": "gpt-5.6-luna",
+      "thinkingLevel": "max",
+      "maxAttempts": 1,
+      "timeoutMs": 3600000
     }
   },
   "routePools": {
-    "luna-workers": {
+    "advanced-workers": {
       "strategy": "least-active",
       "routes": [
         "luna",
         "opencode-luna"
+      ]
+    },
+    "routine-workers": {
+      "strategy": "least-active",
+      "routes": [
+        "deepseek-flash",
+        "opencode-deepseek-flash",
+        "luna",
+        "opencode-luna"
+      ]
+    },
+    "review-workers": {
+      "strategy": "least-active",
+      "routes": [
+        "quality-review",
+        "opencode-quality-review"
       ]
     }
   },
@@ -103,10 +146,10 @@
     "mode": "auto",
     "planner": {
       "strategy": "hybrid",
-      "route": "luna"
+      "route": "advanced-workers"
     },
     "dispatch": {
-      "defaultRoute": "luna-workers",
+      "defaultRoute": "advanced-workers",
       "maxChildren": 6,
       "maxDepth": 1,
       "maxConcurrency": 6,
@@ -114,7 +157,7 @@
         "mode": "active",
         "rules": [
           {
-            "route": "deepseek-flash",
+            "route": "routine-workers",
             "complexities": [
               "low"
             ]
@@ -138,7 +181,7 @@
       ]
     },
     "qualityReview": {
-      "route": "quality-review",
+      "route": "review-workers",
       "complexities": [
         "low"
       ]

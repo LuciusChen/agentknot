@@ -1,4 +1,5 @@
 import type { DelegationConfig } from './config.js';
+import type { JobList } from './job-list.js';
 import type { OrchestrationRecord, OrchestrationRequest } from './orchestration-types.js';
 import type {
   JobArtifactList,
@@ -251,10 +252,20 @@ export class AgentKnotHttpClient {
     }
   }
 
-  async listJobs(): Promise<JobRecord[]> {
+  async listJobs(): Promise<JobList> {
     const body = asObject(await this.#request('/v1/jobs'), 'job list response');
     if (!Array.isArray(body.jobs)) throw new AgentKnotHttpClientError('job list response.jobs must be an array');
-    return body.jobs as JobRecord[];
+    if (
+      body.schemaVersion !== 1 ||
+      !Number.isSafeInteger(body.total) ||
+      (body.total as number) < 0 ||
+      typeof body.truncated !== 'boolean' ||
+      !Number.isSafeInteger(body.maxBytes) ||
+      (body.maxBytes as number) <= 0
+    ) {
+      throw new AgentKnotHttpClientError('job list response metadata is invalid');
+    }
+    return body as unknown as JobList;
   }
 
   async waitForJob(initial: JobRecord): Promise<JobRecord> {

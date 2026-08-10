@@ -98,11 +98,11 @@ class PlannerAndWorkerAdapter implements WorkerAdapter {
     this.activeRuns += 1;
     this.peakRuns = Math.max(this.peakRuns, this.activeRuns);
     try {
-      if (input.route.name === 'planner') {
+      if (input.route.name.startsWith('planner')) {
         await abortableDelay(this.plannerDelayMs, input.signal);
         return { output: this.plannerOutput ?? JSON.stringify(this.assessment) };
       }
-      if (input.route.name === 'reviewer') {
+      if (input.route.name.startsWith('reviewer')) {
         this.reviewerRuns += 1;
         return {
           output: JSON.stringify({
@@ -149,8 +149,8 @@ class ArtifactWritingAdapter implements WorkerAdapter {
 
   async run(input: WorkerRunInput, emit: WorkerEventSink): Promise<WorkerRunResult> {
     await emit('worker.started', { route: input.route.name });
-    if (input.route.name === 'planner') return { output: JSON.stringify(this.assessment) };
-    if (input.route.name === 'reviewer') {
+    if (input.route.name.startsWith('planner')) return { output: JSON.stringify(this.assessment) };
+    if (input.route.name.startsWith('reviewer')) {
       this.reviewerRuns += 1;
       return { output: this.reviewerOutput };
     }
@@ -424,6 +424,13 @@ function testConfig(maxConcurrency = 1, workerMaxAttempts = 1, maxChildren = 2):
     workers: { test: { adapter: 'mock' } },
     routes: {
       planner: { worker: 'test', provider: 'test', model: 'planner', maxAttempts: 1, timeoutMs: 30_000 },
+      'planner-alternate': {
+        worker: 'test',
+        provider: 'test',
+        model: 'planner-alternate',
+        maxAttempts: 1,
+        timeoutMs: 30_000,
+      },
       worker: {
         worker: 'test',
         provider: 'test',
@@ -442,6 +449,13 @@ function testConfig(maxConcurrency = 1, workerMaxAttempts = 1, maxChildren = 2):
         worker: 'test',
         provider: 'test',
         model: 'reviewer',
+        maxAttempts: 1,
+        timeoutMs: 30_000,
+      },
+      'reviewer-alternate': {
+        worker: 'test',
+        provider: 'test',
+        model: 'reviewer-alternate',
         maxAttempts: 1,
         timeoutMs: 30_000,
       },
@@ -583,6 +597,49 @@ test('OrchestrationService dispatches parallel children through a complete-route
     record.children.every((child) => child.routePoolSelection?.selectedRoute === child.route?.name),
     true
   );
+});
+
+test('OrchestrationService resolves planner and reviewer pools to replaceable exact routes', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-role-pools-');
+  const adapter = new ArtifactWritingAdapter(
+    singleQualityReviewAssessment('Produce reviewed file.'),
+    new Map([['Produce reviewed file.', ['reviewed.ts']]])
+  );
+  const config = testConfig(2, 1, 1);
+  config.routePools = {
+    planners: { strategy: 'least-active', routes: ['planner', 'planner-alternate'] },
+    reviewers: { strategy: 'least-active', routes: ['reviewer', 'reviewer-alternate'] },
+  };
+  config.delegation!.planner.route = 'planners';
+  config.delegation!.qualityReview = { route: 'reviewers', complexities: ['low'] };
+  const jobStore = new MemoryJobStore();
+  const jobs = new Orchestrator({
+    config,
+    store: jobStore,
+    adapters: new Map([[adapter.name, adapter]]),
+  });
+  const orchestrations = new OrchestrationService({
+    config: config.delegation!,
+    jobs,
+    store: new MemoryOrchestrationStore(),
+  });
+
+  const record = await orchestrations.run({
+    prompt: 'Produce and review one bounded file through replaceable role pools.',
+    workspace,
+  });
+
+  assert.equal(record.status, 'succeeded');
+  const planner = await jobs.get(record.plannerJobId!);
+  assert.equal(planner?.request.route, 'planners');
+  assert.equal(planner?.routePoolSelection?.pool, 'planners');
+  assert.equal(planner?.routePoolSelection?.selectedRoute, planner?.route.name);
+  if (record.qualityReview?.status !== 'completed') assert.fail('quality review should complete');
+  assert.equal(record.qualityReview.route, 'reviewers');
+  const reviewer = await jobs.get(record.qualityReview.reviewerJobId);
+  assert.equal(reviewer?.request.route, 'reviewers');
+  assert.equal(reviewer?.routePoolSelection?.pool, 'reviewers');
+  assert.equal(reviewer?.routePoolSelection?.selectedRoute, reviewer?.route.name);
 });
 
 test('OrchestrationService runs one advisory reviewer after one valid low-complexity patch', async () => {

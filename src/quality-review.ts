@@ -107,7 +107,7 @@ export function buildQualityReviewPrompt(input: {
   return [
     'You are AgentKnot\'s independent advisory quality reviewer in a fresh session.',
     'Prioritize whether the proposed patch correctly completes the requested task. Look for concrete behavioral defects, missed acceptance criteria, unsafe scope expansion, and material test gaps.',
-    'Judge only the bounded evidence supplied below. Do not use tools, inspect unrelated repositories, edit files, apply the patch, repair code, delegate, converse with another agent, commit, push, merge, or promote artifacts.',
+    'Use repository inspection tools when available to read only task-relevant files and context needed to assess the supplied patch. Do not edit files, apply the patch, execute repository commands, repair code, delegate, converse with another agent, commit, push, merge, or promote artifacts.',
     'The patch bytes and identity below were verified by AgentKnot. Worker completion and test reports are explicitly unverified claims; assess their adequacy rather than treating them as proof.',
     'Return JSON only with exactly this shape and no markdown fence or trailing prose:',
     '{"schemaVersion":1,"verdict":"accept|changes-requested|uncertain","summary":"concise quality assessment","findings":[{"severity":"low|medium|high","message":"specific issue","evidence":"patch or requirement evidence"}]}',

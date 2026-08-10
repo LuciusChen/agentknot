@@ -1,16 +1,27 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, chmod, lstat, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const source = process.argv[2];
-if (source !== 'codex' && source !== 'claude') throw new Error('Expected codex or claude source');
-
-const explicit = source === 'codex' ? '$agentknot-delegate' : '/agentknot:agentknot-delegate';
+const explicit = process.argv[3];
+if (typeof source !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(source)) {
+  throw new Error('Expected a bounded controller source namespace');
+}
+if (explicit !== undefined && (explicit === '' || Buffer.byteLength(explicit, 'utf8') > 256)) {
+  throw new Error('Expected a bounded explicit invocation marker');
+}
+// Sessions created by the previous packaged adapters retain their two-argument
+// hook command when resumed. Keep only their bounded invocation markers here;
+// new adapters pass their own marker as the third argument.
+const explicitInvocations = explicit === undefined
+  ? ['$agentknot-delegate', '/agentknot:agentknot-delegate']
+  : [explicit];
 const MAX_CHILD_OUTPUT_CHARS = 24_000;
 const MAX_PREVIEW_CHARS = 32_000;
 const MAX_CONTEXT_CHARS = 60_000;
@@ -19,6 +30,7 @@ const MAX_SESSION_RECORD_BYTES = 4 * 1024;
 const SESSION_DIRECTORY_MODE = 0o700;
 const SESSION_RECORD_MODE = 0o600;
 const EXPLICIT_PATH_PATTERN = /(?:^|[\s"'`([{<（【《])((?:~\/|\/)[^\s"'`\])}>）】》,，。；;:：！？!?]+)/gu;
+const TOOL_WORKSPACE_KEYS = new Set(['cwd', 'workdir', 'workspace']);
 
 function truncate(value, maximum) {
   return value.length <= maximum ? value : `${value.slice(0, maximum)}\n[truncated by controller hook]`;
@@ -78,13 +90,13 @@ function sessionRecordPath(sessionId) {
   return key === undefined ? undefined : path.join(sessionDirectory(), `${key}.json`);
 }
 
-async function writeSessionWorkspace(sessionId, workspace) {
+async function writeSessionWorkspace(sessionId, workspace, repositoryIdentity) {
   const recordPath = sessionRecordPath(sessionId);
   if (recordPath === undefined) return;
   const directory = path.dirname(recordPath);
   await mkdir(directory, { recursive: true, mode: SESSION_DIRECTORY_MODE });
   await chmod(directory, SESSION_DIRECTORY_MODE);
-  const record = `${JSON.stringify({ schemaVersion: 1, source, workspace })}\n`;
+  const record = `${JSON.stringify({ schemaVersion: 1, source, workspace, repositoryIdentity })}\n`;
   if (Buffer.byteLength(record, 'utf8') > MAX_SESSION_RECORD_BYTES) return;
   const temporaryPath = path.join(directory, `.${path.basename(recordPath)}.${randomUUID()}.tmp`);
   try {
@@ -128,11 +140,13 @@ async function readSessionWorkspace(sessionId) {
     record.schemaVersion !== 1 ||
     record.source !== source ||
     typeof record.workspace !== 'string' ||
-    !path.isAbsolute(record.workspace)
+    !path.isAbsolute(record.workspace) ||
+    (record.repositoryIdentity !== undefined &&
+      (typeof record.repositoryIdentity !== 'string' || record.repositoryIdentity === ''))
   ) {
     return undefined;
   }
-  return record.workspace;
+  return { workspace: record.workspace, repositoryIdentity: record.repositoryIdentity };
 }
 
 async function clearSessionWorkspace(sessionId) {
@@ -163,6 +177,29 @@ async function gitRoot(candidate) {
   }
 }
 
+async function repositoryIdentity(root) {
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--git-common-dir'], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    const raw = stdout.trim();
+    if (raw === '') return undefined;
+    const commonDirectory = await realpath(path.isAbsolute(raw) ? raw : path.resolve(root, raw));
+    const commonStats = await stat(commonDirectory);
+    if (!commonStats.isDirectory()) return undefined;
+    return createHash('sha256')
+      .update(commonDirectory)
+      .update('\0')
+      .update(String(commonStats.dev))
+      .update('\0')
+      .update(String(commonStats.ino))
+      .digest('hex');
+  } catch {
+    return undefined;
+  }
+}
+
 function explicitPaths(prompt) {
   const candidates = [];
   for (const match of prompt.matchAll(EXPLICIT_PATH_PATTERN)) {
@@ -176,10 +213,64 @@ function explicitPaths(prompt) {
   return candidates;
 }
 
+function exactToolPaths(value) {
+  const candidates = [];
+  let visited = 0;
+  const visit = (current, depth) => {
+    if (
+      depth > 8 ||
+      visited >= 128 ||
+      candidates.length >= 16 ||
+      current === null ||
+      typeof current !== 'object'
+    ) return;
+    visited += 1;
+    if (Array.isArray(current)) {
+      for (const item of current) visit(item, depth + 1);
+      return;
+    }
+    for (const [key, item] of Object.entries(current)) {
+      if (TOOL_WORKSPACE_KEYS.has(key) && typeof item === 'string') {
+        let candidate;
+        if (item.startsWith('file://')) {
+          try {
+            candidate = fileURLToPath(item);
+          } catch {
+            continue;
+          }
+        } else if (item.startsWith('~/')) {
+          candidate = path.join(os.homedir(), item.slice(2));
+        } else if (path.isAbsolute(item)) {
+          candidate = item;
+        }
+        if (candidate !== undefined) candidates.push(path.resolve(candidate));
+        if (candidates.length >= 16) return;
+      } else {
+        visit(item, depth + 1);
+      }
+    }
+  };
+  visit(value, 0);
+  return candidates;
+}
+
+async function captureToolWorkspace(event) {
+  const roots = new Set();
+  for (const candidate of exactToolPaths(event.tool_input)) {
+    const root = await gitRoot(candidate);
+    if (root !== undefined) roots.add(root);
+  }
+  if (roots.size !== 1) return;
+  const [workspace] = roots;
+  const identity = await repositoryIdentity(workspace);
+  if (identity !== undefined) await writeSessionWorkspace(event.session_id, workspace, identity);
+}
+
 async function resolveWorkspace(event, cwd) {
   const cwdRoot = await gitRoot(cwd);
   if (cwdRoot !== undefined) {
-    await writeSessionWorkspace(event.session_id, cwdRoot);
+    const identity = await repositoryIdentity(cwdRoot);
+    if (identity !== undefined) await writeSessionWorkspace(event.session_id, cwdRoot, identity);
     return cwdRoot;
   }
 
@@ -191,14 +282,25 @@ async function resolveWorkspace(event, cwd) {
   if (promptRoots.size > 1) return undefined;
   if (promptRoots.size === 1) {
     const [workspace] = promptRoots;
-    await writeSessionWorkspace(event.session_id, workspace);
+    const identity = await repositoryIdentity(workspace);
+    if (identity !== undefined) await writeSessionWorkspace(event.session_id, workspace, identity);
     return workspace;
   }
 
   const bound = await readSessionWorkspace(event.session_id);
   if (bound === undefined) return undefined;
-  const boundRoot = await gitRoot(bound);
-  if (boundRoot === bound) return bound;
+  const boundRoot = await gitRoot(bound.workspace);
+  const identity = boundRoot === undefined ? undefined : await repositoryIdentity(boundRoot);
+  if (
+    boundRoot === bound.workspace &&
+    identity !== undefined &&
+    (bound.repositoryIdentity === undefined || bound.repositoryIdentity === identity)
+  ) {
+    if (bound.repositoryIdentity === undefined) {
+      await writeSessionWorkspace(event.session_id, bound.workspace, identity);
+    }
+    return bound.workspace;
+  }
   await clearSessionWorkspace(event.session_id);
   return undefined;
 }
@@ -249,11 +351,16 @@ async function discoverServerUrl(cwd) {
 try {
   const event = await input();
   if (event.hook_event_name === 'SessionEnd') {
-    await clearSessionWorkspace(event.session_id).catch(() => undefined);
+    // Keep the verified binding so a resumed controller session can recover its repository.
+    // Every later use revalidates the Git root and common-directory identity.
+    process.exit(0);
+  }
+  if (event.hook_event_name === 'PostToolUse') {
+    await captureToolWorkspace(event);
     process.exit(0);
   }
   if (event.hook_event_name !== 'UserPromptSubmit' || typeof event.prompt !== 'string') process.exit(0);
-  if (event.prompt.includes(explicit)) process.exit(0);
+  if (explicitInvocations.some((marker) => event.prompt.includes(marker))) process.exit(0);
 
   const cwd = typeof event.cwd === 'string' && event.cwd !== '' ? event.cwd : process.cwd();
   const workspace = await resolveWorkspace(event, cwd);

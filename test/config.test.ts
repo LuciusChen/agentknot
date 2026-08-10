@@ -116,6 +116,13 @@ test('parseConfig keeps route pools above complete exact routes', () => {
   });
   assert.equal(config.delegation?.dispatch.defaultRoute, 'balanced');
   assert.equal(config.delegation?.dispatch.routeSelection?.rules[0]?.route, 'balanced');
+  assert.equal(
+    parseConfig({
+      ...base,
+      delegation: { ...base.delegation, planner: { strategy: 'hybrid', route: 'balanced' } },
+    }).delegation?.planner.route,
+    'balanced'
+  );
 
   assert.throws(
     () => parseConfig({ ...base, routePools: { a: base.routePools.balanced } }),
@@ -136,14 +143,6 @@ test('parseConfig keeps route pools above complete exact routes', () => {
   assert.throws(
     () => parseConfig({ ...base, routePools: { balanced: { strategy: 'random', routes: ['a', 'b'] } } }),
     /least-active/
-  );
-  assert.throws(
-    () =>
-      parseConfig({
-        ...base,
-        delegation: { ...base.delegation, planner: { strategy: 'hybrid', route: 'balanced' } },
-      }),
-    /planner.route references unknown route/
   );
 });
 
@@ -319,7 +318,7 @@ test('parseConfig validates optional artifact validation and preserves its resol
   }
 });
 
-test('parseConfig strictly validates an optional single-attempt quality reviewer route', () => {
+test('parseConfig strictly validates an optional single-attempt quality reviewer target', () => {
   const base = {
     version: 1,
     defaultRoute: 'worker',
@@ -329,6 +328,10 @@ test('parseConfig strictly validates an optional single-attempt quality reviewer
       worker: { worker: 'mock', provider: 'mock', model: 'worker' },
       reviewer: { worker: 'mock', provider: 'mock', model: 'reviewer', maxAttempts: 1 },
       retrying: { worker: 'mock', provider: 'mock', model: 'retrying', maxAttempts: 2 },
+    },
+    routePools: {
+      reviewers: { strategy: 'least-active', routes: ['worker', 'reviewer'] },
+      mixedAttempts: { strategy: 'least-active', routes: ['reviewer', 'retrying'] },
     },
   };
   assert.deepEqual(
@@ -341,6 +344,16 @@ test('parseConfig strictly validates an optional single-attempt quality reviewer
     }).delegation?.qualityReview,
     { route: 'reviewer', complexities: ['low', 'medium'] }
   );
+  assert.deepEqual(
+    parseConfig({
+      ...base,
+      delegation: {
+        mode: 'off',
+        qualityReview: { route: 'reviewers', complexities: ['low'] },
+      },
+    }).delegation?.qualityReview,
+    { route: 'reviewers', complexities: ['low'] }
+  );
 
   const invalid: unknown[] = [
     null,
@@ -352,6 +365,7 @@ test('parseConfig strictly validates an optional single-attempt quality reviewer
     { route: 'reviewer', complexities: ['low', 'low'] },
     { route: 'reviewer', complexities: ['urgent'] },
     { route: 'retrying', complexities: ['low'] },
+    { route: 'mixedAttempts', complexities: ['low'] },
     { route: 'reviewer', complexities: ['low'], unexpected: true },
   ];
   for (const qualityReview of invalid) {

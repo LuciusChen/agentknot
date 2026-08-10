@@ -1,12 +1,23 @@
 {
   "description": "Run configured automatic AgentKnot delegation before the controller-model turn.",
   "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" codex '$agentknot-delegate'",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" codex",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" codex '$agentknot-delegate'",
             "timeout": 3660,
             "statusMessage": "Running AgentKnot automatic delegation",
             "additionalContextLimit": 18000
@@ -19,8 +30,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" codex",
-            "timeout": 5
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" codex '$agentknot-delegate'",
+            "timeout": 3
           }
         ]
       }

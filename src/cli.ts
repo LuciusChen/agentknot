@@ -4,6 +4,7 @@ import process from 'node:process';
 
 import { AgentKnotHttpClient } from './http-client.js';
 import { createAgentKnotHttpServer } from './http-server.js';
+import { buildJobList } from './job-list.js';
 import {
   createLocalDiscoveryRegistration,
   readLocalDiscovery,
@@ -743,9 +744,16 @@ async function main(argv: string[]): Promise<void> {
   if (command === 'jobs') {
     const json = takeFlag(args, '--json');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-    const jobs = remote === undefined ? await runtime!.list() : await remote.listJobs();
-    if (json) process.stdout.write(`${JSON.stringify(jobs, null, 2)}\n`);
-    else for (const job of jobs) process.stdout.write(`${job.id}\t${job.status}\t${job.route.name}\t${job.createdAt}\n`);
+    const page = remote === undefined ? buildJobList(await runtime!.list()) : await remote.listJobs();
+    if (json) process.stdout.write(`${JSON.stringify(page)}\n`);
+    else {
+      for (const job of page.jobs) {
+        process.stdout.write(`${job.id}\t${job.status}\t${job.route}\t${job.createdAt}\n`);
+      }
+      if (page.truncated) {
+        process.stderr.write(`Showing ${page.jobs.length} of ${page.total} Jobs; inspect a known ID with agentknot show JOB_ID.\n`);
+      }
+    }
     return;
   }
 

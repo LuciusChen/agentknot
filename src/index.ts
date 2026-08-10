@@ -3,6 +3,7 @@ export * from './config.js';
 export * from './delegation-policy.js';
 export * from './execution.js';
 export * from './http-server.js';
+export * from './job-list.js';
 export * from './local-discovery.js';
 export * from './orchestration.js';
 export * from './orchestration-store.js';
