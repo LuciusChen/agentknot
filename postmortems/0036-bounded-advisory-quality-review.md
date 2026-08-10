@@ -64,3 +64,15 @@ Deterministic tests cover strict configuration and parser rejection, bounded pro
 ## Privacy and security review
 
 The durable experiment identifiers, route resolutions, aggregate statistics, artifact hashes, and synthetic patch behavior contain no credentials or user repository content. The first reviewer accessed unrelated local project documents; no secret was observed or copied here. The incident reinforces that worker capability flags reduce accidental scope but do not sandbox a host-capable model process.
+
+## Addenda
+
+### 2026-08-10: Codex pre-model upstream measurement
+
+A fresh Codex `gpt-5.6-sol`/`xhigh` run reused the exact historical direct-baseline fixture commit `121ef607` and prompt from decision 0035. The current plugin entered AgentKnot before the controller-model turn. Orchestration `orchestration_adde359c-d427-4931-a877-934158597be0` selected one low-complexity implementation child, and its worker corrected an initially failing duplicate-range case before producing the final artifact. The configured bounded reviewer returned `accept` with no finding.
+
+The downstream planner, worker, and reviewer Jobs reported 4,843, 56,224, and 5,256 tokens respectively (66,323 total). Reviewer job `job_25297b33-6f8c-4772-923d-a64163e4faaa` used zero tools and completed in about 30.5 seconds. The whole orchestration completed in about 63.8 seconds with no fallback.
+
+The controller received the compact verified preview, stated that it would apply that patch, changed only `src/ranges.js`, and ran `npm test` plus a changed-file check. Stable `turn.completed.usage` reported 46,944 input tokens, including 40,192 cached input tokens, and 625 output tokens: 47,569 input-plus-output. Independent controller-side validation then passed all 4/4 fixture tests with the same single-file diff and no further modification.
+
+Against the same-task direct baseline of 73,578 input plus 1,032 output (74,610 input-plus-output), the current automatic path reduced upstream input by 36.2% and input-plus-output by 36.2%. Non-cached-input-plus-output also fell from 9,330 to 7,377. This one pair strengthens the claim that delegation plus bounded review can reduce upstream controller work without losing the observed result quality. It still does not establish lower total compute, subscription-quota equivalence, broad completion rate, causality for the reviewer alone, or a portable model ranking. Final disposition remains absent from the persisted AgentKnot schema; controller acceptance here is experiment evidence from the stable Codex event/tool boundary, not a new product capability.
