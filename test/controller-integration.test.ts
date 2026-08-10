@@ -110,7 +110,10 @@ async function writeFakeAgentKnot(directory: string): Promise<string> {
       `  process.stdout.write(process.env.FAKE_AGENTKNOT_CLIENT ?? '{"status":"unconfigured"}');\n` +
       `  if (process.env.FAKE_AGENTKNOT_CLIENT_EXIT === '1') process.exitCode = 1;\n` +
       `} else if (args[0] === 'delegation') process.stdout.write('{"mode":"auto"}');\n` +
-      `else if (args[0] === 'orchestrate') process.stdout.write(process.env.FAKE_AGENTKNOT_HANDOFF);\n` +
+      `else if (args[0] === 'orchestrate') {\n` +
+      `  process.stdout.write(process.env.FAKE_AGENTKNOT_HANDOFF);\n` +
+      `  if (process.env.FAKE_AGENTKNOT_HANDOFF_EXIT === '1') process.exitCode = 1;\n` +
+      `}\n` +
       `else if (args[0] === 'artifact-preview') process.stdout.write(process.env.FAKE_AGENTKNOT_PREVIEW);\n` +
       `else process.exitCode = 1;\n`
   );
@@ -885,16 +888,13 @@ for (const integration of integrations) {
           prompt: 'Do not fall back from local discovery.',
         }
       );
-      const output = JSON.parse(result) as {
-        hookSpecificOutput: { hookEventName: string; additionalContext: string };
-      };
-      const context = output.hookSpecificOutput.additionalContext;
-      assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-      assert.match(context, /^AgentKnot automatic entry failed to return a usable handoff:/);
-      assert.match(context, /Continue upstream without silently substituting another worker, provider, or model\./);
-      assert.doesNotMatch(context, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
-      assert.doesNotMatch(context, /FORBIDDEN_PREVIEW/);
-      assert.ok(context.length <= 60_000);
+      const output = JSON.parse(result) as { decision: string; reason: string };
+      assert.equal(output.decision, 'block');
+      assert.match(output.reason, /^AgentKnot automatic entry failed to return a usable handoff:/);
+      assert.match(output.reason, /blocked before the controller-model request/);
+      assert.doesNotMatch(output.reason, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
+      assert.doesNotMatch(output.reason, /FORBIDDEN_PREVIEW/);
+      assert.ok(output.reason.length <= 60_000);
 
       const calls = (await readFile(callsFile, 'utf8'))
         .trim()
@@ -978,14 +978,12 @@ for (const integration of integrations) {
       },
       { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
     );
-    const output = JSON.parse(result) as {
-      hookSpecificOutput: { hookEventName: string; additionalContext: string };
-    };
-    const context = output.hookSpecificOutput.additionalContext;
-    assert.equal(output.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+    const output = JSON.parse(result) as { decision: string; reason: string };
+    const context = output.reason;
+    assert.equal(output.decision, 'block');
     assert.equal(context.startsWith('AgentKnot automatic entry failed to return a usable handoff:'), true);
     assert.equal(context.includes('before dispatch'), false);
-    assert.match(context, /Continue upstream without silently substituting another worker, provider, or model\./);
+    assert.match(context, /blocked before the controller-model request/);
     assert.ok(context.length <= 60_000);
     for (const forbidden of [
       'AGENTKNOT_AUTOMATIC_HANDOFF_V1',
@@ -998,6 +996,68 @@ for (const integration of integrations) {
     ]) {
       assert.equal(context.includes(forbidden), false);
     }
+
+    const calls = (await readFile(callsFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[]);
+    assert.deepEqual(calls, [
+      ['delegation', '--json', '--config', configPath],
+      [
+        'orchestrate',
+        '--source',
+        integration.controller,
+        '--workspace',
+        repositoryRoot,
+        '--delegation',
+        'inherit',
+        '--handoff-json',
+        '--prompt',
+        prompt,
+        '--config',
+        configPath,
+      ],
+    ]);
+  });
+}
+
+for (const integration of integrations) {
+  test(`${integration.controller} hook preserves terminal orchestration failure and blocks upstream work`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-terminal-failure-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const configPath = path.join(directory, 'agentknot.config.json');
+    const prompt = 'Review the current repository without changing files.';
+    const orchestrationId = 'orchestration_dirty_workspace';
+    const terminalError = `Workspace repository is not clean: ${repositoryRoot}`;
+    const result = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH ?? ''}`,
+        AGENTKNOT_CONFIG: configPath,
+        FAKE_AGENTKNOT_CALLS: callsFile,
+        FAKE_AGENTKNOT_HANDOFF_EXIT: '1',
+        FAKE_AGENTKNOT_HANDOFF: JSON.stringify({
+          schemaVersion: 1,
+          id: orchestrationId,
+          status: 'failed',
+          children: [],
+          artifacts: [],
+          error: { name: 'Error', message: terminalError },
+        }),
+        FAKE_AGENTKNOT_PREVIEW: 'FORBIDDEN_PREVIEW',
+      },
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
+    );
+    const output = JSON.parse(result) as { decision: string; reason: string };
+    assert.equal(output.decision, 'block');
+    assert.match(output.reason, new RegExp(orchestrationId));
+    assert.match(output.reason, /ended with status failed/);
+    assert.match(output.reason, new RegExp(terminalError.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(output.reason, /blocked before the controller-model request/);
+    assert.doesNotMatch(output.reason, /AGENTKNOT_AUTOMATIC_HANDOFF_V1|FORBIDDEN_PREVIEW/);
 
     const calls = (await readFile(callsFile, 'utf8'))
       .trim()

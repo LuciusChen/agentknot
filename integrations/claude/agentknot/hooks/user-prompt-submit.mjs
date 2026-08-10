@@ -53,6 +53,15 @@ function context(additionalContext) {
   );
 }
 
+function block(reason) {
+  process.stdout.write(
+    `${JSON.stringify({
+      decision: 'block',
+      reason: truncate(reason, MAX_CONTEXT_CHARS),
+    })}\n`
+  );
+}
+
 async function run(args, cwd) {
   return execFileAsync('agentknot', args, {
     cwd,
@@ -394,23 +403,46 @@ try {
   const policy = JSON.parse(policyOutput);
   if (policy.mode !== 'auto') process.exit(0);
 
-  const { stdout: handoffOutput } = await run(
-    [
-      'orchestrate',
-      '--source',
-      source,
-      '--workspace',
-      workspace,
-      '--delegation',
-      'inherit',
-      '--handoff-json',
-      '--prompt',
-      event.prompt,
-      ...connectionArgs,
-    ],
-    workspace
-  );
+  let handoffOutput;
+  try {
+    ({ stdout: handoffOutput } = await run(
+      [
+        'orchestrate',
+        '--source',
+        source,
+        '--workspace',
+        workspace,
+        '--delegation',
+        'inherit',
+        '--handoff-json',
+        '--prompt',
+        event.prompt,
+        ...connectionArgs,
+      ],
+      workspace
+    ));
+  } catch (error) {
+    handoffOutput = commandFailureStdout(error);
+  }
   const handoff = JSON.parse(handoffOutput);
+
+  if (
+    typeof handoff === 'object' &&
+    handoff !== null &&
+    !Array.isArray(handoff) &&
+    typeof handoff.status === 'string' &&
+    handoff.status !== 'succeeded'
+  ) {
+    const orchestrationId = typeof handoff.id === 'string' && handoff.id !== ''
+      ? ` ${truncate(handoff.id, 256)}`
+      : '';
+    const detail = typeof handoff.error?.message === 'string' && handoff.error.message !== ''
+      ? `: ${truncate(handoff.error.message, 1_000)}`
+      : '';
+    throw new Error(
+      `AgentKnot orchestration${orchestrationId} ended with status ${truncate(handoff.status, 64)}${detail}`
+    );
+  }
 
   if (handoff.plan?.willDispatch !== true) {
     context(
@@ -468,7 +500,7 @@ try {
   );
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  context(
-    `AgentKnot automatic entry failed to return a usable handoff: ${truncate(message, 1_000)}. Continue upstream without silently substituting another worker, provider, or model.`
+  block(
+    `AgentKnot automatic entry failed to return a usable handoff: ${truncate(message, 1_000)}. This submitted prompt was blocked before the controller-model request; resolve the reported prerequisite and retry. Do not silently substitute another worker, provider, or model.`
   );
 }
