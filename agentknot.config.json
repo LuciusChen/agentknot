@@ -35,6 +35,9 @@
     "opencode": {
       "adapter": "opencode-json",
       "command": "/home/lucius/.local/lib/agentknot/workers/opencode/1.18.15/opencode",
+      "environment": {
+        "OPENCODE_CONFIG_CONTENT": "{\"experimental\":{\"continue_loop_on_deny\":true}}"
+      },
       "unsetEnvironment": [
         "OPENCODE_API_KEY"
       ]
@@ -46,6 +49,9 @@
         "--agent",
         "plan"
       ],
+      "environment": {
+        "OPENCODE_CONFIG_CONTENT": "{\"experimental\":{\"continue_loop_on_deny\":true}}"
+      },
       "unsetEnvironment": [
         "OPENCODE_API_KEY"
       ]

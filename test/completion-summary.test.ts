@@ -217,6 +217,7 @@ test('worktree summaries capture empty and nonempty terminal-attempt paths with 
         attempt: artifact.attempt,
         sha256: artifact.sha256,
         baseCommit: artifact.baseCommit,
+        baseTree: artifact.baseTree,
       },
     });
   }
@@ -256,6 +257,7 @@ test('failed and cancelled jobs summarize the terminal attempt and do not retain
         attempt: failed.artifacts?.[0]?.attempt,
         sha256: failed.artifacts?.[0]?.sha256,
         baseCommit: failed.artifacts?.[0]?.baseCommit,
+        baseTree: failed.artifacts?.[0]?.baseTree,
       },
     }
   );
@@ -326,6 +328,7 @@ test('retries summarize only the terminal attempt while retaining earlier artifa
       attempt: 2,
       sha256: job.artifacts?.[1]?.sha256,
       baseCommit: job.artifacts?.[1]?.baseCommit,
+      baseTree: job.artifacts?.[1]?.baseTree,
     },
   });
   assert.deepEqual(job.completionSummary?.workerReported, {

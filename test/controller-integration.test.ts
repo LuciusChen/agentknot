@@ -271,7 +271,10 @@ test('repository dogfood roles use replaceable worker pools and read-only review
   const config = JSON.parse(
     await readFile(path.join(repositoryRoot, 'agentknot.config.json'), 'utf8')
   ) as {
-    workers: Record<string, { commandArgs?: string[]; unsetEnvironment?: string[] }>;
+    workers: Record<
+      string,
+      { commandArgs?: string[]; environment?: Record<string, string>; unsetEnvironment?: string[] }
+    >;
     routes: Record<string, { worker?: string }>;
     routePools: Record<string, { routes: string[] }>;
     delegation: {
@@ -297,6 +300,11 @@ test('repository dogfood roles use replaceable worker pools and read-only review
     'read,grep,find,ls',
   ]);
   assert.deepEqual(config.workers['opencode-readonly']?.commandArgs, ['--agent', 'plan']);
+  const continueAfterDeniedTool = {
+    OPENCODE_CONFIG_CONTENT: '{"experimental":{"continue_loop_on_deny":true}}',
+  };
+  assert.deepEqual(config.workers.opencode?.environment, continueAfterDeniedTool);
+  assert.deepEqual(config.workers['opencode-readonly']?.environment, continueAfterDeniedTool);
   assert.deepEqual(config.workers['opencode-readonly']?.unsetEnvironment, ['OPENCODE_API_KEY']);
 });
 

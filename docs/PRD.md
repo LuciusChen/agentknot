@@ -80,7 +80,7 @@ A terminal job must carry a result or an explicit error, its resolved route and 
 
 ### Safe handoff by default
 
-In Git worktree mode, attempts run away from the caller's working tree and return patch artifacts. AgentKnot never applies, commits, merges, or pushes those patches automatically.
+In Git worktree mode, attempts run away from the caller's working tree and return patch artifacts. Supported dirty source state within the fixed 16 MiB patch-representation budget is captured at admission without mutating the real worktree, index bytes, or object database; every retry sees that same snapshot and the artifact contains only the worker delta. Artifact and terminal-summary identity includes the exact admitted tree when available. AgentKnot never applies, commits, merges, or pushes those patches automatically.
 
 An optional advisory reviewer may inspect bounded verified patch evidence in a separate depth-one Job. Its strict verdict is evidence, not acceptance authority: it cannot mutate the artifact, start a repair loop, promote the patch, or replace controller validation.
 
@@ -104,6 +104,8 @@ Version 0.0.1 currently implements:
 - immutable resolved route snapshots with worker, provider, and model dimensions;
 - optional process-local least-active pools over complete exact routes for leaf, planner, child, and advisory-review targets, with immutable per-Job selection evidence, explicit member traffic included in load, rotating equal-load ties, and no retry-time route switching or fallback;
 - deterministic Mock, Pi RPC, and OpenCode JSON worker adapters;
+- OpenCode worker profiles may keep the upstream loop alive after a denied tool request so the denial reaches the next model turn; the operation remains denied and the normal completion-envelope requirement remains unchanged;
+- built-in structured planner and advisory-review prompts reserve the transport-owned completion suffix as the only permitted content outside their role JSON, avoiding contradictory output requirements without weakening either parser;
 - a reusable route-neutral adapter unit contract for healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and already-aborted runs; Pi and OpenCode are the two real protocol implementations while Mock remains deterministic-only evidence;
 - OpenCode Go/Luna and OpenCode Go/DeepSeek V4 Flash routes through Pi configuration;
 - file-backed or in-memory job snapshots and ordered events;
@@ -116,8 +118,8 @@ Version 0.0.1 currently implements:
 - optional route-neutral advisory quality review for one successful child and one bounded valid patch, selected by configured parent complexities and a configured single-attempt route or all-single-attempt pool, with strict verdict/findings, read-only repository inspection when configured, explicit skipped/unavailable states, no repair or promotion, and controller disposition left unpersisted;
 - optional controller-owned artifact validation for one successful child and one bounded valid patch, using one configured shell-free argument vector in a fresh disposable worktree, with bounded command/cleanup evidence and no change to child/parent success or artifact promotion;
 - one-shot completion callbacks to trusted URLs, with callback-bookkeeping persistence isolated from the terminal execution result and no automatic redelivery;
-- direct-workspace compatibility mode and Git worktree attempt isolation;
-- per-attempt Git patch artifacts with base commit, size, and SHA-256;
+- direct-workspace compatibility mode and Git worktree attempt isolation, including supported staged, unstaged, and non-ignored untracked source snapshots;
+- per-attempt Git patch artifacts with base commit, exact source-tree identity, size, and SHA-256;
 - read-only artifact listing, integrity/base verification, and bounded patch preview through TypeScript, CLI, and HTTP;
 - a shared Job-list summary page capped at 1 MiB across CLI, HTTP, and the HTTP client, with exact Job lookup retaining the full record;
 - additive delegated-parent artifact review that compares controller-captured terminal paths, reports exact path overlap as potential integration-conflict evidence, and marks missing child evidence incomplete;
@@ -179,7 +181,7 @@ Remote workers, dependency graphs, scheduling, and dashboards may be evaluated l
 9. AgentKnot captures the terminal attempt artifact, builds the completion summary, and persists it before the terminal event is delivered.
 10. For delegated work, AgentKnot compares each child's controller-captured terminal paths. Exact paths owned by multiple children are persisted as potential integration conflicts; missing evidence makes the review incomplete. This does not replace artifact integrity/base verification or prove semantic compatibility.
 11. When optional quality-review policy selects the parent complexity and exactly one successful child has exactly one bounded valid non-empty patch, AgentKnot starts the configured reviewer route once in a fresh depth-one Job. The reviewer receives the goal, acceptance criteria, verified artifact identity and patch, plus labeled-unverified worker claims, and returns bounded advisory evidence. Ineligible, failed, malformed, cancelled, or restart-interrupted review remains explicit and never silently becomes acceptance.
-12. When optional artifact-validation policy is configured for the same one-child/one-patch shape, AgentKnot independently rechecks the recorded artifact and clean base, applies it only in a second disposable worktree, and executes exactly one configured argument vector there. Validation and optional review run concurrently; pass, failure, timeout, output limit, cancellation, startup failure, and cleanup are explicit evidence and never rewrite child or parent success.
+12. When optional artifact-validation policy is configured for the same one-child/one-patch shape, AgentKnot independently rechecks the recorded artifact and exact admitted source snapshot, recreates that snapshot in a second disposable worktree, applies only the worker delta, and executes exactly one configured argument vector there. Validation and optional review run concurrently; pass, failure, timeout, output limit, cancellation, startup failure, source drift, and cleanup are explicit evidence and never rewrite child or parent success.
 13. The controller verifies and previews the selected child artifacts, considers overlap, optional reviewer evidence, and optional controller-owned validation, and deliberately accepts, modifies, or rejects the artifact or child set upstream. That decision does not mutate Job/Orchestration state and is not currently persisted by AgentKnot.
 14. Only after acceptance may the controller perform a separate explicit promotion in its own repository workflow. AgentKnot does not automatically apply, commit, merge, or push artifacts.
 
@@ -212,7 +214,7 @@ The product remains on course when all of the following are true:
 - advisory quality review is disabled by omission, uses an explicitly configured single-attempt route or all-single-attempt pool, persists the selected exact Job route, and records completed, skipped, unavailable, or restart-interrupted evidence without changing child success or promoting artifacts;
 - artifact validation is disabled by omission, admits only one successful child with one integrity/base-valid non-empty patch no larger than 32 KiB, executes one bounded shell-free configured command in a disposable worktree, persists command and cleanup evidence before the terminal parent event, and never mutates the source or promotes the artifact;
 - new leaf Job and Orchestration records carry `schemaVersion: 1`, legacy file reads remain byte-stable, and unsupported explicit versions fail rather than defaulting to v1;
-- Git worktree mode leaves the source workspace clean and returns artifacts without applying them;
+- Git worktree mode leaves the source worktree/index/object database unchanged, supports dirty top-level source snapshots, and returns only worker-delta artifacts without applying them;
 - controllers can verify and preview recorded artifacts without source mutation, while acceptance and promotion remain explicit upstream decisions;
 - delegated parent results compare terminal controller-captured paths deterministically, report repeated paths without calling them semantic conflicts, and mark missing evidence incomplete rather than clean;
 - retries start from the same recorded base rather than prior-attempt edits;

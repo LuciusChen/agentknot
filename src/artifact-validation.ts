@@ -18,7 +18,7 @@ export type ArtifactValidationExecution =
       status: 'unavailable';
       reason:
         | 'artifact-invalid'
-        | 'source-dirty'
+        | 'source-drift'
         | 'patch-apply-failed'
         | 'validation-start-failed'
         | 'cleanup-failed'

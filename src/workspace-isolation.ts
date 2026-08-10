@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, readFile, rename, rmdir, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rename, rmdir, rm, stat, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -22,6 +23,7 @@ import type {
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 128 * 1024 * 1024;
+const READ_ONLY_GIT_ENV = { GIT_OPTIONAL_LOCKS: '0' } satisfies NodeJS.ProcessEnv;
 export const MAX_ARTIFACT_PREVIEW_BYTES = 1024 * 1024;
 export const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
 const MANAGED_WORKTREE_NAME = /^job_[A-Za-z0-9_-]+-attempt-[1-9][0-9]*-[0-9a-f-]+$/;
@@ -37,11 +39,24 @@ export class ArtifactSizeLimitError extends Error {
   }
 }
 
+export class WorkspaceSnapshotSizeLimitError extends Error {
+  readonly name = 'WorkspaceSnapshotSizeLimitError';
+
+  constructor(
+    readonly actualBytes: number,
+    readonly maxBytes = MAX_ARTIFACT_BYTES
+  ) {
+    super(`Git workspace snapshot is ${actualBytes} bytes; maximum is ${maxBytes} bytes`);
+  }
+}
+
 export interface WorkspaceInspection {
   sourceWorkspace: string;
   repository: string;
   relativeSubdirectory: string;
   baseCommit: string;
+  baseTree: string;
+  snapshotPatch: Buffer;
 }
 
 export interface IsolatedWorkspace {
@@ -49,6 +64,20 @@ export interface IsolatedWorkspace {
   repository: string;
   managedPath: string;
   baseCommit: string;
+  baseTree: string;
+  snapshotPatch: Buffer;
+}
+
+interface SourceSnapshot {
+  baseCommit: string;
+  baseTree: string;
+  snapshotPatch: Buffer;
+}
+
+interface SourceEvidence {
+  repositoryAvailable: boolean;
+  actualHead: string | null;
+  actualTree: string | null;
 }
 
 interface GitOutput {
@@ -78,12 +107,18 @@ function nulDelimitedPaths(value: Buffer | string): string[] {
   return paths;
 }
 
-async function git(args: string[], cwd: string, binary = false): Promise<GitOutput> {
+async function git(
+  args: string[],
+  cwd: string,
+  binary = false,
+  env?: NodeJS.ProcessEnv
+): Promise<GitOutput> {
   try {
     return (await execFileAsync('git', args, {
       cwd,
       encoding: binary ? 'buffer' : 'utf8',
       maxBuffer: MAX_GIT_OUTPUT,
+      ...(env === undefined ? {} : { env: { ...process.env, ...env } }),
     })) as unknown as GitOutput;
   } catch (error) {
     const details = error as { stderr?: Buffer | string; message?: string };
@@ -92,12 +127,22 @@ async function git(args: string[], cwd: string, binary = false): Promise<GitOutp
   }
 }
 
-async function gitWithInput(args: string[], cwd: string, input: Buffer): Promise<GitOutput> {
+async function gitWithInput(
+  args: string[],
+  cwd: string,
+  input: Buffer,
+  env?: NodeJS.ProcessEnv
+): Promise<GitOutput> {
   return new Promise<GitOutput>((resolve, reject) => {
     const child = execFile(
       'git',
       args,
-      { cwd, encoding: 'buffer', maxBuffer: MAX_GIT_OUTPUT },
+      {
+        cwd,
+        encoding: 'buffer',
+        maxBuffer: MAX_GIT_OUTPUT,
+        ...(env === undefined ? {} : { env: { ...process.env, ...env } }),
+      },
       (error, stdout, stderr) => {
         if (error) {
           const details = outputText(stderr).trim();
@@ -152,18 +197,18 @@ export class WorkspaceIsolationManager {
     }
     const repository = await this.#repository(workspace);
     const prefix = outputText((await git(['rev-parse', '--show-prefix'], workspace)).stdout).trim();
-    const baseCommit = await this.#currentHead(repository);
-    const status = outputText(
-      (await git(['status', '--porcelain=v1', '--untracked-files=all'], repository)).stdout
-    );
-    if (status !== '') {
-      throw new Error(`Workspace repository is not clean: ${repository}`);
-    }
-    if (baseCommit === '') throw new Error(`Workspace repository has no HEAD: ${repository}`);
+    const snapshot = await this.#snapshot(repository);
 
     const relativeSubdirectory = prefix === '' ? '' : prefix.replace(/\/$/, '').split('/').join(path.sep);
     const sourceWorkspace = path.resolve(workspace);
-    return { sourceWorkspace, repository, relativeSubdirectory, baseCommit };
+    return {
+      sourceWorkspace,
+      repository,
+      relativeSubdirectory,
+      baseCommit: snapshot.baseCommit,
+      baseTree: snapshot.baseTree,
+      snapshotPatch: snapshot.snapshotPatch,
+    };
   }
 
   async verifyArtifacts(
@@ -171,7 +216,7 @@ export class WorkspaceIsolationManager {
     workspace: string,
     artifacts: JobArtifact[]
   ): Promise<JobArtifactVerification[]> {
-    const source = await this.#sourceHead(workspace);
+    const source = await this.#sourceEvidence(workspace);
     return Promise.all(
       artifacts.map(async (artifact) => (await this.#inspectArtifact(jobId, artifact, source)).verification)
     );
@@ -187,7 +232,7 @@ export class WorkspaceIsolationManager {
     maxBytes: number;
     verification: JobArtifactVerification;
   }> {
-    const source = await this.#sourceHead(workspace);
+    const source = await this.#sourceEvidence(workspace);
     const inspected = await this.#inspectArtifact(jobId, artifact, source);
     const trustedBytes =
       inspected.bytes !== null &&
@@ -226,10 +271,7 @@ export class WorkspaceIsolationManager {
     } catch (error) {
       return {
         status: 'unavailable',
-        reason:
-          error instanceof Error && error.message.startsWith('Workspace repository is not clean:')
-            ? 'source-dirty'
-            : 'validation-start-failed',
+        reason: 'validation-start-failed',
         cleanup: 'not-started',
         error,
       };
@@ -238,13 +280,26 @@ export class WorkspaceIsolationManager {
     const inspected = await this.#inspectArtifact(jobId, artifact, {
       repositoryAvailable: true,
       actualHead: inspection.baseCommit,
+      actualTree: inspection.baseTree,
     });
     if (!inspected.verification.valid || inspected.bytes === null) {
       return {
         status: 'unavailable',
-        reason: 'artifact-invalid',
+        reason: inspected.verification.issues.some(
+          (issue) => issue === 'base-commit-mismatch' || issue === 'base-tree-mismatch'
+        )
+          ? 'source-drift'
+          : 'artifact-invalid',
         cleanup: 'not-started',
       };
+    }
+    if (artifact.baseTree === undefined) {
+      const committedTree = outputText(
+        (await git(['rev-parse', `${artifact.baseCommit}^{tree}`], inspection.repository)).stdout
+      ).trim();
+      if (inspection.baseTree !== committedTree) {
+        return { status: 'unavailable', reason: 'source-drift', cleanup: 'not-started' };
+      }
     }
     if (signal.aborted) {
       return {
@@ -318,7 +373,7 @@ export class WorkspaceIsolationManager {
   async #inspectArtifact(
     jobId: string,
     artifact: JobArtifact,
-    source: { repositoryAvailable: boolean; actualHead: string | null }
+    source: SourceEvidence
   ): Promise<InspectedArtifact> {
     const issues: JobArtifactVerificationIssue[] = [];
     const expectedPath = path.resolve(
@@ -361,6 +416,13 @@ export class WorkspaceIsolationManager {
     if (!source.repositoryAvailable) issues.push('source-repository-unavailable');
     const headMatchesBase = source.actualHead !== null && source.actualHead === artifact.baseCommit;
     if (source.repositoryAvailable && !headMatchesBase) issues.push('base-commit-mismatch');
+    const treeMatchesBase =
+      artifact.baseTree === undefined
+        ? undefined
+        : source.actualTree !== null && source.actualTree === artifact.baseTree;
+    if (source.repositoryAvailable && headMatchesBase && treeMatchesBase === false) {
+      issues.push('base-tree-mismatch');
+    }
 
     const verification: JobArtifactVerification = {
       artifact: structuredClone(artifact),
@@ -378,6 +440,9 @@ export class WorkspaceIsolationManager {
         expectedBaseCommit: artifact.baseCommit,
         actualHead: source.actualHead,
         headMatchesBase,
+        ...(artifact.baseTree === undefined ? {} : { expectedBaseTree: artifact.baseTree }),
+        actualTree: source.actualTree,
+        ...(treeMatchesBase === undefined ? {} : { treeMatchesBase }),
       },
       issues,
       valid: issues.length === 0,
@@ -385,15 +450,22 @@ export class WorkspaceIsolationManager {
     return { verification, bytes };
   }
 
-  async #sourceHead(
-    workspace: string
-  ): Promise<{ repositoryAvailable: boolean; actualHead: string | null }> {
+  async #sourceEvidence(workspace: string): Promise<SourceEvidence> {
     try {
       const repository = await this.#repository(workspace);
       const actualHead = await this.#currentHead(repository);
-      return { repositoryAvailable: actualHead !== '', actualHead: actualHead || null };
+      const actualTree = await this.#withTemporaryGitState(repository, async (environment) => {
+        await git(['read-tree', actualHead], repository, false, environment);
+        await git(['add', '-A', '--', '.'], repository, false, environment);
+        return outputText((await git(['write-tree'], repository, false, environment)).stdout).trim();
+      });
+      return {
+        repositoryAvailable: true,
+        actualHead,
+        actualTree,
+      };
     } catch {
-      return { repositoryAvailable: false, actualHead: null };
+      return { repositoryAvailable: false, actualHead: null, actualTree: null };
     }
   }
 
@@ -403,6 +475,75 @@ export class WorkspaceIsolationManager {
 
   async #currentHead(repository: string): Promise<string> {
     return outputText((await git(['rev-parse', '--verify', 'HEAD^{commit}'], repository)).stdout).trim();
+  }
+
+  async #withTemporaryGitState<T>(
+    repository: string,
+    operation: (environment: NodeJS.ProcessEnv) => Promise<T>
+  ): Promise<T> {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-index-'));
+    try {
+      const objects = path.join(directory, 'objects');
+      await mkdir(objects);
+      const sourceObjectsOutput = outputText(
+        (await git(['rev-parse', '--git-path', 'objects'], repository)).stdout
+      ).trim();
+      const sourceObjects = path.isAbsolute(sourceObjectsOutput)
+        ? sourceObjectsOutput
+        : path.resolve(repository, sourceObjectsOutput);
+      return await operation({
+        GIT_INDEX_FILE: path.join(directory, 'index'),
+        GIT_OBJECT_DIRECTORY: objects,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: sourceObjects,
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  async #snapshot(repository: string): Promise<SourceSnapshot> {
+    const baseCommit = await this.#currentHead(repository);
+    if (baseCommit === '') throw new Error(`Workspace repository has no HEAD: ${repository}`);
+    const submoduleStatus = outputText(
+      (
+        await git(
+          ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--ignore-submodules=none'],
+          repository,
+          true,
+          READ_ONLY_GIT_ENV
+        )
+      ).stdout
+    );
+    for (const record of submoduleStatus.split('\0')) {
+      const submodule = /^(?:1|2) [^ ]+ (S...) /.exec(record)?.[1];
+      if (submodule !== undefined && (submodule[2] !== '.' || submodule[3] !== '.')) {
+        throw new Error(`Workspace contains dirty submodule content that cannot be snapshotted: ${repository}`);
+      }
+    }
+    return this.#withTemporaryGitState(repository, async (environment) => {
+      await git(['read-tree', baseCommit], repository, false, environment);
+      await git(['add', '-A', '--', '.'], repository, false, environment);
+      const baseTree = outputText(
+        (await git(['write-tree'], repository, false, environment)).stdout
+      ).trim();
+      const patch = (
+        await git(
+          ['diff', '--cached', '--binary', '--full-index', '--no-ext-diff', baseCommit, '--'],
+          repository,
+          true,
+          environment
+        )
+      ).stdout;
+      const snapshotPatch = Buffer.isBuffer(patch) ? patch : Buffer.from(patch);
+      if (snapshotPatch.byteLength > MAX_ARTIFACT_BYTES) {
+        throw new WorkspaceSnapshotSizeLimitError(snapshotPatch.byteLength);
+      }
+      return {
+        baseCommit,
+        baseTree,
+        snapshotPatch,
+      };
+    });
   }
 
   async create(
@@ -418,6 +559,9 @@ export class WorkspaceIsolationManager {
     const managedPath = path.join(root, `${jobId}-attempt-${attempt}-${randomUUID()}`);
     try {
       await git(['worktree', 'add', '--detach', managedPath, inspection.baseCommit], inspection.repository);
+      if (inspection.snapshotPatch.byteLength > 0) {
+        await gitWithInput(['apply', '--binary', '-'], managedPath, inspection.snapshotPatch);
+      }
     } catch (error) {
       // A failed add can leave a partially-created directory or worktree record.
       // Remove only the exact values generated above, never unrelated worktrees.
@@ -426,13 +570,22 @@ export class WorkspaceIsolationManager {
         repository: inspection.repository,
         managedPath,
         baseCommit: inspection.baseCommit,
+        baseTree: inspection.baseTree,
+        snapshotPatch: inspection.snapshotPatch,
       }).catch(() => undefined);
       throw error;
     }
     const isolatedPath = path.resolve(managedPath, inspection.relativeSubdirectory);
     const isolatedStat = await stat(isolatedPath).catch(() => undefined);
     if (!isolatedStat?.isDirectory()) {
-      await this.cleanup({ path: isolatedPath, repository: inspection.repository, managedPath, baseCommit: inspection.baseCommit });
+      await this.cleanup({
+        path: isolatedPath,
+        repository: inspection.repository,
+        managedPath,
+        baseCommit: inspection.baseCommit,
+        baseTree: inspection.baseTree,
+        snapshotPatch: inspection.snapshotPatch,
+      });
       throw new Error(`Git worktree does not contain requested subdirectory: ${inspection.relativeSubdirectory || '.'}`);
     }
     return {
@@ -440,6 +593,8 @@ export class WorkspaceIsolationManager {
       repository: inspection.repository,
       managedPath,
       baseCommit: inspection.baseCommit,
+      baseTree: inspection.baseTree,
+      snapshotPatch: inspection.snapshotPatch,
     };
   }
 
@@ -448,28 +603,44 @@ export class WorkspaceIsolationManager {
     jobId: string,
     attempt: number
   ): Promise<JobArtifact> {
-    // Intent-to-add makes otherwise untracked, non-ignored files visible to git diff.
-    // This changes only the managed worktree's index and is discarded with the worktree.
-    await git(['add', '--intent-to-add', '--', '.'], isolated.managedPath);
-    // Compare with the job's source snapshot, not the worker's current HEAD. A worker
-    // may commit or otherwise move HEAD, but the artifact must include all job changes.
-    // Run Git from the worktree root so these are repository-relative paths. `-z` keeps
-    // newlines and other unusual filename characters out of any line-oriented representation.
-    const changedFiles = nulDelimitedPaths(
-      (
-        await git(
-          ['diff', '--name-only', '-z', '--no-ext-diff', isolated.baseCommit, '--'],
-          isolated.managedPath,
-          true
-        )
-      ).stdout
-    );
-    const patch = (await git(
-      ['diff', '--binary', '--no-ext-diff', isolated.baseCommit, '--'],
+    const captured = await this.#withTemporaryGitState(
       isolated.managedPath,
-      true
-    )).stdout;
-    const bytes = Buffer.isBuffer(patch) ? patch : Buffer.from(patch);
+      async (environment) => {
+        await git(['read-tree', isolated.baseCommit], isolated.managedPath, false, environment);
+        if (isolated.snapshotPatch.byteLength > 0) {
+          await gitWithInput(
+            ['apply', '--cached', '--binary', '-'],
+            isolated.managedPath,
+            isolated.snapshotPatch,
+            environment
+          );
+        }
+        await git(['add', '--intent-to-add', '--', '.'], isolated.managedPath, false, environment);
+        const changedFiles = nulDelimitedPaths(
+          (
+            await git(
+              ['diff', '--name-only', '-z', '--no-ext-diff', '--'],
+              isolated.managedPath,
+              true,
+              environment
+            )
+          ).stdout
+        );
+        const patch = (
+          await git(
+            ['diff', '--binary', '--no-ext-diff', '--'],
+            isolated.managedPath,
+            true,
+            environment
+          )
+        ).stdout;
+        return {
+          changedFiles,
+          bytes: Buffer.isBuffer(patch) ? patch : Buffer.from(patch),
+        };
+      }
+    );
+    const { bytes, changedFiles } = captured;
     if (bytes.byteLength > MAX_ARTIFACT_BYTES) {
       throw new ArtifactSizeLimitError(bytes.byteLength);
     }
@@ -496,6 +667,7 @@ export class WorkspaceIsolationManager {
       size: bytes.byteLength,
       sha256: createHash('sha256').update(bytes).digest('hex'),
       baseCommit: isolated.baseCommit,
+      baseTree: isolated.baseTree,
       changedFiles,
     };
   }

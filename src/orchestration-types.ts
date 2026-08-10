@@ -265,6 +265,7 @@ export interface ArtifactValidationIdentity {
   size: number;
   sha256: string;
   baseCommit: string;
+  baseTree?: string;
 }
 
 export const ARTIFACT_VALIDATION_COMMAND_OUTCOMES = [
@@ -304,7 +305,7 @@ export type ArtifactValidationSkippedReason =
 
 export const ARTIFACT_VALIDATION_UNAVAILABLE_REASONS = [
   'artifact-invalid',
-  'source-dirty',
+  'source-drift',
   'patch-apply-failed',
   'validation-start-failed',
   'cleanup-failed',

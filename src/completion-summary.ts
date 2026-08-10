@@ -128,6 +128,7 @@ export function capturedChangedFilesSummary(
       attempt: artifact.attempt,
       sha256: artifact.sha256,
       baseCommit: artifact.baseCommit,
+      ...(artifact.baseTree === undefined ? {} : { baseTree: artifact.baseTree }),
     },
   };
 }

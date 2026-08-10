@@ -291,6 +291,7 @@ async function orchestrationHandoff(
           size: attempt.artifact.size,
           sha256: attempt.artifact.sha256,
           baseCommit: attempt.artifact.baseCommit,
+          baseTree: attempt.artifact.baseTree,
           changedFiles: attempt.artifact.changedFiles,
           valid: attempt.valid,
           issues: attempt.issues,
@@ -305,6 +306,8 @@ async function orchestrationHandoff(
             repositoryAvailable: attempt.source.repositoryAvailable,
             actualHead: attempt.source.actualHead,
             headMatchesBase: attempt.source.headMatchesBase,
+            actualTree: attempt.source.actualTree,
+            treeMatchesBase: attempt.source.treeMatchesBase,
           },
         })),
       };

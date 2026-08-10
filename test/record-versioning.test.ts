@@ -195,13 +195,14 @@ test('FileJobStore materializes a legacy v1 record without rewriting read-only a
   const materialized = await store.get(id);
   assert.equal(materialized?.schemaVersion, 1);
   assert.equal(materialized?.completionSummary, undefined);
+  assert.equal(materialized?.artifacts?.[0]?.baseTree, undefined);
   assert.equal(materialized?.artifacts?.[0]?.changedFiles, undefined);
   assert.deepEqual(await readFile(path.join(directory, `${id}.json`)), before);
   assert.equal((await store.list())[0]?.schemaVersion, 1);
   assert.deepEqual(await readFile(path.join(directory, `${id}.json`)), before);
 });
 
-test('FileJobStore preserves changedFiles when a persisted artifact includes it', async () => {
+test('FileJobStore preserves additive source-tree and changed-file artifact evidence', async () => {
   const directory = await createTemporaryDirectory('agentknot-record-versioning-changed-files-');
   const id = 'job_changed_files';
   const before = await writeSnapshot(directory, id, {
@@ -214,13 +215,16 @@ test('FileJobStore preserves changedFiles when a persisted artifact includes it'
         size: 0,
         sha256: 'changed-files-sha256',
         baseCommit: 'changed-files-base',
+        baseTree: 'changed-files-tree',
         changedFiles: ['nested/changed.ts'],
       },
     ],
   });
   const store = new FileJobStore(directory);
 
-  assert.deepEqual((await store.get(id))?.artifacts?.[0]?.changedFiles, ['nested/changed.ts']);
+  const artifact = (await store.get(id))?.artifacts?.[0];
+  assert.equal(artifact?.baseTree, 'changed-files-tree');
+  assert.deepEqual(artifact?.changedFiles, ['nested/changed.ts']);
   assert.deepEqual(await readFile(path.join(directory, `${id}.json`)), before);
 });
 

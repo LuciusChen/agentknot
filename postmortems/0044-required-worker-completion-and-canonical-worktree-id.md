@@ -26,6 +26,18 @@ A successful built-in real-worker Job must have explicit terminal worker evidenc
 - A direct Luna review later returned a complete report and found the JDBC savepoint issue that the false-success Job had not reported.
 - Historical Job records remain unchanged as audit evidence. The corrected runtime affects new attempts only.
 
+## Follow-up: OpenCode permission denial before final response
+
+A later native OpenCode review, Job `job_5988e9d9-3eec-4214-a052-ad602a312597`, correctly failed with `OpenCode output is missing required completion report`. Its OpenCode session contained 29 terminal tool records and six assistant messages, all ending with `finish: "tool-calls"`; no final assistant text existed for AgentKnot to lose or strip. The last parallel tool batch included a `grep` path whose Job ID had one extra `d`. OpenCode classified that fabricated path outside the managed worktree, auto-rejected the permission request in non-interactive mode, and recorded `The user rejected permission to use this specific tool call.`
+
+OpenCode `v1.18.15` normally [continues after `tool-calls`](https://github.com/anomalyco/opencode/blob/v1.18.15/packages/opencode/src/session/prompt.ts#L1295-L1335), and its default build agent has no configured six-step limit. The [processor stops after a denied permission](https://github.com/anomalyco/opencode/blob/v1.18.15/packages/opencode/src/session/processor.ts#L627-L681) unless `experimental.continue_loop_on_deny` is enabled; the non-interactive CLI [auto-rejects permission requests](https://github.com/anomalyco/opencode/blob/v1.18.15/packages/opencode/src/cli/cmd/run.ts#L796-L817) unless its broad auto-approval mode is used. The repository's native OpenCode worker profiles now supply the narrow loop option through `OPENCODE_CONFIG_CONTENT`: the invalid operation remains denied, but the model receives the failure on another turn and can correct the path and emit its envelope. AgentKnot's strict missing-envelope failure remains unchanged as the final correctness boundary.
+
+Real regression Job `job_0d50f25d-ad3a-4f78-b798-2a0c44a256e5` deliberately requested `/definitely/outside-agentknot/README.md`. OpenCode auto-rejected the external read, persisted the tool error, continued to a workspace-local read, emitted a valid completion envelope, and succeeded on its first Luna/max attempt with an empty verified artifact. The source remained unchanged, and no permission was granted to the outside path.
+
+A separate forced review orchestration exposed a second cause at the prompt boundary. Planner Job `job_19c710ae-b472-45ae-b084-5fa8d9d73753` returned a schema-valid planner assessment on both Pi/Luna/max attempts, but the planner prompt demanded exactly one JSON object with no surrounding text while the adapter's later normal-run instruction demanded the marked completion suffix. Both attempts omitted the suffix and correctly failed. Planner and advisory-review prompts now name that transport-owned suffix as the sole allowed content outside their role JSON; each role parser still receives only its strict JSON because the adapter validates and strips the suffix first.
+
+Regression orchestration `orchestration_442c02cc-7eb1-43bd-8dd0-83258ca5c7e8` then completed the same boundary end to end: Pi/Luna/max planner Job `job_3625cccc-adc4-4f1f-8111-68a61e51e2c7` succeeded with its envelope, native OpenCode/Luna/max child Job `job_b178b848-a40e-4e99-89a2-ee849b0bf9dc` survived two external-path denials, returned a substantive review plus valid envelope, and produced a verified empty worker-delta artifact from the dirty source snapshot.
+
 ## Root cause
 
 The shared parser correctly distinguished valid, missing, and malformed envelopes, but both built-in adapters returned a normal `WorkerRunResult` for all three outcomes. The orchestrator therefore treated protocol/process settlement as successful execution and recorded the absent report only as advisory summary evidence.
@@ -75,4 +87,3 @@ This correction does not claim semantic correctness, independent review quality,
 ## Privacy and security review
 
 The record includes Job IDs and generalized repository labels needed to reproduce the incident. It excludes prompts, source contents, credentials, auth paths, provider responses, and artifact bytes.
-

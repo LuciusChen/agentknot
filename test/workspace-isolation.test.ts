@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,7 +9,11 @@ import { promisify } from 'node:util';
 import type { AgentKnotConfig } from '../src/config.js';
 import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { MemoryJobStore } from '../src/store.js';
-import { MAX_ARTIFACT_BYTES, WorkspaceIsolationManager } from '../src/workspace-isolation.js';
+import {
+  MAX_ARTIFACT_BYTES,
+  WorkspaceIsolationManager,
+  WorkspaceSnapshotSizeLimitError,
+} from '../src/workspace-isolation.js';
 import type {
   JobStore,
   ResolvedRoute,
@@ -245,7 +249,52 @@ test('artifact validation applies the recorded patch only in a disposable worktr
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
 });
 
-test('artifact validation refuses a dirty source before command execution', async () => {
+test('artifact validation recreates an unchanged dirty snapshot before applying the worker delta', async () => {
+  const paths = await repository();
+  await writeFile(path.join(paths.root, 'nested', 'nested.txt'), 'dirty baseline\n');
+  await writeFile(path.join(paths.root, 'source-untracked.txt'), 'source baseline\n');
+  const sourceStatus = await status(paths.root);
+  const adapter = new (class extends TestAdapter {
+    async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+      assert.equal(
+        await readFile(path.join(input.workspace, 'nested', 'nested.txt'), 'utf8'),
+        'dirty baseline\n'
+      );
+      await writeFile(path.join(input.workspace, 'candidate.txt'), 'candidate\n');
+      return { output: 'patch ready' };
+    }
+  })();
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory),
+    store: new MemoryJobStore(),
+    adapters: new Map([['test', adapter]]),
+  });
+  const job = await orchestrator.run({ prompt: 'validate from dirty baseline', workspace: paths.root });
+
+  const result = await orchestrator.validateArtifact(
+    job.id,
+    1,
+    {
+      argv: [
+        process.execPath,
+        '-e',
+        "const fs=require('node:fs'); for(const [p,v] of [['nested/nested.txt','dirty baseline\\n'],['source-untracked.txt','source baseline\\n'],['candidate.txt','candidate\\n']]) if(fs.readFileSync(p,'utf8')!==v) process.exit(9)",
+      ],
+      timeoutMs: 1_000,
+      maxOutputBytes: 1_024,
+    },
+    new AbortController().signal
+  );
+
+  assert.equal(result?.status, 'completed');
+  if (result?.status !== 'completed') assert.fail('validation should complete');
+  assert.equal(result.command.outcome, 'passed');
+  assert.equal(await status(paths.root), sourceStatus);
+  await assert.rejects(readFile(path.join(paths.root, 'candidate.txt')));
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+});
+
+test('artifact validation rejects source drift before command execution', async () => {
   const paths = await repository();
   const orchestrator = new Orchestrator({
     config: config(paths.storage, paths.worktreeDirectory),
@@ -278,7 +327,7 @@ test('artifact validation refuses a dirty source before command execution', asyn
 
   assert.equal(result?.status, 'unavailable');
   if (result?.status !== 'unavailable') assert.fail('validation should be unavailable');
-  assert.equal(result.reason, 'source-dirty');
+  assert.equal(result.reason, 'source-drift');
   assert.equal(result.cleanup, 'not-started');
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
 });
@@ -382,39 +431,177 @@ test('patches include tracked files committed after the job base commit', async 
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
 });
 
-test('git-worktree mode rejects a dirty source before starting a job', async () => {
+test('git-worktree mode snapshots dirty source state without changing the source', async () => {
   const paths = await repository();
-  await writeFile(path.join(paths.root, 'README.md'), 'dirty\n');
-  let runs = 0;
+  await writeFile(path.join(paths.root, '.gitignore'), 'ignored.txt\n');
+  await git(paths.root, 'add', '--', '.gitignore');
+  await git(paths.root, 'commit', '-qm', 'ignore fixture');
+  await writeFile(path.join(paths.root, 'README.md'), 'staged source\n');
+  await git(paths.root, 'add', '--', 'README.md');
+  await writeFile(path.join(paths.root, 'nested', 'nested.txt'), 'unstaged source\n');
+  await writeFile(path.join(paths.root, 'source-untracked.txt'), 'untracked source\n');
+  await writeFile(path.join(paths.root, 'ignored.txt'), 'ignored source\n');
+  const statusBefore = await status(paths.root);
+  const stagedBefore = await git(paths.root, 'diff', '--cached', '--binary');
+  const unstagedBefore = await git(paths.root, 'diff', '--binary');
+  const objectsBefore = await git(paths.root, 'count-objects', '-v');
+
   const adapter = new (class extends TestAdapter {
-    async run(_input: WorkerRunInput): Promise<WorkerRunResult> {
-      runs += 1;
-      return { output: 'unexpected' };
+    async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+      assert.equal(await readFile(path.join(input.workspace, 'README.md'), 'utf8'), 'staged source\n');
+      assert.equal(
+        await readFile(path.join(input.workspace, 'nested', 'nested.txt'), 'utf8'),
+        'unstaged source\n'
+      );
+      assert.equal(
+        await readFile(path.join(input.workspace, 'source-untracked.txt'), 'utf8'),
+        'untracked source\n'
+      );
+      await assert.rejects(readFile(path.join(input.workspace, 'ignored.txt')));
+      await writeFile(path.join(input.workspace, 'nested', 'nested.txt'), 'worker change\n');
+      await writeFile(path.join(input.workspace, 'worker-only.txt'), 'worker only\n');
+      return { output: 'snapshot used' };
     }
   })();
-  const store = new MemoryJobStore();
   const orchestrator = new Orchestrator({
     config: config(paths.storage, paths.worktreeDirectory),
-    store,
+    store: new MemoryJobStore(),
     adapters: new Map([['test', adapter]]),
   });
 
+  const job = await orchestrator.run({ prompt: 'use dirty snapshot', workspace: paths.root });
+  assert.equal(job.status, 'succeeded');
+  const artifact = job.artifacts?.[0];
+  assert.ok(artifact);
+  assert.match(artifact.baseTree ?? '', /^[0-9a-f]{40,64}$/);
+  assert.deepEqual(artifact.changedFiles, ['nested/nested.txt', 'worker-only.txt']);
+  const patch = await readFile(artifact.path, 'utf8');
+  assert.match(patch, /worker-only\.txt/);
+  assert.doesNotMatch(patch, /source-untracked\.txt/);
+  assert.doesNotMatch(patch, /README\.md/);
+  assert.doesNotMatch(patch, /ignored\.txt/);
+  await git(paths.root, 'apply', '--check', artifact.path);
+
+  assert.equal(await status(paths.root), statusBefore);
+  assert.equal(await git(paths.root, 'diff', '--cached', '--binary'), stagedBefore);
+  assert.equal(await git(paths.root, 'diff', '--binary'), unstagedBefore);
+  await assert.rejects(readFile(path.join(paths.root, 'worker-only.txt')));
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+
+  const verified = await orchestrator.verifyArtifacts(job.id);
+  assert.equal(verified?.valid, true);
+  assert.equal(verified?.artifacts[0]?.source.treeMatchesBase, true);
+  assert.equal(await git(paths.root, 'count-objects', '-v'), objectsBefore);
+  await writeFile(path.join(paths.root, 'source-untracked.txt'), 'source drift\n');
+  const drifted = await orchestrator.verifyArtifacts(job.id);
+  assert.equal(drifted?.valid, false);
+  assert.deepEqual(drifted?.artifacts[0]?.issues, ['base-tree-mismatch']);
+});
+
+test('workspace inspection does not refresh the caller index', async () => {
+  const paths = await repository();
+  const indexPath = path.resolve(paths.root, (await git(paths.root, 'rev-parse', '--git-path', 'index')).trim());
+  const before = await readFile(indexPath);
+  const future = new Date(Date.now() + 60_000);
+  await utimes(path.join(paths.root, 'README.md'), future, future);
+
+  const manager = new WorkspaceIsolationManager(
+    config(paths.storage, paths.worktreeDirectory),
+    paths.root
+  );
+  await manager.inspect(paths.root);
+
+  assert.deepEqual(await readFile(indexPath), before);
+  assert.equal(await status(paths.root), '');
+});
+
+test('oversized dirty snapshots fail before Job admission', async () => {
+  const paths = await repository();
+  await writeFile(path.join(paths.root, 'oversized-source.txt'), 'x'.repeat(MAX_ARTIFACT_BYTES));
+  const store = new MemoryJobStore();
+  let runs = 0;
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory),
+    store,
+    adapters: new Map([
+      [
+        'test',
+        new (class extends TestAdapter {
+          async run(): Promise<WorkerRunResult> {
+            runs += 1;
+            return { output: 'unexpected' };
+          }
+        })(),
+      ],
+    ]),
+  });
+
   await assert.rejects(
-    orchestrator.start({ prompt: 'reject', workspace: paths.root }),
-    /Workspace repository is not clean/
+    orchestrator.start({ prompt: 'reject oversized snapshot', workspace: paths.root }),
+    (error) => {
+      assert.ok(error instanceof WorkspaceSnapshotSizeLimitError);
+      assert.match(error.message, /maximum is 16777216 bytes/);
+      return true;
+    }
+  );
+  assert.equal(runs, 0);
+  assert.deepEqual(await store.list(), []);
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+});
+
+test('git-worktree mode rejects dirty submodule content that Git cannot snapshot', async () => {
+  const paths = await repository();
+  const child = await repository();
+  await git(
+    paths.root,
+    '-c',
+    'protocol.file.allow=always',
+    'submodule',
+    'add',
+    '-q',
+    '--',
+    child.root,
+    'vendor/child'
+  );
+  await git(paths.root, 'commit', '-qam', 'add submodule');
+  await writeFile(path.join(paths.root, 'vendor', 'child', 'README.md'), 'dirty submodule\n');
+  const store = new MemoryJobStore();
+  let runs = 0;
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory),
+    store,
+    adapters: new Map([
+      [
+        'test',
+        new (class extends TestAdapter {
+          async run(): Promise<WorkerRunResult> {
+            runs += 1;
+            return { output: 'unexpected' };
+          }
+        })(),
+      ],
+    ]),
+  });
+
+  await assert.rejects(
+    orchestrator.start({ prompt: 'cannot snapshot nested dirt', workspace: paths.root }),
+    /dirty submodule content/
   );
   assert.equal(runs, 0);
   assert.deepEqual(await store.list(), []);
 });
 
-test('each retry starts from the same clean base commit', async () => {
+test('each retry starts from the same admitted source snapshot', async () => {
   const paths = await repository();
+  await writeFile(path.join(paths.root, 'README.md'), 'dirty retry baseline\n');
+  const sourceStatus = await status(paths.root);
   const seen: string[] = [];
   let calls = 0;
   const adapter = new (class extends TestAdapter {
     async run(input: WorkerRunInput): Promise<WorkerRunResult> {
       calls += 1;
       seen.push(input.workspace);
+      assert.equal(await readFile(path.join(input.workspace, 'README.md'), 'utf8'), 'dirty retry baseline\n');
       await writeFile(path.join(input.workspace, `attempt-${calls}.txt`), 'change\n');
       if (calls === 1) throw new Error('retry me');
       assert.equal(await readFile(path.join(input.workspace, 'attempt-1.txt')).catch(() => undefined), undefined);
@@ -438,7 +625,7 @@ test('each retry starts from the same clean base commit', async () => {
   assert.match(firstPatch.toString(), /attempt-1\.txt/);
   assert.doesNotMatch(secondPatch.toString(), /attempt-1\.txt/);
   assert.match(secondPatch.toString(), /attempt-2\.txt/);
-  assert.equal(await status(paths.root), '');
+  assert.equal(await status(paths.root), sourceStatus);
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
 });
 

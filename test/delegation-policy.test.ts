@@ -67,6 +67,7 @@ test('planner instructions reserve parallelism for independent non-overlapping w
   );
   assert.match(prompt, /The "acceptanceCriteria" key must be a separate non-empty JSON string array/);
   assert.match(prompt, /do not put acceptance criteria only in the "prompt" text/);
+  assert.match(prompt, /only permitted text outside the assessment object/);
 });
 
 test('planner instructions delegate bounded repository deliverables regardless of size or parallelism', () => {

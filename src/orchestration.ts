@@ -573,6 +573,7 @@ export class OrchestrationService {
       size: verified.artifact.size,
       sha256: verified.artifact.sha256,
       baseCommit: verified.artifact.baseCommit,
+      ...(verified.artifact.baseTree === undefined ? {} : { baseTree: verified.artifact.baseTree }),
     };
     await this.#setEvidenceAndAppend(
       record,

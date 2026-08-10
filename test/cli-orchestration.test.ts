@@ -288,6 +288,8 @@ test('CLI orchestration commands use deterministic mode-off configuration', asyn
 
 test('CLI compact handoff projects delegated child and verified artifact evidence', async () => {
   const fixture = await createDelegatedFixture();
+  await writeFile(path.join(fixture.workspace, 'README.md'), 'dirty controller baseline\n');
+  const sourceStatus = await git(fixture.workspace, 'status', '--porcelain=v1', '--untracked-files=all');
   const run = await runCli(
     fixture.configPath,
     'orchestrate',
@@ -306,7 +308,14 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
       jobId: string;
       status: string;
       valid: boolean;
-      attempts: Array<{ attempt: number; size: number; valid: boolean; issues: string[] }>;
+      attempts: Array<{
+        attempt: number;
+        size: number;
+        valid: boolean;
+        issues: string[];
+        baseTree?: string;
+        source: { actualTree: string | null; treeMatchesBase?: boolean };
+      }>;
     }>;
     result: { action: string; artifactReview: { status: string } };
     qualityReview: { status: string; route: string; verdict?: string; reviewerJobId?: string };
@@ -333,6 +342,12 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
   assert.equal(Number(handoff.artifacts[0]?.attempts[0]?.size) > 0, true);
   assert.equal(handoff.artifacts[0]?.attempts[0]?.valid, true);
   assert.deepEqual(handoff.artifacts[0]?.attempts[0]?.issues, []);
+  assert.match(handoff.artifacts[0]?.attempts[0]?.baseTree ?? '', /^[0-9a-f]{40,64}$/);
+  assert.equal(
+    handoff.artifacts[0]?.attempts[0]?.source.actualTree,
+    handoff.artifacts[0]?.attempts[0]?.baseTree
+  );
+  assert.equal(handoff.artifacts[0]?.attempts[0]?.source.treeMatchesBase, true);
   assert.equal(handoff.qualityReview.status, 'completed');
   assert.equal(handoff.qualityReview.route, 'reviewer');
   assert.equal(handoff.qualityReview.verdict, 'accept');
@@ -345,4 +360,8 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
   assert.equal(handoff.artifactValidation.command.stderrTail, '');
   assert.equal(handoff.result.action, 'delegated');
   assert.equal(handoff.result.artifactReview.status, 'checked');
+  assert.equal(
+    await git(fixture.workspace, 'status', '--porcelain=v1', '--untracked-files=all'),
+    sourceStatus
+  );
 });

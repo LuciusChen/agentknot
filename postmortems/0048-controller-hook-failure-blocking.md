@@ -42,6 +42,8 @@ Automatic-entry failures now return the host's blocking `UserPromptSubmit` resul
 
 - Continue upstream but include the exact error. Rejected because it still spends controller tokens on work the configured automatic boundary failed to delegate.
 - Treat a dirty repository as read-only-safe and bypass isolation. Rejected because task intent may change during planning and protected worktree evidence depends on an exact clean base.
+
+This rejection applied to bypassing isolation. Decision 0049 later added exact dirty-source snapshots while preserving protected worktrees and worker-delta artifacts; it does not revive the bypass alternative.
 - Serialize the complete failed handoff into the blocking reason. Rejected because children, artifacts, and repeated request data are unnecessary and enlarge the controller boundary.
 - Retry or select another worker/model. Rejected because entry failure is not evidence that another route is correct, and silent fallback violates persisted route authority.
 

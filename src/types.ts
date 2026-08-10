@@ -47,6 +47,7 @@ export interface JobCompletionSummaryArtifactEvidence {
   attempt: number;
   sha256: string;
   baseCommit: string;
+  baseTree?: string;
 }
 
 /** Controller-captured Git evidence; captured paths are not semantic verification. */
@@ -180,6 +181,8 @@ export interface JobArtifact {
   size: number;
   sha256: string;
   baseCommit: string;
+  /** Exact source tree seen by the worker; absent only on legacy persisted artifacts. */
+  baseTree?: string;
   /** Git-derived repository-relative paths; absent only on legacy persisted artifacts. */
   changedFiles?: string[];
 }
@@ -194,6 +197,7 @@ export const JOB_ARTIFACT_VERIFICATION_ISSUES = [
   'artifact-sha256-mismatch',
   'source-repository-unavailable',
   'base-commit-mismatch',
+  'base-tree-mismatch',
 ] as const;
 
 export type JobArtifactVerificationIssue = (typeof JOB_ARTIFACT_VERIFICATION_ISSUES)[number];
@@ -214,6 +218,9 @@ export interface JobArtifactVerification {
     expectedBaseCommit: string;
     actualHead: string | null;
     headMatchesBase: boolean;
+    expectedBaseTree?: string;
+    actualTree?: string | null;
+    treeMatchesBase?: boolean;
   };
   issues: JobArtifactVerificationIssue[];
   valid: boolean;

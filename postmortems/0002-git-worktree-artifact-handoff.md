@@ -5,7 +5,7 @@
 - Date: 2026-08-08
 - Owners: AgentKnot maintainers
 - Affected versions/commits: 0.0.x worktree isolation implementation
-- Related: [PRD](../docs/PRD.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md)
+- Related: [PRD](../docs/PRD.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md), [dirty snapshot decision 0049](./0049-dirty-workspace-snapshot-isolation.md)
 
 ## Summary
 
@@ -110,3 +110,7 @@ Patch contents may contain sensitive repository data. This record contains no pa
 ### 2026-08-08 — Read-only inspection delivered
 
 Decision 0006 completes listing, size/SHA-256/current-base verification, and integrity-gated bounded preview without changing the original upstream-only promotion boundary. Retention, redaction, clean-application verification, and deliberate promotion remain open.
+
+### 2026-08-10 — Clean-source admission superseded
+
+Decision 0049 replaces the clean tracked/non-ignored admission restriction with a temporary exact-tree snapshot for supported dirty top-level state. The worktree, retry, worker-delta artifact, exact cleanup, and upstream-only promotion invariants remain unchanged.
