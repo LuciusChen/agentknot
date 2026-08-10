@@ -17,7 +17,7 @@ import type {
   WorkerRunResult,
 } from '../types.js';
 import {
-  parseWorkerCompletionOutput,
+  parseRequiredWorkerCompletionOutput,
   WORKER_COMPLETION_REPORT_INSTRUCTION,
 } from '../worker-completion-report.js';
 import {
@@ -290,10 +290,10 @@ export class OpenCodeJsonWorkerAdapter implements WorkerAdapter {
     if (input.signal.aborted) throw input.signal.reason;
     const prompt = `${input.prompt}\n\n${WORKER_COMPLETION_REPORT_INSTRUCTION}`;
     const result = await this.#execute(input.route, input.workspace, prompt, input.signal, emit, input.attempt);
-    const parsed = parseWorkerCompletionOutput(result.output);
+    const parsed = parseRequiredWorkerCompletionOutput(result.output, 'OpenCode');
     return {
       output: parsed.output,
-      ...(parsed.completionReport === undefined ? {} : { completionReport: parsed.completionReport }),
+      completionReport: parsed.completionReport,
       metadata: result.metadata,
     };
   }

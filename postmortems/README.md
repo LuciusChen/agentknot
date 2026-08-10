@@ -155,3 +155,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0041](./0041-native-opencode-worker-portability.md) | Decision / Experiment | Accepted | Add a native OpenCode worker to prove downstream portability |
 | [0042](./0042-complete-route-pool-balancing.md) | Decision | Accepted | Balance heterogeneous downstreams above complete routes |
 | [0043](./0043-native-opencode-lifecycle-soak.md) | Decision / Experiment | Accepted | Close native OpenCode lifecycle gate and document Git metadata boundary |
+| [0044](./0044-required-worker-completion-and-canonical-worktree-id.md) | Incident / Decision | Resolved / Accepted | Require real-worker completion and canonicalize worktree identity |

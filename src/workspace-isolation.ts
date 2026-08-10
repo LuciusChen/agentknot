@@ -24,7 +24,7 @@ const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 128 * 1024 * 1024;
 export const MAX_ARTIFACT_PREVIEW_BYTES = 1024 * 1024;
 export const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
-const MANAGED_WORKTREE_NAME = /^job-job_[A-Za-z0-9_-]+-attempt-[1-9][0-9]*-[0-9a-f-]+$/;
+const MANAGED_WORKTREE_NAME = /^job_[A-Za-z0-9_-]+-attempt-[1-9][0-9]*-[0-9a-f-]+$/;
 
 export class ArtifactSizeLimitError extends Error {
   readonly name = 'ArtifactSizeLimitError';
@@ -415,7 +415,7 @@ export class WorkspaceIsolationManager {
     }
     const root = this.#managedRoot();
     await mkdir(root, { recursive: true });
-    const managedPath = path.join(root, `job-${jobId}-attempt-${attempt}-${randomUUID()}`);
+    const managedPath = path.join(root, `${jobId}-attempt-${attempt}-${randomUUID()}`);
     try {
       await git(['worktree', 'add', '--detach', managedPath, inspection.baseCommit], inspection.repository);
     } catch (error) {

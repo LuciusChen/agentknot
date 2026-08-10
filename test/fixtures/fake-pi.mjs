@@ -22,20 +22,20 @@ function send(value) {
 }
 
 function completionOutput(message) {
+  let humanOutput;
   if (
     process.env.FAKE_PI_PLANNER_OUTPUT !== undefined &&
     message.startsWith("You are AgentKnot's read-only task classifier.")
   ) {
-    return process.env.FAKE_PI_PLANNER_OUTPUT;
-  }
-  if (
+    humanOutput = process.env.FAKE_PI_PLANNER_OUTPUT;
+  } else if (
     process.env.FAKE_PI_REVIEW_OUTPUT !== undefined &&
     message.startsWith("You are AgentKnot's independent advisory quality reviewer")
   ) {
-    return process.env.FAKE_PI_REVIEW_OUTPUT;
+    humanOutput = process.env.FAKE_PI_REVIEW_OUTPUT;
+  } else {
+    humanOutput = process.env.FAKE_PI_COMPLETION_OUTPUT ?? process.env.FAKE_PI_HUMAN_OUTPUT ?? 'fake result';
   }
-  if (process.env.FAKE_PI_COMPLETION_OUTPUT !== undefined) return process.env.FAKE_PI_COMPLETION_OUTPUT;
-  const humanOutput = process.env.FAKE_PI_HUMAN_OUTPUT ?? 'fake result';
   const validReport = {
     schemaVersion: 1,
     changedFiles: ['worker-claimed.ts'],
@@ -47,7 +47,7 @@ function completionOutput(message) {
     notes: ['Worker-reported note.'],
   };
   const envelope = `${WORKER_COMPLETION_REPORT_MARKER}: ${JSON.stringify(validReport)}`;
-  switch (process.env.FAKE_PI_COMPLETION_MODE ?? 'missing') {
+  switch (process.env.FAKE_PI_COMPLETION_MODE ?? 'valid') {
     case 'valid':
       return `${humanOutput}\n${envelope}`;
     case 'malformed':

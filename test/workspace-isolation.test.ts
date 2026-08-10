@@ -528,6 +528,10 @@ test('concurrent jobs receive distinct managed worktrees', async () => {
   const adapter = new (class extends TestAdapter {
     async run(input: WorkerRunInput): Promise<WorkerRunResult> {
       seen.push(input.workspace);
+      assert.match(
+        path.basename(input.workspace),
+        new RegExp(`^${input.jobId}-attempt-${input.attempt}-[0-9a-f-]+$`)
+      );
       await new Promise((resolve) => setTimeout(resolve, 40));
       await writeFile(path.join(input.workspace, 'concurrent.txt'), input.jobId);
       return { output: input.jobId };

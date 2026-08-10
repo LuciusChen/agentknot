@@ -405,7 +405,7 @@ test('Pi normal runs append the report instruction after prompt-injection text',
         FAKE_PI_COMPLETION_MODE: 'missing',
       },
     });
-    const result = await adapter.run(
+    const run = adapter.run(
       {
         jobId: 'job_pi_completion_prompt',
         prompt: injectedPrompt,
@@ -416,12 +416,12 @@ test('Pi normal runs append the report instruction after prompt-injection text',
       },
       () => undefined
     );
+    await assert.rejects(run, /missing required completion report/);
 
     const sentPrompt = await readFile(promptFile, 'utf8');
     assert.ok(sentPrompt.startsWith(injectedPrompt));
     assert.ok(sentPrompt.endsWith(PI_WORKER_COMPLETION_REPORT_INSTRUCTION));
     assert.match(sentPrompt, /changedFiles.*checksRun.*remainingRisks.*notes/);
-    assert.equal(result.completionReport, undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -452,7 +452,7 @@ test('Pi normal runs validate and strip a valid completion envelope while preser
       () => undefined
     );
 
-    assert.equal(result.output, 'human summary\n');
+    assert.equal(result.output, 'human summary');
     assert.deepEqual(result.completionReport, fakeCompletionReport);
     assert.equal(result.output.includes(PI_WORKER_COMPLETION_REPORT_MARKER), false);
   } finally {
@@ -460,7 +460,7 @@ test('Pi normal runs validate and strip a valid completion envelope while preser
   }
 });
 
-test('Pi normal runs leave a missing report absent and do not infer one from prose', async () => {
+test('Pi normal runs reject a missing report and do not infer one from prose', async () => {
   for (const mode of ['missing', 'prose', 'trailing'] as const) {
     const directory = await mkdtemp(path.join(os.tmpdir(), `agentknot-pi-completion-${mode}-`));
     try {
@@ -474,34 +474,28 @@ test('Pi normal runs leave a missing report absent and do not infer one from pro
           FAKE_PI_HUMAN_OUTPUT: 'human summary',
         },
       });
-      const result = await adapter.run(
-        {
-          jobId: `job_pi_completion_${mode}`,
-          prompt: 'complete the task',
-          workspace: directory,
-          route,
-          attempt: 1,
-          signal: new AbortController().signal,
-        },
-        () => undefined
+      await assert.rejects(
+        adapter.run(
+          {
+            jobId: `job_pi_completion_${mode}`,
+            prompt: 'complete the task',
+            workspace: directory,
+            route,
+            attempt: 1,
+            signal: new AbortController().signal,
+          },
+          () => undefined
+        ),
+        /missing required completion report/,
+        mode
       );
-
-      assert.equal(result.completionReport, undefined, mode);
-      if (mode === 'missing') assert.equal(result.output, 'human summary');
-      if (mode === 'prose') {
-        assert.match(result.output, /AGENTKNOT_WORKER_COMPLETION_REPORT_V1 is mentioned in ordinary prose/);
-      }
-      if (mode === 'trailing') {
-        assert.match(result.output, /AGENTKNOT_WORKER_COMPLETION_REPORT_V1/);
-        assert.match(result.output, /trailing prose$/);
-      }
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   }
 });
 
-test('Pi normal runs report malformed and unsupported envelopes as null without failing', async () => {
+test('Pi normal runs reject malformed and unsupported completion envelopes', async () => {
   for (const mode of ['malformed', 'unsupported'] as const) {
     const directory = await mkdtemp(path.join(os.tmpdir(), `agentknot-pi-completion-${mode}-`));
     try {
@@ -515,32 +509,29 @@ test('Pi normal runs report malformed and unsupported envelopes as null without 
           FAKE_PI_HUMAN_OUTPUT: 'human summary',
         },
       });
-      const result = await adapter.run(
-        {
-          jobId: `job_pi_completion_${mode}`,
-          prompt: 'complete the task',
-          workspace: directory,
-          route,
-          attempt: 1,
-          signal: new AbortController().signal,
-        },
-        () => undefined
+      await assert.rejects(
+        adapter.run(
+          {
+            jobId: `job_pi_completion_${mode}`,
+            prompt: 'complete the task',
+            workspace: directory,
+            route,
+            attempt: 1,
+            signal: new AbortController().signal,
+          },
+          () => undefined
+        ),
+        /malformed required completion report/,
+        mode
       );
-
-      assert.equal(result.completionReport, null, mode);
-      assert.match(result.output, /AGENTKNOT_WORKER_COMPLETION_REPORT_V1/);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   }
 });
 
-test('Pi normal completion reports propagate to the terminal summary', async () => {
-  for (const [mode, expected] of [
-    ['valid', { status: 'reported', report: fakeCompletionReport }],
-    ['missing', { status: 'unavailable', reason: 'absent' }],
-    ['malformed', { status: 'unavailable', reason: 'malformed' }],
-  ] as const) {
+test('Pi normal completion reports propagate while invalid reports fail the Job', async () => {
+  for (const mode of ['valid', 'missing', 'malformed'] as const) {
     const directory = await mkdtemp(path.join(os.tmpdir(), `agentknot-pi-completion-summary-${mode}-`));
     try {
       const orchestrator = createFakePiOrchestrator({
@@ -549,9 +540,21 @@ test('Pi normal completion reports propagate to the terminal summary', async () 
       });
       const job = await orchestrator.run({ prompt: mode, workspace: directory });
 
-      assert.equal(job.status, 'succeeded');
-      assert.deepEqual(job.completionSummary?.workerReported, expected);
-      if (mode === 'valid') assert.equal(job.result?.output, 'human summary\n');
+      if (mode === 'valid') {
+        assert.equal(job.status, 'succeeded');
+        assert.deepEqual(job.completionSummary?.workerReported, {
+          status: 'reported',
+          report: fakeCompletionReport,
+        });
+        assert.equal(job.result?.output, 'human summary');
+      } else {
+        assert.equal(job.status, 'failed');
+        assert.match(job.error?.message ?? '', new RegExp(`${mode} required completion report`));
+        assert.deepEqual(job.completionSummary?.workerReported, {
+          status: 'unavailable',
+          reason: 'not-retained',
+        });
+      }
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

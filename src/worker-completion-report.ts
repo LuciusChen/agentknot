@@ -14,6 +14,11 @@ interface ParsedWorkerCompletionOutput {
   completionReport?: WorkerCompletionReport | null;
 }
 
+interface RequiredWorkerCompletionOutput {
+  output: string;
+  completionReport: WorkerCompletionReport;
+}
+
 const WORKER_COMPLETION_REPORT_SUFFIX = new RegExp(
   `(^|\\r?\\n)${WORKER_COMPLETION_REPORT_MARKER}: ([^\\r\\n]*)(?![\\s\\S])`
 );
@@ -35,7 +40,21 @@ export function parseWorkerCompletionOutput(output: string): ParsedWorkerComplet
   if (!report) return { output, completionReport: null };
 
   return {
-    output: output.slice(0, (match.index ?? 0) + separator.length),
+    output: output.slice(0, match.index ?? 0),
     completionReport: report,
   };
+}
+
+export function parseRequiredWorkerCompletionOutput(
+  output: string,
+  adapter: string
+): RequiredWorkerCompletionOutput {
+  const parsed = parseWorkerCompletionOutput(output);
+  if (parsed.completionReport === undefined) {
+    throw new Error(`${adapter} output is missing required completion report`);
+  }
+  if (parsed.completionReport === null) {
+    throw new Error(`${adapter} output contains a malformed required completion report`);
+  }
+  return { output: parsed.output, completionReport: parsed.completionReport };
 }

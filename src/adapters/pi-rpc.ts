@@ -30,7 +30,7 @@ import {
   type EffectiveEnvironment,
 } from './subprocess.js';
 import {
-  parseWorkerCompletionOutput,
+  parseRequiredWorkerCompletionOutput,
   WORKER_COMPLETION_REPORT_INSTRUCTION,
   WORKER_COMPLETION_REPORT_MARKER,
 } from '../worker-completion-report.js';
@@ -766,14 +766,12 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       if (input.signal.aborted) {
         throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
       }
-      const parsedOutput = parseWorkerCompletionOutput(output);
+      const parsedOutput = parseRequiredWorkerCompletionOutput(output, 'Pi');
       statsRequestId = SESSION_STATS_REQUEST_ID;
       const sessionStats = await requestSessionStats(child, statsResponse, statsRequestId);
       return {
         output: parsedOutput.output,
-        ...(parsedOutput.completionReport === undefined
-          ? {}
-          : { completionReport: parsedOutput.completionReport }),
+        completionReport: parsedOutput.completionReport,
         metadata: {
           command,
           rawEventCount,

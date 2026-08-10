@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -35,7 +35,12 @@ function createAdapter(
     adapter: 'opencode-json',
     command: process.execPath,
     commandArgs: [fixture],
-    environment: { FAKE_OPENCODE_KEY: 'configured', FAKE_OPENCODE_MODE: mode, ...environment },
+    environment: {
+      FAKE_OPENCODE_KEY: 'configured',
+      FAKE_OPENCODE_MODE: mode,
+      FAKE_OPENCODE_COMPLETION: 'valid',
+      ...environment,
+    },
   });
 }
 
@@ -134,12 +139,12 @@ test('OpenCode JSON doctor uses its own private auth store without Pi credential
   }
 });
 
-test('OpenCode JSON preserves exact session statistics and completion reports', async () => {
+test('OpenCode JSON preserves exact session statistics and requires a valid completion report', async () => {
   const result = await createAdapter('success', { FAKE_OPENCODE_COMPLETION: 'valid' }).run(
     input(new AbortController().signal),
     () => undefined
   );
-  assert.equal(result.output, 'OpenCode conformance output\n');
+  assert.equal(result.output, 'OpenCode conformance output');
   assert.deepEqual(result.completionReport, {
     schemaVersion: 1,
     changedFiles: ['result.txt'],
@@ -153,14 +158,23 @@ test('OpenCode JSON preserves exact session statistics and completion reports', 
     cost: 0.125,
   });
 
-  const malformed = await createAdapter('success', { FAKE_OPENCODE_COMPLETION: 'malformed' }).run(
-    input(new AbortController().signal),
-    () => undefined
+  await assert.rejects(
+    createAdapter('success', { FAKE_OPENCODE_COMPLETION: 'malformed' }).run(
+      input(new AbortController().signal),
+      () => undefined
+    ),
+    /malformed required completion report/
   );
-  assert.equal(malformed.completionReport, null);
 });
 
-test('OpenCode JSON rejects malformed, error, incomplete, and nonzero settlements', async () => {
+test('OpenCode JSON rejects missing report, malformed JSONL, error, incomplete, and nonzero settlements', async () => {
+  await assert.rejects(
+    createAdapter('success', { FAKE_OPENCODE_COMPLETION: 'missing' }).run(
+      input(new AbortController().signal),
+      () => undefined
+    ),
+    /missing required completion report/
+  );
   await assert.rejects(createAdapter('malformed').run(input(new AbortController().signal), () => undefined), /malformed JSONL/);
   await assert.rejects(createAdapter('error-event').run(input(new AbortController().signal), () => undefined), /fake OpenCode provider error/);
   await assert.rejects(createAdapter('no-finish').run(input(new AbortController().signal), () => undefined), /without a step_finish/);
@@ -285,6 +299,7 @@ test('OpenCode JSON changes remain controller-captured worktree artifacts', asyn
         commandArgs: [fixture],
         environment: {
           FAKE_OPENCODE_KEY: 'configured',
+          FAKE_OPENCODE_COMPLETION: 'valid',
           FAKE_OPENCODE_WRITE_FILE: 'created.txt',
         },
       },
@@ -323,6 +338,25 @@ test('OpenCode JSON changes remain controller-captured worktree artifacts', asyn
     await assert.rejects(readFile(path.join(repository, 'created.txt')), /ENOENT/);
     const status = await execFileAsync('git', ['status', '--short'], { cwd: repository });
     assert.equal(status.stdout, '');
+
+    const incompleteJobs = new Orchestrator({
+      config,
+      store: new MemoryJobStore(),
+      adapters: new Map([
+        ['native', createAdapter('success', { FAKE_OPENCODE_COMPLETION: 'missing' })],
+      ]),
+      baseDirectory: directory,
+    });
+    const incomplete = await (
+      await incompleteJobs.start({ prompt: 'return only intermediate progress', workspace: repository })
+    ).completion;
+    assert.equal(incomplete.status, 'failed');
+    assert.match(incomplete.error?.message ?? '', /missing required completion report/);
+    assert.equal(incomplete.result, undefined);
+    assert.deepEqual(incomplete.artifacts?.[0]?.changedFiles, []);
+    assert.equal((await incompleteJobs.verifyArtifacts(incomplete.id))?.valid, true);
+    assert.deepEqual(await readdir(worktrees), []);
+    assert.equal((await execFileAsync('git', ['status', '--short'], { cwd: repository })).stdout, '');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

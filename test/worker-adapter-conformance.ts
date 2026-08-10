@@ -60,7 +60,14 @@ export function registerWorkerAdapterConformanceTests(
       .map((event) => event.data?.delta);
     assert.ok(text.length > 0);
     assert.equal(text.every((delta) => typeof delta === 'string'), true);
-    assert.equal(text.join(''), options.expectedOutput);
+    const streamedOutput = text.join('');
+    assert.equal(streamedOutput.startsWith(options.expectedOutput), true);
+    if (streamedOutput !== options.expectedOutput) {
+      assert.match(
+        streamedOutput.slice(options.expectedOutput.length),
+        /^\r?\nAGENTKNOT_WORKER_COMPLETION_REPORT_V1: /u
+      );
+    }
   });
 
   test(`${options.name} propagates worker event sink failures`, async () => {
