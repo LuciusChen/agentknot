@@ -27,7 +27,7 @@ Directly invoking a worker also leaves recurring control-plane concerns to every
 
 Controllers already own conversation context, intent, planning, and product decisions. AgentKnot therefore needs one shared, strict orchestration handoff: controllers author the semantic assessment, while middleware validates it and applies common limits, routing, isolation, lifecycle, and evidence rules. Requiring middleware to plan from a raw prompt would duplicate controller reasoning, hide context, add latency, and couple the control plane to another model call.
 
-That handoff may carry one small controller-authored navigation context shared by all children. It must reuse facts already in the controller conversation, not copy the transcript or make the controller scan the repository. The bounded common prefix narrows the worker's initial working set without making a worker session, memory service, provider cache, or controller identity part of correctness.
+That handoff may carry one small controller-authored navigation context shared by all children. It must reuse facts already in the controller conversation, not copy the transcript or make the controller scan the repository. The bounded common prefix narrows the worker's initial working set without making a worker session, memory service, provider cache, or controller identity part of correctness. Explicit constraints override generic check guidance, and insufficient context is reported with available evidence instead of permitting silent scope expansion; this is a behavioral contract, not a sandbox claim.
 
 AgentKnot provides one narrow contract for those concerns while keeping every execution choice explicit and replaceable.
 

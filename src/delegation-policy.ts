@@ -187,7 +187,7 @@ function executionPrompt(request: OrchestrationRequest, subtask: AssessedSubtask
         ...(taskContext.constraints.length === 0
           ? []
           : ['Constraints:', ...taskContext.constraints.map((item) => `- ${item}`)]),
-        'Begin with this working set. Verify only facts needed for the acceptance criteria; do not inventory the repository or read unrelated architecture/history files. If the context is insufficient or conflicts with the admitted workspace, report the missing or stale context before broadening scope.',
+        'Begin with this working set. Verify only facts needed for the acceptance criteria; do not inventory the repository or read unrelated architecture/history files. If the context is insufficient or conflicts with the admitted workspace, finish with the available evidence and report the missing or stale context instead of broadening scope.',
       ];
   const repositoryAnalysisBoundary = subtask.kind === 'repository-analysis'
     ? [
@@ -217,7 +217,7 @@ function executionPrompt(request: OrchestrationRequest, subtask: AssessedSubtask
     ...subtask.acceptanceCriteria.map((criterion) => `- ${criterion}`),
     ...repositoryAnalysisBoundary,
     '',
-    'Run relevant checks and report files changed, checks run, and remaining risks.',
+    'Run relevant checks only when permitted by the task context and acceptance criteria; explicit constraints take precedence. Report files changed, checks run, and remaining risks.',
   ].join('\n');
 }
 

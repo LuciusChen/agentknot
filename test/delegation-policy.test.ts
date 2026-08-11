@@ -371,7 +371,8 @@ test('small low-complexity repository work is delegated once and selected by the
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Do not inventory the repository/);
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Controller-authored task context/);
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /src\/spam\.ts/);
-  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /report the missing or stale context before broadening scope/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /report the missing or stale context instead of broadening scope/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /explicit constraints take precedence/);
   const noContextPlan = composeDelegationPlan(request, single, activeConfig);
   assert.notEqual(analysisPlan.planHash, noContextPlan.planHash);
 });

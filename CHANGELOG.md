@@ -61,6 +61,8 @@ Entries in this unreleased history retain earlier implementation evidence; the `
 
 ### Changed
 
+- Shared task-context constraints now explicitly override the generic worker request to run relevant checks. When the supplied working set is insufficient or stale, workers finish with available evidence and report the gap instead of broadening scope. Six post-correction real trials across Luna/max and DeepSeek Flash/max stayed within all named path and command boundaries using 6, 3, 5, 8, 3, and 2 tool calls respectively; this is repeated behavioral evidence, not a sandbox or universal token claim ([experiment 0069](postmortems/0069-repeated-shared-context-scope-trials.md)).
+
 - Job and Orchestration waits now share the durable subscription kernel instead of maintaining separate 100 ms full-record polling loops. HTTP cursor-follow returns committed event deltas plus compact active or terminal evidence; disconnect retries preserve the exact record ID and last sequence ([decision 0062](postmortems/0062-durable-event-subscription.md)).
 
 - Durable Job and Orchestration admission now commits the queued projection, first event, optional idempotency mapping, and first fenced lease in one transaction. Job and parent execution share one lease/cancellation lifecycle coordinator, and wait uses durable state without leaving losing timeout timers alive. `StartJobResult.cancel()` now returns `Promise<void>` and persists cancellation before accelerating the local abort, matching the already-async parent handle and by-ID kernel operations.

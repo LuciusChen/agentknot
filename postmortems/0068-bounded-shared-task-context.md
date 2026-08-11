@@ -5,7 +5,7 @@
 - Implementation: Delivered in this slice
 - Date: 2026-08-11
 - Owners: AgentKnot maintainers
-- Related: [decision 0053](./0053-controller-owned-planning-handoff.md), [incident 0052](./0052-bounded-analysis-and-observable-waiting.md), [decision 0067](./0067-route-tool-execution-budget.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md)
+- Related: [decision 0053](./0053-controller-owned-planning-handoff.md), [incident 0052](./0052-bounded-analysis-and-observable-waiting.md), [decision 0067](./0067-route-tool-execution-budget.md), [experiment 0069](./0069-repeated-shared-context-scope-trials.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md)
 
 ## Context
 
@@ -19,7 +19,7 @@ Giving one controller session a fixed Pi session appeared to avoid repeated disc
 - Cap the summary at 1,000 characters, each array at 20 unique entries of at most 500 characters, and the complete compact UTF-8 JSON at 2 KiB. Paths must be repository-relative and may not traverse parents.
 - The controller constructs the context only from facts already present in its conversation. It must not read a transcript, scan the repository, or copy file bodies merely to manufacture context; omission remains valid.
 - Validate and defensively copy the context at the common orchestration boundary, persist it with the admitted request, and include it in the deterministic plan hash.
-- Project the same context text before each selected child's task-specific delta. Treat it as unverified navigation guidance: begin with the named working set, verify only acceptance-relevant facts, and report missing or stale guidance before expanding.
+- Project the same context text before each selected child's task-specific delta. Treat it as unverified navigation guidance: begin with the named working set, verify only acceptance-relevant facts, and finish with available evidence plus a missing/stale-context report instead of expanding. Explicit constraints override generic check guidance.
 - Keep correctness independent of Pi sessions/forks and provider prompt caching. The identical prefix is cache-friendly when a provider supports caching, but cache behavior is not part of the contract.
 - Add no context store, memory service, controller-session binding, transcript capture, vector index, repository scanner, model/provider branch, or middleware planner.
 
@@ -48,3 +48,7 @@ The controller need not reproduce worker repository reading. It supplies only kn
 ## Privacy and security review
 
 The context is persisted wherever the assessment is persisted and is later sent to each selected worker. It must contain no credentials, raw transcript, file bodies, or unrelated personal data. The 2 KiB limit bounds size, not sensitivity or redaction; callers remain responsible for the supplied text.
+
+## Addenda
+
+- 2026-08-11: [Experiment 0069](./0069-repeated-shared-context-scope-trials.md) records one pre-correction failure and six post-correction real trials across Luna/max and DeepSeek Flash/max. The repeated trials stayed within every named path and command boundary, while also proving that this remains prompt behavior rather than tool enforcement.
