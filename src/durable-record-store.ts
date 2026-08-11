@@ -73,6 +73,20 @@ export interface DurableAdmissionOptions {
   };
 }
 
+export interface DurableRoutePoolChoice {
+  activeBefore: Record<string, number>;
+  cursorBefore: number;
+  selectedRoute: string;
+  selectedMemberIndex: number;
+}
+
+export interface DurableRoutePoolAdmissionOptions<T> extends DurableAdmissionOptions {
+  /** Stable identity for one ordered logical pool definition. */
+  cursorKey: string;
+  candidates: readonly string[];
+  createRecord: (choice: DurableRoutePoolChoice) => T;
+}
+
 export type DurableAdmissionResult<T> =
   | { created: true; record: T; lease: ExecutionLease }
   | { created: false; record: T };
@@ -235,6 +249,14 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
         source TEXT NOT NULL
       ) STRICT;
       `);
+      if (kind === 'Job') {
+        this.#database.exec(`
+          CREATE TABLE IF NOT EXISTS route_pool_cursors (
+            pool_key TEXT PRIMARY KEY,
+            next_index INTEGER NOT NULL CHECK (next_index >= 0)
+          ) STRICT;
+        `);
+      }
     }
     this.#selectRecord = database.prepare(
       'SELECT record_json, revision, event_sequence FROM records WHERE id = ?'
@@ -368,6 +390,136 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
         record: attachRevision(structuredClone(record), 1),
         lease: outcome.lease,
       };
+    }
+    const existing = await this.get(outcome.recordId);
+    if (existing === undefined) {
+      throw new Error(`Idempotency key references missing ${this.#kind.toLowerCase()} ${outcome.recordId}`);
+    }
+    return { created: false, record: existing };
+  }
+
+  /**
+   * Atomically selects one least-active exact route and admits the resulting Job with its first
+   * execution lease. The generic durable store exposes this only for Job records so routing stays
+   * above worker/provider implementations while selection and admission share one transaction.
+   */
+  async admitRoutePool(
+    options: DurableRoutePoolAdmissionOptions<T>
+  ): Promise<DurableAdmissionResult<T>> {
+    this.#assertOpen();
+    if (this.#kind !== 'Job') throw new Error('Route-pool admission is available only for Jobs');
+    assertIdentifier('Route-pool cursorKey', options.cursorKey);
+    assertIdentifier('Lease ownerId', options.ownerId);
+    assertTtl(options.ttlMs);
+    if (
+      options.candidates.length < 2 ||
+      options.candidates.length > 20 ||
+      new Set(options.candidates).size !== options.candidates.length
+    ) {
+      throw new Error('Route-pool candidates must contain 2 to 20 unique exact route names');
+    }
+    for (const candidate of options.candidates) {
+      assertIdentifier('Route-pool candidate', candidate);
+    }
+    if (options.idempotency !== undefined) {
+      assertIdentifier('Idempotency scope', options.idempotency.scope);
+      assertIdentifier('Idempotency key', options.idempotency.key);
+      if (!/^[a-f0-9]{64}$/i.test(options.idempotency.requestHash)) {
+        throw new Error('Idempotency requestHash must be a 64-character hexadecimal digest');
+      }
+    }
+
+    const outcome = transaction(this.#database, () => {
+      if (options.idempotency !== undefined) {
+        const existing = this.#selectIdempotency.get(
+          options.idempotency.scope,
+          options.idempotency.key
+        ) as { request_hash: string; record_id: string } | undefined;
+        if (existing !== undefined) {
+          if (existing.request_hash !== options.idempotency.requestHash) {
+            throw new IdempotencyConflictError(
+              `Idempotency key conflict for scope "${options.idempotency.scope}" and key "${options.idempotency.key}"`
+            );
+          }
+          return { created: false as const, recordId: existing.record_id };
+        }
+      }
+
+      const nowMs = (options.now ?? new Date()).getTime();
+      const activeBefore = Object.fromEntries(
+        options.candidates.map((candidate) => [candidate, 0])
+      );
+      const placeholders = options.candidates.map(() => '?').join(', ');
+      const rows = this.#database
+        .prepare(
+          `SELECT json_extract(records.record_json, '$.route.name') AS route_name, COUNT(*) AS active_count
+           FROM execution_leases
+           JOIN records ON records.id = execution_leases.record_id
+           WHERE execution_leases.expires_at_ms > ?
+             AND json_extract(records.record_json, '$.route.name') IN (${placeholders})
+           GROUP BY route_name`
+        )
+        .all(nowMs, ...options.candidates) as Array<{ route_name: string; active_count: number }>;
+      for (const row of rows) {
+        if (Object.hasOwn(activeBefore, row.route_name)) {
+          activeBefore[row.route_name] = Number(row.active_count);
+        }
+      }
+
+      const cursorRow = this.#database
+        .prepare('SELECT next_index FROM route_pool_cursors WHERE pool_key = ?')
+        .get(options.cursorKey) as { next_index: number } | undefined;
+      const cursorBefore = (cursorRow?.next_index ?? 0) % options.candidates.length;
+      const minimum = Math.min(...Object.values(activeBefore));
+      let selectedMemberIndex = -1;
+      for (let offset = 0; offset < options.candidates.length; offset += 1) {
+        const index = (cursorBefore + offset) % options.candidates.length;
+        if (activeBefore[options.candidates[index]!] === minimum) {
+          selectedMemberIndex = index;
+          break;
+        }
+      }
+      if (selectedMemberIndex < 0) throw new Error('Route pool has no selectable member');
+      const selectedRoute = options.candidates[selectedMemberIndex]!;
+      const record = options.createRecord({
+        activeBefore,
+        cursorBefore,
+        selectedRoute,
+        selectedMemberIndex,
+      });
+      const normalized = this.#materialize(record);
+      const routeName = (normalized as DurableStoredRecord & { route?: { name?: unknown } }).route
+        ?.name;
+      if (routeName !== selectedRoute) {
+        throw new Error('Route-pool record route does not match the atomically selected member');
+      }
+
+      this.#insertNew(normalized);
+      if (options.idempotency !== undefined) {
+        this.#insertIdempotency.run(
+          options.idempotency.scope,
+          options.idempotency.key,
+          options.idempotency.requestHash,
+          normalized.id,
+          normalized.createdAt
+        );
+      }
+      const lease = this.#claimLeaseInTransaction(normalized.id, options);
+      if (lease === undefined) {
+        throw new Error(`${this.#kind} ${normalized.id} could not acquire its admission lease`);
+      }
+      this.#database
+        .prepare(
+          `INSERT INTO route_pool_cursors (pool_key, next_index) VALUES (?, ?)
+           ON CONFLICT(pool_key) DO UPDATE SET next_index = excluded.next_index`
+        )
+        .run(options.cursorKey, (selectedMemberIndex + 1) % options.candidates.length);
+      return { created: true as const, record, lease };
+    });
+
+    if (outcome.created) {
+      attachRevision(outcome.record, 1);
+      return { created: true, record: outcome.record, lease: outcome.lease };
     }
     const existing = await this.get(outcome.recordId);
     if (existing === undefined) {

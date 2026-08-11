@@ -172,3 +172,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0058](./0058-controller-neutral-broker-activation.md) | Incident / Architecture Decision | Resolved / Accepted | Let common clients explicitly activate a non-running broker |
 | [0059](./0059-retire-native-opencode-worker.md) | Decision | Accepted | Retire the native secondary CLI worker and keep Pi as the sole built-in real worker |
 | [0060](./0060-artifact-capture-omitted-deletions.md) | Incident | Resolved | Preserve tracked-file deletions in worker patch artifacts |
+| [0061](./0061-atomic-durable-route-pool-admission.md) | Architecture Decision | Accepted | Bind least-active route selection to durable Job admission |

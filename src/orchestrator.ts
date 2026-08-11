@@ -784,10 +784,10 @@ export class Orchestrator {
       };
     }
 
-    return this.#trackRoute(
-      resolveRoute(this.#config, routeName),
-      selection
-    );
+    const route = resolveRoute(this.#config, routeName);
+    return this.#durability.routePoolAdmissionEnabled && selection === undefined
+      ? { route, release: () => undefined }
+      : this.#trackRoute(route, selection);
   }
 
   #trackRoute(
@@ -810,7 +810,10 @@ export class Orchestrator {
   }
 
   #reservePersistedRoute(job: JobRecord): RouteReservation {
-    return this.#trackRoute(structuredClone(job.route));
+    const route = structuredClone(job.route);
+    return this.#durability.routePoolAdmissionEnabled
+      ? { route, release: () => undefined }
+      : this.#trackRoute(route);
   }
 
   async captureWorkspaceSnapshot(
@@ -865,14 +868,6 @@ export class Orchestrator {
     normalized: ReturnType<typeof normalizeRequest>,
     inspection: WorkspaceInspection | undefined
   ): Promise<StartJobResult> {
-    const reservation = this.#reserveRoute(normalized.route);
-    const route = reservation.route;
-    const adapter = this.#adapters.get(route.worker);
-    if (!adapter) {
-      reservation.release();
-      throw new Error(`No adapter registered for worker "${route.worker}"`);
-    }
-
     const now = this.#now().toISOString();
     const id = `job_${randomUUID()}`;
     let snapshotPersisted = false;
@@ -883,80 +878,110 @@ export class Orchestrator {
         snapshotPersisted = workspaceSnapshot.size > 0;
       }
     } catch (error) {
-      reservation.release();
       throw new JobPersistenceError('admission', undefined, error);
     }
-    const job: JobRecord = {
-      id,
-      schemaVersion: 1,
-      status: 'queued',
-      request: normalized,
-      route,
-      ...(reservation.selection === undefined
-        ? {}
-        : { routePoolSelection: structuredClone(reservation.selection) }),
-      createdAt: now,
-      updatedAt: now,
-      attempt: 0,
-      events: [
-        {
-          sequence: 1,
-          jobId: id,
-          at: now,
-          type: 'job.queued',
-          data: { source: normalized.source ?? 'unknown' },
-        },
-      ],
-      execution: structuredClone(this.#execution),
-      ...(workspaceSnapshot === undefined ? {} : { workspaceSnapshot }),
-    };
     const controller = new AbortController();
+    let reservation: RouteReservation | undefined;
+    let adapter: WorkerAdapter | undefined;
+    let job: JobRecord | undefined;
     let admitted = true;
-    let admittedRecord = job;
+    let admittedRecord: JobRecord | undefined;
+    const idempotency =
+      normalized.idempotencyKey === undefined
+        ? undefined
+        : {
+            scope: 'job-admission-v1',
+            key: normalized.idempotencyKey,
+            requestHash: canonicalJsonSha256(normalized),
+          };
     try {
-      if (this.#durability.enabled) {
-        const result = await this.#durability.admit(job, {
+      const target = normalized.route ?? this.#config.defaultRoute;
+      const pool = this.#config.routePools?.[target];
+      if (pool !== undefined && this.#durability.routePoolAdmissionEnabled) {
+        const result = await this.#durability.admitRoutePool({
           ownerId: this.#execution.runtimeId,
-          ...(normalized.idempotencyKey === undefined
-            ? {}
-            : {
-                idempotency: {
-                  scope: 'job-admission-v1',
-                  key: normalized.idempotencyKey,
-                  requestHash: canonicalJsonSha256(normalized),
-                },
-              }),
+          cursorKey: canonicalJsonSha256({
+            pool: target,
+            strategy: pool.strategy,
+            candidates: pool.routes,
+          }),
+          candidates: pool.routes,
+          ...(idempotency === undefined ? {} : { idempotency }),
+          createRecord: (choice) => {
+            const route = resolveRoute(this.#config, choice.selectedRoute);
+            const selectedAdapter = this.#adapters.get(route.worker);
+            if (selectedAdapter === undefined) {
+              throw new Error(`No adapter registered for worker "${route.worker}"`);
+            }
+            adapter = selectedAdapter;
+            reservation = {
+              route,
+              selection: {
+                pool: target,
+                strategy: pool.strategy,
+                candidates: [...pool.routes],
+                selectedRoute: choice.selectedRoute,
+                activeBefore: choice.activeBefore,
+                cursorBefore: choice.cursorBefore,
+                selectedMemberIndex: choice.selectedMemberIndex,
+                tieBreak: 'rotating-order',
+              },
+              release: () => undefined,
+            };
+            job = this.#queuedJob(id, now, normalized, reservation, workspaceSnapshot);
+            return job;
+          },
         });
         if (result === undefined) throw new Error('Durable Job admission is unavailable');
         admitted = result.created;
         admittedRecord = result.record;
-      } else if (normalized.idempotencyKey !== undefined) {
-        if (this.#store.createIdempotent === undefined) {
-          throw new Error('The selected Job store does not support idempotent admission');
-        }
-        const result = await this.#store.createIdempotent(
-          'job-admission-v1',
-          normalized.idempotencyKey,
-          canonicalJsonSha256(normalized),
-          job
-        );
-        admitted = result.created;
-        admittedRecord = result.record;
       } else {
-        await this.#store.create(job);
+        reservation = this.#reserveRoute(normalized.route);
+        adapter = this.#adapters.get(reservation.route.worker);
+        if (adapter === undefined) {
+          throw new Error(`No adapter registered for worker "${reservation.route.worker}"`);
+        }
+        job = this.#queuedJob(id, now, normalized, reservation, workspaceSnapshot);
+        admittedRecord = job;
+        if (this.#durability.enabled) {
+          const result = await this.#durability.admit(job, {
+            ownerId: this.#execution.runtimeId,
+            ...(idempotency === undefined ? {} : { idempotency }),
+          });
+          if (result === undefined) throw new Error('Durable Job admission is unavailable');
+          admitted = result.created;
+          admittedRecord = result.record;
+        } else if (idempotency !== undefined) {
+          if (this.#store.createIdempotent === undefined) {
+            throw new Error('The selected Job store does not support idempotent admission');
+          }
+          const result = await this.#store.createIdempotent(
+            idempotency.scope,
+            idempotency.key,
+            idempotency.requestHash,
+            job
+          );
+          admitted = result.created;
+          admittedRecord = result.record;
+        } else {
+          await this.#store.create(job);
+        }
       }
     } catch (error) {
       if (snapshotPersisted) {
         await this.#workspaceIsolation.discardAdmissionSnapshot(id).catch(() => undefined);
       }
-      reservation.release();
+      reservation?.release();
       throw new JobPersistenceError('admission', undefined, error);
+    }
+    if (admittedRecord === undefined) {
+      throw new JobPersistenceError('admission', undefined, new Error('Job admission returned no record'));
     }
     if (!admitted) {
       if (snapshotPersisted) {
         await this.#workspaceIsolation.discardAdmissionSnapshot(id);
       }
-      reservation.release();
+      reservation?.release();
       const active = this.#activeJobs.get(admittedRecord.id);
       if (active !== undefined) {
         return {
@@ -977,6 +1002,14 @@ export class Orchestrator {
         },
       };
     }
+    if (job === undefined || adapter === undefined || reservation === undefined) {
+      await this.#durability.release(admittedRecord.id);
+      throw new JobPersistenceError(
+        'admission',
+        undefined,
+        new Error('New Job admission did not retain its selected execution route')
+      );
+    }
     try {
       await this.#notifyObserver(job, job.events[0]!);
     } catch (error) {
@@ -986,6 +1019,39 @@ export class Orchestrator {
     }
 
     return this.#activate(job, adapter, controller, inspection, reservation, 1);
+  }
+
+  #queuedJob(
+    id: string,
+    now: string,
+    request: ReturnType<typeof normalizeRequest>,
+    reservation: RouteReservation,
+    workspaceSnapshot: JobRecord['workspaceSnapshot']
+  ): JobRecord {
+    return {
+      id,
+      schemaVersion: 1,
+      status: 'queued',
+      request,
+      route: reservation.route,
+      ...(reservation.selection === undefined
+        ? {}
+        : { routePoolSelection: structuredClone(reservation.selection) }),
+      createdAt: now,
+      updatedAt: now,
+      attempt: 0,
+      events: [
+        {
+          sequence: 1,
+          jobId: id,
+          at: now,
+          type: 'job.queued',
+          data: { source: request.source ?? 'unknown' },
+        },
+      ],
+      execution: structuredClone(this.#execution),
+      ...(workspaceSnapshot === undefined ? {} : { workspaceSnapshot }),
+    };
   }
 
   #activate(

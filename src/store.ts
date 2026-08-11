@@ -8,6 +8,8 @@ import {
   SqliteDurableRecordStore,
   SqliteDurableStoreAdapter,
   IdempotencyConflictError,
+  type DurableAdmissionResult,
+  type DurableRoutePoolAdmissionOptions,
   type IdempotentCreateResult,
   type OpenDurableStoreOptions,
 } from './durable-record-store.js';
@@ -161,6 +163,12 @@ export class SqliteJobStore
   extends SqliteDurableStoreAdapter<JobRecord>
   implements JobStore
 {
+  admitRoutePool(
+    options: DurableRoutePoolAdmissionOptions<JobRecord>
+  ): Promise<DurableAdmissionResult<JobRecord>> {
+    return this.backend.admitRoutePool(options);
+  }
+
   static async open(
     directory: string,
     options: OpenDurableStoreOptions & { importLegacy?: boolean } = {}

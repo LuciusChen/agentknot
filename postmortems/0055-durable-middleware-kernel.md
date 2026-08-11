@@ -43,7 +43,7 @@ Durability does not make AgentKnot a controller or an agent-chat product. It mak
 - A service manager becomes an optional hosting choice, not a correctness prerequisite or controller-installation side effect.
 - Recovery semantics become explicit and testable, but require transactional storage, fencing, idempotency, and scheduler work before the old ownership path can be removed.
 - Existing JSON snapshots remain readable during the cutover. They are not a permanent second write path; the migration gate requires one authoritative durable store and removal of stale compiled/test output.
-- Route capacity must eventually be computed from durable active leases, not one process's counters, before multiple execution hosts may claim production support.
+- Production route-pool activity is now computed atomically from durable active Job leases ([decision 0061](./0061-atomic-durable-route-pool-admission.md)); the remaining global child/reviewer/leaf admission limit and waiting queue must also become durable before multiple execution hosts may claim production support.
 
 The first foundation review exposed five correctness gaps before commit: cancellation could race into success, released leases reused fence `1`, record admission and first lease were separate transactions, legacy filenames could disagree with payload identity, and in-process wait races left timeout timers alive. The corrected foundation now atomically admits record/idempotency/first lease, rejects success after accepted cancellation, retains an inactive lease row so later claims increment the fence, validates migration identity, and uses durable polling without detached wait timers. Job and Orchestration lease/cancellation mechanics share one lifecycle owner rather than duplicated loops.
 

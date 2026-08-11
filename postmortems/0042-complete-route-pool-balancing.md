@@ -7,6 +7,8 @@
 - Owners: AgentKnot maintainers
 - Related: [decision 0001](./0001-vendor-neutral-control-plane.md), [decision 0020](./0020-human-authored-active-route-selection.md), [decision 0041](./0041-native-opencode-worker-portability.md), [PRD](../docs/PRD.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md)
 
+Durability update: [decision 0061](./0061-atomic-durable-route-pool-admission.md) supersedes the process-local counter/cursor implementation for the production SQLite Job store. This record remains the route-pool semantic origin and historical delivery evidence.
+
 ## Context
 
 AgentKnot now has two real downstream runtime protocols: Pi RPC and native OpenCode JSON. A provider plugin or multiple keys inside Pi would still be one worker runtime; the requested load-balancing boundary must survive replacement of Pi, OpenCode, provider, model, and credential mechanisms.

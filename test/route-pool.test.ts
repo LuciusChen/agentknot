@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import { createAdapters } from '../src/adapters/index.js';
 import type { AgentKnotConfig } from '../src/config.js';
 import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
-import { MemoryJobStore } from '../src/store.js';
+import { MemoryJobStore, SqliteJobStore } from '../src/store.js';
 import type {
   JobRecord,
   ResolvedRoute,
@@ -183,4 +186,141 @@ test('adapter lookup and terminal persistence failures release their exact reser
   assert.equal(recovered.job.route.name, 'route-a');
   assert.deepEqual(recovered.job.routePoolSelection?.activeBefore, { 'route-a': 0, 'route-b': 0 });
   assert.equal((await recovered.completion).status, 'succeeded');
+});
+
+test('durable route-pool admission serializes selection with the first Job lease', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-durable-route-pool-'));
+  const firstStore = await SqliteJobStore.open(directory);
+  const secondStore = await SqliteJobStore.open(directory, { importLegacy: false });
+  const config = poolConfig(80);
+  const first = new Orchestrator({ config, store: firstStore, adapters: createAdapters(config) });
+  const second = new Orchestrator({ config, store: secondStore, adapters: createAdapters(config) });
+
+  try {
+    const [left, right] = await Promise.all([
+      first.start({ prompt: 'left', workspace: process.cwd(), route: 'balanced' }),
+      second.start({ prompt: 'right', workspace: process.cwd(), route: 'balanced' }),
+    ]);
+
+    assert.deepEqual(new Set([left.job.route.name, right.job.route.name]), new Set(['route-a', 'route-b']));
+    const selections = [left.job.routePoolSelection!, right.job.routePoolSelection!];
+    assert.equal(
+      selections.filter((selection) => Object.values(selection.activeBefore).every((value) => value === 0)).length,
+      1
+    );
+    assert.equal(
+      selections.filter((selection) => Object.values(selection.activeBefore).some((value) => value === 1)).length,
+      1
+    );
+    await Promise.all([left.completion, right.completion]);
+  } finally {
+    await Promise.all([firstStore.close(), secondStore.close()]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('durable route-pool activity includes an exact member admitted by another store', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-durable-exact-route-'));
+  const firstStore = await SqliteJobStore.open(directory);
+  const secondStore = await SqliteJobStore.open(directory, { importLegacy: false });
+  const config = poolConfig(80);
+  const first = new Orchestrator({ config, store: firstStore, adapters: createAdapters(config) });
+  const second = new Orchestrator({ config, store: secondStore, adapters: createAdapters(config) });
+
+  try {
+    const exact = await first.start({ prompt: 'exact', workspace: process.cwd(), route: 'route-a' });
+    const pooled = await second.start({ prompt: 'pooled', workspace: process.cwd(), route: 'balanced' });
+    assert.equal(pooled.job.route.name, 'route-b');
+    assert.deepEqual(pooled.job.routePoolSelection?.activeBefore, { 'route-a': 1, 'route-b': 0 });
+    await Promise.all([exact.completion, pooled.completion]);
+  } finally {
+    await Promise.all([firstStore.close(), secondStore.close()]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('durable route-pool cursor survives execution-owner replacement', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-durable-route-cursor-'));
+  const config = poolConfig(0);
+  let firstStore: SqliteJobStore | undefined = await SqliteJobStore.open(directory);
+  try {
+    const first = new Orchestrator({ config, store: firstStore, adapters: createAdapters(config) });
+    const initial = await first.start({ prompt: 'initial', workspace: process.cwd(), route: 'balanced' });
+    assert.equal(initial.job.route.name, 'route-a');
+    await initial.completion;
+    await firstStore.close();
+    firstStore = undefined;
+
+    const secondStore = await SqliteJobStore.open(directory, { importLegacy: false });
+    try {
+      const second = new Orchestrator({ config, store: secondStore, adapters: createAdapters(config) });
+      const resumed = await second.start({ prompt: 'resumed', workspace: process.cwd(), route: 'balanced' });
+      assert.equal(resumed.job.route.name, 'route-b');
+      assert.deepEqual(resumed.job.routePoolSelection?.activeBefore, { 'route-a': 0, 'route-b': 0 });
+      await resumed.completion;
+    } finally {
+      await secondStore.close();
+    }
+  } finally {
+    await firstStore?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('durable idempotent pool admission reuses its exact route without advancing rotation', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-durable-route-idempotency-'));
+  const firstStore = await SqliteJobStore.open(directory);
+  const secondStore = await SqliteJobStore.open(directory, { importLegacy: false });
+  const config = poolConfig(0);
+  const first = new Orchestrator({ config, store: firstStore, adapters: createAdapters(config) });
+  const second = new Orchestrator({ config, store: secondStore, adapters: createAdapters(config) });
+
+  try {
+    const request = {
+      prompt: 'idempotent pool request',
+      workspace: process.cwd(),
+      route: 'balanced',
+      idempotencyKey: 'route-pool-idempotency',
+    };
+    const initial = await first.start(request);
+    const duplicate = await second.start(request);
+    assert.equal(duplicate.job.id, initial.job.id);
+    assert.equal(duplicate.job.route.name, 'route-a');
+    await Promise.all([initial.completion, duplicate.completion]);
+
+    const next = await second.start({ prompt: 'next', workspace: process.cwd(), route: 'balanced' });
+    assert.equal(next.job.route.name, 'route-b');
+    assert.equal(next.job.routePoolSelection?.cursorBefore, 1);
+    await next.completion;
+  } finally {
+    await Promise.all([firstStore.close(), secondStore.close()]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('durable route selection and cursor roll back when Job admission fails', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-durable-route-rollback-'));
+  const store = await SqliteJobStore.open(directory);
+  const config = poolConfig(0);
+  const adapters = new Map<string, WorkerAdapter>([
+    ['workerB', new CountingAdapter('workerB')],
+  ]);
+  const jobs = new Orchestrator({ config, store, adapters });
+
+  try {
+    await assert.rejects(
+      jobs.start({ prompt: 'missing selected adapter', workspace: process.cwd(), route: 'balanced' }),
+      (error: unknown) => error instanceof JobPersistenceError
+    );
+    adapters.set('workerA', new CountingAdapter('workerA'));
+
+    const admitted = await jobs.start({ prompt: 'after rollback', workspace: process.cwd(), route: 'balanced' });
+    assert.equal(admitted.job.route.name, 'route-a');
+    assert.equal(admitted.job.routePoolSelection?.cursorBefore, 0);
+    assert.deepEqual(admitted.job.routePoolSelection?.activeBefore, { 'route-a': 0, 'route-b': 0 });
+    await admitted.completion;
+  } finally {
+    await store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });

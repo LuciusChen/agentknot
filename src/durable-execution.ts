@@ -2,6 +2,7 @@ import type {
   CancellationRequest,
   DurableAdmissionOptions,
   DurableAdmissionResult,
+  DurableRoutePoolAdmissionOptions,
   DurableStoredRecord,
   ExecutionLease,
 } from './durable-record-store.js';
@@ -12,6 +13,9 @@ interface RecordStore<T> {
 
 interface DurableExecutionStore<T> extends RecordStore<T> {
   admit(record: T, options: DurableAdmissionOptions): Promise<DurableAdmissionResult<T>>;
+  admitRoutePool?(
+    options: DurableRoutePoolAdmissionOptions<T>
+  ): Promise<DurableAdmissionResult<T>>;
   save(record: T, lease?: ExecutionLease, now?: Date): Promise<void>;
   claimLease(
     recordId: string,
@@ -75,6 +79,10 @@ export class DurableExecutionCoordinator<T extends DurableStoredRecord> {
     return this.#durable !== undefined;
   }
 
+  get routePoolAdmissionEnabled(): boolean {
+    return this.#durable?.admitRoutePool !== undefined;
+  }
+
   async admit(
     record: T,
     options: Omit<DurableAdmissionOptions, 'ttlMs' | 'now'>
@@ -85,6 +93,18 @@ export class DurableExecutionCoordinator<T extends DurableStoredRecord> {
       now: this.#now(),
     });
     if (result?.created) this.#leases.set(record.id, result.lease);
+    return result;
+  }
+
+  async admitRoutePool(
+    options: Omit<DurableRoutePoolAdmissionOptions<T>, 'ttlMs' | 'now'>
+  ): Promise<DurableAdmissionResult<T> | undefined> {
+    const result = await this.#durable?.admitRoutePool?.({
+      ...options,
+      ttlMs: this.#leaseTtlMs,
+      now: this.#now(),
+    });
+    if (result?.created) this.#leases.set(result.record.id, result.lease);
     return result;
   }
 
