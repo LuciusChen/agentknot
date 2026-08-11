@@ -56,7 +56,7 @@ The controller, worker, provider, and model are separate concepts:
 | Persistent snapshots | `JobStore` | live event listeners |
 | HTTP transport and active-request map | HTTP server | worker protocols |
 | Cursor-follow event batches and compact wait heartbeats | durable subscription kernel plus transport adapters | controller resume semantics or task resubmission |
-| Shared local execution ownership for concurrent controller clients | one independent broker runtime | controller hooks, MCP/CLI clients, or additional file-store writers |
+| Shared local execution ownership for concurrent controller clients | one independent broker runtime | controller packages, MCP/CLI clients, or additional file-store writers |
 | Explicit local broker lifecycle | `broker run|up|status|down` around the same compiled entry, with exact instance identity | kernel semantics, controller policy, OS service configuration, shell profiles, or worker credentials |
 | Artifact listing, verification, and preview | orchestrator/workspace manager | worker adapter or execution loop |
 | Terminal completion summary and provenance ordering | orchestrator with workspace-manager artifact evidence | worker adapter/provider claims |
@@ -103,9 +103,9 @@ Lease expiry means ownership evidence was lost; it does not by itself mean the t
 
 ### Kernel and adapter convergence
 
-One orchestration kernel owns admission, deterministic policy/routing, scheduling, durable transitions, isolation, cancellation intent, completion, and artifact evidence. TypeScript may call it directly; CLI and HTTP expose it; `agentknot mcp` is a stdio client over the selected broker. Prompt hooks and controller packages are optional presentation edges. Entry transports do not own a second scheduler, state machine, route policy, or active-work truth.
+One orchestration kernel owns admission, deterministic policy/routing, scheduling, durable transitions, isolation, cancellation intent, completion, and artifact evidence. TypeScript may call it directly; CLI and HTTP expose it; `agentknot mcp` is a stdio client over the selected broker. Controller packages and native Skills are optional presentation edges; packages install no prompt hooks. Entry transports do not own a second scheduler, state machine, route policy, or active-work truth.
 
-Correctness does not require a shell-profile edit, systemd, launchd, a Unix-domain socket, or one controller process. `broker run` hosts the foreground kernel; `broker up` explicitly launches that same entry as an application-managed process and waits for exact readiness. Containers and external supervisors may host `broker run`, but AgentKnot installs no OS service definition. Controller-native Skills describe the strict handoff and common MCP/CLI/HTTP operations without per-prompt hidden-context injection.
+Correctness does not require a shell-profile edit, systemd, launchd, a Unix-domain socket, or one controller process. `broker run` hosts the foreground kernel; `broker up` explicitly launches that same entry as an application-managed process and waits for exact readiness. A failed or concurrent losing startup supervises only its exact spawned child through bounded termination and confirmed exit before returning. Containers and external supervisors may host `broker run`, but AgentKnot installs no OS service definition. Controller-native Skills describe the strict handoff and common MCP/CLI/HTTP operations without per-prompt hidden-context injection.
 
 ### Migration gates
 

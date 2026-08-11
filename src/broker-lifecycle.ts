@@ -12,6 +12,8 @@ import {
 
 const DEFAULT_START_TIMEOUT_MS = 10_000;
 const DEFAULT_STOP_TIMEOUT_MS = 15_000;
+const STARTUP_CHILD_SIGTERM_GRACE_MS = 100;
+const STARTUP_CHILD_SIGKILL_WAIT_MS = 1_000;
 const POLL_INTERVAL_MS = 100;
 
 export type BrokerStatus =
@@ -160,6 +162,61 @@ function stopPid(pid: number): void {
   }
 }
 
+function childExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (childExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (exited: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      child.off('exit', onExit);
+      child.off('error', onError);
+      resolve(exited);
+    };
+    const onExit = (): void => finish(true);
+    const onError = (): void => {
+      // A spawn/kill error does not prove that the exact child has exited. Keep waiting for
+      // its exit event or the bounded deadline before escalating or reporting cleanup failure.
+    };
+    timer = setTimeout(() => finish(childExited(child)), timeoutMs);
+    child.once('exit', onExit);
+    child.once('error', onError);
+    if (childExited(child)) finish(true);
+  });
+}
+
+async function terminateStartupChild(child: ChildProcess): Promise<void> {
+  if (childExited(child)) return;
+
+  let terminationError: unknown;
+  try {
+    child.kill('SIGTERM');
+  } catch (error) {
+    terminationError = error;
+  }
+  if (await waitForChildExit(child, STARTUP_CHILD_SIGTERM_GRACE_MS)) return;
+
+  if (!childExited(child)) {
+    try {
+      child.kill('SIGKILL');
+    } catch (error) {
+      terminationError ??= error;
+    }
+  }
+  if (await waitForChildExit(child, STARTUP_CHILD_SIGKILL_WAIT_MS)) return;
+
+  const detail = terminationError === undefined ? '' : `: ${errorMessage(terminationError)}`;
+  throw new Error(
+    `AgentKnot broker startup child ${String(child.pid)} did not exit after cleanup${detail}`
+  );
+}
+
 export async function startBroker(
   options: BrokerLifecycleOptions
 ): Promise<BrokerStartResult> {
@@ -203,27 +260,67 @@ export async function startBroker(
     );
   }
   const child = detachedChild(options, loaded.path, port);
-  if (child.pid === undefined) throw new Error('AgentKnot broker process did not receive a PID');
+  let childError: Error | undefined;
+  let childCleanupAttempted = false;
+  const onChildError = (error: Error): void => {
+    childError = error;
+  };
+  child.once('error', onChildError);
 
-  const deadline = Date.now() + startTimeoutMs;
-  while (Date.now() < deadline) {
-    const status = await readBrokerStatus(options);
-    if (status.state === 'running') {
-      return {
-        action: status.pid === child.pid ? 'started' : 'already-running',
-        broker: status,
-      };
+  try {
+    if (child.pid === undefined) {
+      if (childError !== undefined) {
+        throw new Error(`AgentKnot broker process failed to start: ${childError.message}`, {
+          cause: childError,
+        });
+      }
+      throw new Error('AgentKnot broker process did not receive a PID');
     }
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error(
-        `AgentKnot broker exited before becoming ready (${String(child.exitCode ?? child.signalCode)})`
-      );
+
+    const deadline = Date.now() + startTimeoutMs;
+    while (Date.now() < deadline) {
+      if (childError !== undefined) {
+        throw new Error(`AgentKnot broker process failed to start: ${childError.message}`, {
+          cause: childError,
+        });
+      }
+      const status = await readBrokerStatus(options);
+      if (status.state === 'running') {
+        if (status.pid !== child.pid) {
+          childCleanupAttempted = true;
+          await terminateStartupChild(child);
+        }
+        return {
+          action: status.pid === child.pid ? 'started' : 'already-running',
+          broker: status,
+        };
+      }
+      if (childExited(child)) {
+        throw new Error(
+          `AgentKnot broker exited before becoming ready (${String(child.exitCode ?? child.signalCode)})`
+        );
+      }
+      await delay(POLL_INTERVAL_MS);
     }
-    await delay(POLL_INTERVAL_MS);
+
+    throw new Error(`AgentKnot broker did not become ready within ${startTimeoutMs}ms`);
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    if (child.pid !== undefined && !childExited(child) && !childCleanupAttempted) {
+      childCleanupAttempted = true;
+      try {
+        await terminateStartupChild(child);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [failure, cleanupError],
+          'AgentKnot broker startup cleanup failed'
+        );
+      }
+    }
+    throw failure;
+  } finally {
+    child.off('error', onChildError);
   }
-
-  stopPid(child.pid);
-  throw new Error(`AgentKnot broker did not become ready within ${startTimeoutMs}ms`);
 }
 
 export async function stopBroker(

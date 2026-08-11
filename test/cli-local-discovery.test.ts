@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { once } from 'node:events';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
+import { startBroker } from '../src/broker-lifecycle.js';
 import { readBrokerLaunchProfile } from '../src/broker-profile.js';
 import {
   readLocalDiscovery,
@@ -338,6 +339,46 @@ test('explicit broker lifecycle starts one detached cross-controller broker and 
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
       }
+    }
+    await removeFixture(fixture);
+  }
+});
+
+test('broker startup reaps the exact child that misses readiness despite SIGTERM', async () => {
+  const fixture = await createFixture();
+  let child: ChildProcess | undefined;
+  try {
+    const configPath = await writeConfig(fixture, 'startup-cleanup', 'startup-cleanup');
+    const stubbornChild = 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);';
+    const spawnProcess = ((
+      _command: string,
+      _args: readonly string[] | undefined,
+      spawnOptions: SpawnOptions = {}
+    ): ChildProcess => {
+      const spawned = spawn(process.execPath, ['-e', stubbornChild], spawnOptions);
+      child = spawned;
+      return spawned;
+    }) as unknown as typeof spawn;
+    const startedAt = Date.now();
+    await assert.rejects(
+      startBroker({
+        cliEntryPath: cliPath,
+        configPath,
+        port: 0,
+        environment: fixture.environment,
+        startTimeoutMs: 120,
+        spawnProcess,
+      }),
+      /did not become ready within 120ms/
+    );
+    assert.ok(Date.now() - startedAt < 2_000, 'startup cleanup must remain bounded');
+    assert.ok(child);
+    assert.ok(child.exitCode !== null || child.signalCode !== null, 'exact child must be reaped');
+    assert.equal(await readLocalDiscovery({ environment: fixture.environment }), undefined);
+  } finally {
+    if (child !== undefined && child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await once(child, 'exit');
     }
     await removeFixture(fixture);
   }

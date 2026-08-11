@@ -34,7 +34,6 @@ import {
 import {
   parseRequiredWorkerCompletionOutput,
   WORKER_COMPLETION_REPORT_INSTRUCTION,
-  WORKER_COMPLETION_REPORT_MARKER,
 } from '../worker-completion-report.js';
 
 interface PiRpcEvent {
@@ -319,10 +318,6 @@ function childExitError(
 
 const LIVE_PROBE_PROMPT =
   'This is a bounded AgentKnot live inference probe. Reply with exactly "AgentKnot live inference probe succeeded." and do not use tools or modify files.';
-
-/** Backward-compatible names for the route-neutral worker completion contract. */
-export const PI_WORKER_COMPLETION_REPORT_MARKER = WORKER_COMPLETION_REPORT_MARKER;
-export const PI_WORKER_COMPLETION_REPORT_INSTRUCTION = WORKER_COMPLETION_REPORT_INSTRUCTION;
 
 export class PiRpcWorkerAdapter implements WorkerAdapter {
   readonly name: string;
@@ -743,7 +738,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           rpcLine({ id: 'thinking', type: 'set_thinking_level', level: input.route.thinkingLevel })
         );
       }
-      const prompt = `${input.prompt}\n\n${PI_WORKER_COMPLETION_REPORT_INSTRUCTION}`;
+      const prompt = `${input.prompt}\n\n${WORKER_COMPLETION_REPORT_INSTRUCTION}`;
       child.stdin.write(rpcLine({ id: 'prompt', type: 'prompt', message: prompt }));
       await settled;
       if (assistantError) throw new Error(assistantError);
