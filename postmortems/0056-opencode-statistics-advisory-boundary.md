@@ -36,4 +36,5 @@ This changes only observability authority. It does not add a fallback route, swi
 
 - [x] Deterministic OpenCode fixture covers valid completion with invalid provider statistics.
 - [x] Existing missing-envelope, malformed JSONL, error, incomplete, nonzero, cancellation, timeout, and exact valid-statistics cases remain strict.
-- [ ] After package rollout, run one bounded real native OpenCode Job and confirm that accounting-schema drift produces partial usage coverage without changing an otherwise valid terminal result.
+- [x] After rollout, bounded real Job `job_8509e1c2-88ca-4418-80ea-2c0bd53adea7` succeeded through native OpenCode Go / `gpt-5.6-luna` / `max` with one valid completion envelope, exact valid statistics, an integrity-valid empty artifact, and no source change.
+- [ ] On the next naturally occurring provider accounting-schema mismatch, confirm the persisted terminal record reports partial usage coverage without changing an otherwise valid result; do not fabricate provider drift or spend another repository task solely to force this evidence.
