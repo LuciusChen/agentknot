@@ -1,37 +1,15 @@
 {
-  "description": "Check configured AgentKnot delegation policy before the controller-model turn.",
+  "description": "Remind the controller to use the independent AgentKnot broker for eligible work.",
   "hooks": {
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" claude '/agentknot:agentknot-delegate'",
-            "timeout": 3
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" claude '/agentknot:agentknot-delegate'",
-            "timeout": 10,
-            "statusMessage": "AgentKnot is checking workspace delegation policy",
-            "additionalContextLimit": 18000
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.mjs\" claude '/agentknot:agentknot-delegate'",
-            "timeout": 5
+            "timeout": 2,
+            "statusMessage": "Applying AgentKnot delegation guard",
+            "additionalContextLimit": 4000
           }
         ]
       }

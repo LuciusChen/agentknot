@@ -144,9 +144,9 @@ export class AgentKnotRuntime {
     return recovery;
   }
 
-  reconcileInterruptedOrchestrations(): Promise<OrchestrationRecord[]> {
+  recoverInterruptedOrchestrations(): Promise<OrchestrationRecord[]> {
     this.#assertExecutionOwner();
-    return this.#track(this.orchestrations.reconcileInterruptedOrchestrations());
+    return this.#track(this.orchestrations.recoverInterruptedOrchestrations());
   }
 
   delegationPolicy(): DelegationConfig {
@@ -287,7 +287,7 @@ export async function createRuntime(options: CreateRuntimeOptions = {}): Promise
       store: orchestrationStore,
     });
     if (executionEnabled) {
-      await orchestrations.reconcileInterruptedOrchestrations({ exclusiveOwner: true });
+      await orchestrations.recoverInterruptedOrchestrations({ waitForLease: true });
     }
     return new AgentKnotRuntime(jobs, orchestrations, {
       ...(ownership === undefined ? {} : { ownership }),

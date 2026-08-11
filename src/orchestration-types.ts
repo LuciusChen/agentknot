@@ -125,6 +125,7 @@ export interface DelegationPlan {
 
 export const ORCHESTRATION_EVENT_TYPES = [
   'orchestration.queued',
+  'orchestration.recovery.started',
   'orchestration.handoff.accepted',
   'orchestration.dispatching',
   'orchestration.child.started',

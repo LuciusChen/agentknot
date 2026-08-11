@@ -2,14 +2,19 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { readLocalDiscovery, type LocalDiscoveryEnvironment } from '../src/local-discovery.js';
+import { readBrokerLaunchProfile } from '../src/broker-profile.js';
+import {
+  readLocalDiscovery,
+  resolveLocalDiscoveryPaths,
+  type LocalDiscoveryEnvironment,
+} from '../src/local-discovery.js';
 
 const execFileAsync = promisify(execFile);
 const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
@@ -245,6 +250,167 @@ test('two selector-free CLI processes discover and share one registered server',
     assert.notEqual(firstRecord.id, secondRecord.id);
   } finally {
     if (server !== undefined) await stopServer(server);
+    await removeFixture(fixture);
+  }
+});
+
+test('explicit broker lifecycle starts one detached cross-controller broker and stops it cleanly', async () => {
+  const fixture = await createFixture();
+  let brokerPid: number | undefined;
+  try {
+    const configPath = await writeConfig(fixture, 'broker', 'broker');
+    const started = await runCli(fixture, [
+      'broker',
+      'up',
+      '--port',
+      '0',
+      '--config',
+      configPath,
+      '--json',
+    ]);
+    assert.equal(started.code, 0, started.stderr);
+    const startResult = JSON.parse(started.stdout) as {
+      action: string;
+      broker: { state: string; url: string; pid: number; instanceId: string };
+    };
+    assert.equal(startResult.action, 'started');
+    assert.equal(startResult.broker.state, 'running');
+    brokerPid = startResult.broker.pid;
+    assert.deepEqual(await readBrokerLaunchProfile({ environment: fixture.environment }), {
+      schemaVersion: 1,
+      configPath,
+      port: 0,
+    });
+
+    const status = await runCli(fixture, ['broker', 'status', '--json']);
+    assert.equal(status.code, 0, status.stderr);
+    assert.deepEqual(JSON.parse(status.stdout), startResult.broker);
+
+    const secondUp = await runCli(fixture, [
+      'broker',
+      'up',
+      '--port',
+      '0',
+      '--config',
+      configPath,
+      '--json',
+    ]);
+    assert.equal(secondUp.code, 0, secondUp.stderr);
+    const secondResult = JSON.parse(secondUp.stdout) as typeof startResult;
+    assert.equal(secondResult.action, 'already-running');
+    assert.equal(secondResult.broker.instanceId, startResult.broker.instanceId);
+    assert.equal(secondResult.broker.pid, brokerPid);
+
+    const runClient = (source: string, prompt: string) =>
+      runCli(fixture, [
+        'orchestrate',
+        '--source',
+        source,
+        '--workspace',
+        fixture.workspace,
+        '--delegation',
+        'never',
+        '--assessment-json',
+        upstreamAssessmentJson,
+        '--handoff-json',
+        '--prompt',
+        prompt,
+      ]);
+    const [codex, claude] = await Promise.all([
+      runClient('codex', 'detached broker request'),
+      runClient('claude', 'independent controller request'),
+    ]);
+    assert.equal(codex.code, 0, codex.stderr);
+    assert.equal(claude.code, 0, claude.stderr);
+
+    const stopped = await runCli(fixture, ['broker', 'down', '--json']);
+    assert.equal(stopped.code, 0, stopped.stderr);
+    assert.deepEqual(JSON.parse(stopped.stdout), { action: 'stopped' });
+    brokerPid = undefined;
+    assert.equal(await readLocalDiscovery({ environment: fixture.environment }), undefined);
+    const after = await runCli(fixture, ['broker', 'status', '--json']);
+    assert.equal(after.code, 0, after.stderr);
+    assert.deepEqual(JSON.parse(after.stdout), { state: 'stopped' });
+  } finally {
+    if (brokerPid !== undefined) {
+      try {
+        process.kill(brokerPid, 'SIGTERM');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+    }
+    await removeFixture(fixture);
+  }
+});
+
+test('broker down removes a stale crash record without touching an unidentified process', async () => {
+  const fixture = await createFixture();
+  let brokerPid: number | undefined;
+  try {
+    const configPath = await writeConfig(fixture, 'crash', 'crash');
+    const started = await runCli(fixture, [
+      'broker',
+      'up',
+      '--port',
+      '0',
+      '--config',
+      configPath,
+      '--json',
+    ]);
+    assert.equal(started.code, 0, started.stderr);
+    brokerPid = (JSON.parse(started.stdout) as { broker: { pid: number } }).broker.pid;
+    process.kill(brokerPid, 'SIGKILL');
+    brokerPid = undefined;
+
+    let unavailable!: CliResult;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      unavailable = await runCli(fixture, ['broker', 'status', '--json']);
+      if ((JSON.parse(unavailable.stdout) as { state: string }).state === 'unavailable') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(unavailable.code, 1);
+    assert.equal((JSON.parse(unavailable.stdout) as { state: string }).state, 'unavailable');
+
+    const stopped = await runCli(fixture, ['broker', 'down', '--json']);
+    assert.equal(stopped.code, 0, stopped.stderr);
+    assert.deepEqual(JSON.parse(stopped.stdout), { action: 'stale-record-removed' });
+    assert.equal(await readLocalDiscovery({ environment: fixture.environment }), undefined);
+  } finally {
+    if (brokerPid !== undefined) {
+      try {
+        process.kill(brokerPid, 'SIGKILL');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+    }
+    await removeFixture(fixture);
+  }
+});
+
+test('broker up refuses malformed discovery ownership instead of replacing or timing out', async () => {
+  const fixture = await createFixture();
+  try {
+    const configPath = await writeConfig(fixture, 'malformed', 'malformed');
+    const paths = await resolveLocalDiscoveryPaths({ environment: fixture.environment });
+    await mkdir(paths.directory, { recursive: true, mode: 0o700 });
+    await chmod(paths.directory, 0o700);
+    await writeFile(paths.recordPath, '{"not":"an identity"}\n', { mode: 0o600 });
+
+    const startedAt = Date.now();
+    const refused = await runCli(fixture, [
+      'broker',
+      'up',
+      '--port',
+      '0',
+      '--config',
+      configPath,
+      '--json',
+    ]);
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /cannot be identified safely/);
+    assert.ok(Date.now() - startedAt < 2_000, 'malformed ownership should fail before spawning');
+    assert.equal(await readFile(paths.recordPath, 'utf8'), '{"not":"an identity"}\n');
+  } finally {
     await removeFixture(fixture);
   }
 });

@@ -9,7 +9,6 @@ import {
 } from './durable-record-store.js';
 import { DurableExecutionCoordinator } from './durable-execution.js';
 import { MAX_ARTIFACT_VALIDATION_PATCH_BYTES } from './artifact-validation.js';
-import { isExecutorProcessAlive } from './execution.js';
 import { assertJsonMetadata } from './metadata.js';
 import {
   MAX_PROMPT_BYTES,
@@ -136,6 +135,21 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function delayWithSignal(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error('Orchestration recovery aborted'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
   if (typeof request.prompt !== 'string' || request.prompt.trim() === '') {
     throw new Error('Orchestration prompt must be a non-empty string');
@@ -250,6 +264,10 @@ export class OrchestrationService {
     await Promise.allSettled(active.map((item) => item.completion));
   }
 
+  hasActiveOrchestrations(): boolean {
+    return this.#activeOrchestrations.size > 0;
+  }
+
   async #waitUntilTerminal(id: string): Promise<OrchestrationRecord> {
     while (true) {
       const record = await this.#store.get(id);
@@ -273,76 +291,131 @@ export class OrchestrationService {
     );
   }
 
-  async reconcileInterruptedOrchestrations(
-    options: { exclusiveOwner?: boolean } = {}
+  async recoverInterruptedOrchestrations(
+    options: { waitForLease?: boolean; signal?: AbortSignal } = {}
   ): Promise<OrchestrationRecord[]> {
-    const reconciled: OrchestrationRecord[] = [];
-    for (const record of await this.#store.list()) {
-      // `planning` is accepted only for historical schemaVersion 1 snapshots.
-      if (!['queued', 'planning', 'dispatching'].includes(record.status)) continue;
-      if (!options.exclusiveOwner && isExecutorProcessAlive(record.execution)) continue;
-
-      const previousStatus = record.status;
-      const message =
-        'A new AgentKnot runtime found this orchestration without a terminal state; v1 does not resume or redispatch interrupted plans';
-      record.status = 'failed';
-      record.completedAt = this.#now().toISOString();
-      record.error = { name: 'ExecutionInterruptedError', message };
-      delete record.result;
-      for (const child of record.children) {
-        const job = await this.#jobs.get(child.jobId);
-        if (!job) {
-          child.status = 'failed';
-          child.error = {
-            name: 'MissingChildJobError',
-            message: `Child job record was not found during restart reconciliation: ${child.jobId}`,
-            attempt: 0,
-            retryable: false,
-          };
-          delete child.output;
+    if (!this.#durability.enabled) {
+      throw new Error('Orchestration recovery requires a durable execution store');
+    }
+    const recovered: OrchestrationRecord[] = [];
+    for (const listed of await this.#store.list()) {
+      if (!['queued', 'planning', 'dispatching'].includes(listed.status)) continue;
+      if (this.#activeOrchestrations.has(listed.id)) continue;
+      const lease = await this.#claimRecoveryLease(listed.id, options);
+      if (lease === undefined) continue;
+      let record = listed;
+      let activated = false;
+      try {
+        const current = await this.#store.get(record.id);
+        if (current === undefined) {
+          throw new Error(`Orchestration ${record.id} disappeared after its recovery lease was claimed`);
+        }
+        if (terminal(current.status)) continue;
+        record = current;
+        const previousStatus = record.status;
+        const previousExecution = record.execution;
+        if (
+          previousStatus === 'planning' ||
+          record.plan === undefined ||
+          (record.plan.willDispatch && record.workspaceSnapshot === undefined)
+        ) {
+          const message =
+            previousStatus === 'planning'
+              ? 'Historical planning-state Orchestration cannot be recovered without an admitted plan boundary'
+              : 'Orchestration has no immutable admitted plan and workspace boundary for recovery';
+          await this.#settleRecoveryFailure(record, message, previousStatus);
+          recovered.push(structuredClone(record));
           continue;
         }
-        child.status = job.status;
-        if (job.result) child.output = job.result.output;
-        else delete child.output;
-        if (job.error) child.error = structuredClone(job.error);
-        else delete child.error;
-      }
-      if (record.qualityReview?.status === 'pending') {
-        record.qualityReview = {
-          status: 'unavailable',
-          route: record.qualityReview.route,
-          childJobId: record.qualityReview.childJobId,
-          reviewerJobId: record.qualityReview.reviewerJobId,
-          reason: 'runtime-restart',
+        record.execution = {
+          runtimeId: this.#runtimeId,
+          pid: process.pid,
+          startedAt: this.#now().toISOString(),
         };
-        await this.#appendEvent(record, 'orchestration.review.unavailable', {
-          reviewerJobId: record.qualityReview.reviewerJobId,
-          reason: record.qualityReview.reason,
+        await this.#appendEvent(record, 'orchestration.recovery.started', {
+          previousStatus,
+          previousRuntimeId: previousExecution.runtimeId,
+          recoveryFence: lease.fence,
+          planHash: record.plan.planHash,
         });
+        const controller = new AbortController();
+        const cancellation = await this.#durability.getCancellation(record.id);
+        if (cancellation !== undefined) {
+          record.cancelRequestedAt = cancellation.requestedAt;
+          await this.#appendEvent(
+            record,
+            'orchestration.cancel.requested',
+            { source: cancellation.source },
+            cancellation.requestedAt
+          );
+          controller.abort(new Error('Orchestration cancelled before recovery'));
+        }
+        const started = this.#activate(record, controller);
+        activated = true;
+        recovered.push(started.orchestration);
+      } finally {
+        if (!activated) await this.#durability.release(record.id);
       }
-      if (record.artifactValidation?.status === 'pending') {
-        record.artifactValidation = {
-          status: 'unavailable',
-          childJobId: record.artifactValidation.childJobId,
-          artifact: record.artifactValidation.artifact,
-          reason: 'runtime-restart',
-          cleanup: 'not-confirmed',
-        };
-        await this.#appendEvent(record, 'orchestration.artifact-validation.unavailable', {
-          childJobId: record.artifactValidation.childJobId,
-          reason: record.artifactValidation.reason,
-        });
-      }
-      await this.#appendEvent(
-        record,
-        'orchestration.failed',
-        { name: 'ExecutionInterruptedError', message, reason: 'runtime_restart', previousStatus },
-        record.completedAt
-      );
-      reconciled.push(structuredClone(record));
     }
-    return reconciled;
+    return recovered;
+  }
+
+  async #claimRecoveryLease(
+    recordId: string,
+    options: { waitForLease?: boolean; signal?: AbortSignal }
+  ): Promise<Awaited<ReturnType<DurableExecutionCoordinator<OrchestrationRecord>['claim']>>> {
+    while (true) {
+      if (options.signal?.aborted) throw options.signal.reason;
+      const claimed = await this.#durability.claim(recordId, this.#runtimeId);
+      if (claimed !== undefined || options.waitForLease !== true) return claimed;
+      const current = await this.#durability.getLease(recordId);
+      const expiresAt = current === undefined ? NaN : Date.parse(current.expiresAt);
+      const waitMs = Number.isFinite(expiresAt)
+        ? Math.max(1, expiresAt - this.#now().getTime())
+        : 1;
+      await delayWithSignal(waitMs, options.signal);
+    }
+  }
+
+  async #settleRecoveryFailure(
+    record: OrchestrationRecord,
+    message: string,
+    previousStatus: OrchestrationRecord['status']
+  ): Promise<void> {
+    for (const child of record.children) {
+      if (terminal(child.status)) continue;
+      const job = await this.#jobs.get(child.jobId);
+      if (job === undefined || !terminal(job.status)) continue;
+      child.status = job.status;
+      if (job.result !== undefined) child.output = job.result.output;
+      if (job.error !== undefined) child.error = structuredClone(job.error);
+    }
+    if (record.qualityReview?.status === 'pending') {
+      await this.#unavailableQualityReview(record, {
+        route: record.qualityReview.route,
+        childJobId: record.qualityReview.childJobId,
+        reviewerJobId: record.qualityReview.reviewerJobId,
+        reason: 'runtime-restart',
+      });
+    }
+    if (record.artifactValidation?.status === 'pending') {
+      await this.#unavailableArtifactValidation(record, {
+        childJobId: record.artifactValidation.childJobId,
+        artifact: structuredClone(record.artifactValidation.artifact),
+        reason: 'runtime-restart',
+        cleanup: 'not-confirmed',
+      });
+    }
+    record.status = 'failed';
+    record.completedAt = this.#now().toISOString();
+    record.error = { name: 'RecoveryStateError', message };
+    delete record.result;
+    await this.#appendEvent(
+      record,
+      'orchestration.failed',
+      { name: 'RecoveryStateError', message, reason: 'recovery-state-unavailable', previousStatus },
+      record.completedAt
+    );
   }
 
   async run(request: OrchestrationRequest): Promise<OrchestrationRecord> {
@@ -446,6 +519,13 @@ export class OrchestrationService {
         },
       };
     }
+    return this.#activate(record, controller);
+  }
+
+  #activate(
+    record: OrchestrationRecord,
+    controller: AbortController
+  ): StartOrchestrationResult {
     let cancellation: Promise<void> | undefined;
     const cancelWithEvidence = (
       source: string,
@@ -459,7 +539,6 @@ export class OrchestrationService {
           if (persist) {
             await this.#durability.requestCancellation(record.id, source, new Date(requestedAt));
           }
-          const previousCancelRequestedAt = record.cancelRequestedAt;
           record.cancelRequestedAt = requestedAt;
           await this.#appendEvent(
             record,
@@ -517,10 +596,10 @@ export class OrchestrationService {
         await stopLeaseMonitor();
         await this.#durability.release(record.id);
       });
-    this.#activeOrchestrations.set(id, { completion, cancel: cancelForSource });
+    this.#activeOrchestrations.set(record.id, { completion, cancel: cancelForSource });
     void completion.then(
-      () => this.#activeOrchestrations.delete(id),
-      () => this.#activeOrchestrations.delete(id)
+      () => this.#activeOrchestrations.delete(record.id),
+      () => this.#activeOrchestrations.delete(record.id)
     );
 
     return {
@@ -538,17 +617,19 @@ export class OrchestrationService {
     if (plan === undefined) {
       throw new Error(`Orchestration ${record.id} has no persisted delegation plan`);
     }
-    await this.#appendEvent(
-      record,
-      'orchestration.handoff.accepted',
-      {
-        mode: plan.mode,
-        decision: plan.decision,
-        willDispatch: plan.willDispatch,
-        subtaskCount: plan.subtasks.length,
-      },
-      record.startedAt
-    );
+    if (!record.events.some((event) => event.type === 'orchestration.handoff.accepted')) {
+      await this.#appendEvent(
+        record,
+        'orchestration.handoff.accepted',
+        {
+          mode: plan.mode,
+          decision: plan.decision,
+          willDispatch: plan.willDispatch,
+          subtaskCount: plan.subtasks.length,
+        },
+        record.startedAt
+      );
+    }
     throwIfAborted(signal);
 
     if (!plan.willDispatch || plan.subtasks.length === 0) {
@@ -574,15 +655,17 @@ export class OrchestrationService {
       return structuredClone(record);
     }
 
-    record.status = 'dispatching';
     const dispatchConcurrency = plan.assessment.parallelizable
       ? record.policy.dispatch.maxConcurrency
       : 1;
-    await this.#appendEvent(record, 'orchestration.dispatching', {
-      subtaskCount: plan.subtasks.length,
-      configuredConcurrency: record.policy.dispatch.maxConcurrency,
-      effectiveConcurrency: dispatchConcurrency,
-    });
+    if (!record.events.some((event) => event.type === 'orchestration.dispatching')) {
+      record.status = 'dispatching';
+      await this.#appendEvent(record, 'orchestration.dispatching', {
+        subtaskCount: plan.subtasks.length,
+        configuredConcurrency: record.policy.dispatch.maxConcurrency,
+        effectiveConcurrency: dispatchConcurrency,
+      });
+    }
     await this.#dispatch(record, plan.subtasks, dispatchConcurrency, signal);
     throwIfAborted(signal);
 
@@ -924,6 +1007,8 @@ export class OrchestrationService {
     }
     const child = record.children[0]!;
     const subtask = plan.subtasks[0]!;
+    const pendingReview =
+      record.qualityReview?.status === 'pending' ? record.qualityReview : undefined;
     if (child.status !== 'succeeded') {
       await this.#skipQualityReview(record, 'child-not-succeeded');
       return;
@@ -1020,27 +1105,39 @@ export class OrchestrationService {
       return;
     }
 
-    try {
-      await this.#setEvidenceAndAppend(
-        record,
-        'qualityReview',
-        {
-          status: 'pending',
-          route: config.route,
-          childJobId: child.jobId,
-          reviewerJobId: started.job.id,
-        },
-        'orchestration.review.started',
-        {
-          route: config.route,
-          childJobId: child.jobId,
-          reviewerJobId: started.job.id,
-        }
-      );
-    } catch (error) {
+    if (pendingReview !== undefined && pendingReview.reviewerJobId !== started.job.id) {
       await Promise.allSettled([started.cancel(), started.completion]);
       releaseSlot();
-      throw error;
+      throw new Error(`Orchestration ${record.id} resolved a different reviewer identity`);
+    }
+    if (pendingReview === undefined) {
+      try {
+        await this.#setEvidenceAndAppend(
+          record,
+          'qualityReview',
+          {
+            status: 'pending',
+            route: config.route,
+            childJobId: child.jobId,
+            reviewerJobId: started.job.id,
+          },
+          'orchestration.review.started',
+          {
+            route: config.route,
+            childJobId: child.jobId,
+            reviewerJobId: started.job.id,
+          }
+        );
+      } catch (error) {
+        await Promise.allSettled([started.cancel(), started.completion]);
+        releaseSlot();
+        throw error;
+      }
+    } else if (!terminal(started.job.status)) {
+      await this.#jobs.recoverInterruptedJob(started.job.id, {
+        waitForLease: true,
+        signal,
+      });
     }
 
     let reviewerJob: JobRecord;
@@ -1147,6 +1244,66 @@ export class OrchestrationService {
     );
   }
 
+  #workerIdempotencyKey(record: OrchestrationRecord, subtask: PlannedSubtask): string {
+    const plan = record.plan;
+    if (plan === undefined) throw new Error('Cannot identify a child without a persisted plan');
+    return `${record.id}:worker:${subtask.id}:${plan.planHash}`;
+  }
+
+  #workerRequest(
+    record: OrchestrationRecord,
+    subtask: PlannedSubtask
+  ): Parameters<Orchestrator['start']>[0] {
+    const plan = record.plan;
+    if (plan === undefined) throw new Error('Cannot construct a child without a persisted plan');
+    const delegationMetadata: AgentKnotDelegationMetadata = {
+      orchestrationId: record.id,
+      role: 'worker',
+      subtaskId: subtask.id,
+      depth: 1,
+      planHash: plan.planHash,
+      policyVersion: plan.policyVersion,
+      taskKind: subtask.kind,
+      parentComplexity: plan.assessment.complexity,
+      ...(subtask.routeSelection === undefined
+        ? {}
+        : { routeSelection: subtask.routeSelection }),
+    };
+    return {
+      prompt: subtask.executionPrompt,
+      workspace: record.request.workspace,
+      route: subtask.route,
+      idempotencyKey: this.#workerIdempotencyKey(record, subtask),
+      ...(record.request.source === undefined ? {} : { source: record.request.source }),
+      metadata: {
+        ...(record.request.metadata ?? {}),
+        agentknotDelegation: delegationMetadata,
+      },
+    };
+  }
+
+  async #waitForJobId(jobId: string, signal: AbortSignal): Promise<JobRecord> {
+    let cancellation: Promise<boolean> | undefined;
+    const cancel = () => (cancellation ??= this.#jobs.cancel(jobId, 'parent-orchestration'));
+    const onAbort = () => {
+      void cancel().catch(() => undefined);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      while (true) {
+        const job = await this.#jobs.wait(jobId, 100);
+        if (job === undefined) throw new Error(`Delegated Job ${jobId} disappeared`);
+        if (terminal(job.status)) {
+          if (cancellation !== undefined) await cancellation;
+          return job;
+        }
+      }
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
   async #dispatch(
     record: OrchestrationRecord,
     subtasks: PlannedSubtask[],
@@ -1155,70 +1312,96 @@ export class OrchestrationService {
   ): Promise<void> {
     const plan = record.plan;
     if (!plan) throw new Error('Cannot dispatch orchestration children without a persisted plan');
+    const subtasksById = new Map(subtasks.map((subtask) => [subtask.id, subtask]));
+    const childrenBySubtask = new Map<string, OrchestrationChild>();
+    for (const child of record.children) {
+      const subtask = subtasksById.get(child.subtaskId);
+      if (
+        subtask === undefined ||
+        childrenBySubtask.has(child.subtaskId) ||
+        child.planHash !== plan.planHash ||
+        child.policyVersion !== plan.policyVersion
+      ) {
+        throw new Error(`Orchestration ${record.id} has inconsistent persisted child identity`);
+      }
+      childrenBySubtask.set(child.subtaskId, child);
+    }
     const active: ActiveChild[] = [];
     let nextIndex = 0;
 
-    const launch = async (subtask: PlannedSubtask): Promise<ActiveChild> => {
+    const launch = async (subtask: PlannedSubtask): Promise<ActiveChild | undefined> => {
+      let child = childrenBySubtask.get(subtask.id);
+      if (child !== undefined && terminal(child.status)) {
+        const job = await this.#jobs.get(child.jobId);
+        if (job === undefined || !terminal(job.status) || job.status !== child.status) {
+          throw new Error(`Orchestration ${record.id} has inconsistent terminal child ${child.jobId}`);
+        }
+        return undefined;
+      }
       const releaseSlot = await this.#dispatchSlots.acquire(signal);
       try {
-        const delegationMetadata: AgentKnotDelegationMetadata = {
-          orchestrationId: record.id,
-          role: 'worker',
-          subtaskId: subtask.id,
-          depth: 1,
-          planHash: plan.planHash,
-          policyVersion: plan.policyVersion,
-          taskKind: subtask.kind,
-          parentComplexity: plan.assessment.complexity,
-          ...(subtask.routeSelection === undefined
-            ? {}
-            : { routeSelection: subtask.routeSelection }),
-        };
-        const started = await this.#startDelegatedJob(record, {
-          prompt: subtask.executionPrompt,
-          workspace: record.request.workspace,
-          route: subtask.route,
-          idempotencyKey: `${record.id}:worker:${subtask.id}:${plan.planHash}`,
-          ...(record.request.source === undefined ? {} : { source: record.request.source }),
-          metadata: {
-            ...(record.request.metadata ?? {}),
-            agentknotDelegation: delegationMetadata,
-          },
-        });
-        const child: OrchestrationChild = {
-          subtaskId: subtask.id,
-          jobId: started.job.id,
-          planHash: plan.planHash,
-          policyVersion: plan.policyVersion,
-          status: started.job.status,
-          route: structuredClone(started.job.route),
-          ...(started.job.routePoolSelection === undefined
-            ? {}
-            : { routePoolSelection: structuredClone(started.job.routePoolSelection) }),
-        };
-        record.children.push(child);
-        try {
-          await this.#appendEvent(record, 'orchestration.child.started', {
+        const request = this.#workerRequest(record, subtask);
+        let started: Awaited<ReturnType<Orchestrator['start']>> | undefined;
+        let job =
+          child === undefined
+            ? await this.#jobs.findIdempotent(request.idempotencyKey as string)
+            : await this.#jobs.get(child.jobId);
+        if (child !== undefined && job === undefined) {
+          throw new Error(`Persisted child Job ${child.jobId} was not found`);
+        }
+        if (job === undefined) {
+          started = await this.#startDelegatedJob(record, request);
+          job = started.job;
+        }
+        if (child === undefined) {
+          child = {
             subtaskId: subtask.id,
-            jobId: started.job.id,
-            route: subtask.route,
+            jobId: job.id,
             planHash: plan.planHash,
             policyVersion: plan.policyVersion,
+            status: job.status,
+            route: structuredClone(job.route),
+            ...(job.routePoolSelection === undefined
+              ? {}
+              : { routePoolSelection: structuredClone(job.routePoolSelection) }),
+          };
+          record.children.push(child);
+          childrenBySubtask.set(subtask.id, child);
+          try {
+            await this.#appendEvent(record, 'orchestration.child.started', {
+              subtaskId: subtask.id,
+              jobId: job.id,
+              route: subtask.route,
+              planHash: plan.planHash,
+              policyVersion: plan.policyVersion,
+            });
+          } catch (error) {
+            await this.#jobs.cancel(job.id, 'parent-persistence-failure').catch(() => undefined);
+            const terminalJob =
+              started === undefined
+                ? await this.#waitForJobId(job.id, signal).catch(() => undefined)
+                : await started.completion.catch(() => undefined);
+            if (terminalJob !== undefined) {
+              child.status = terminalJob.status;
+              if (terminalJob.result !== undefined) child.output = terminalJob.result.output;
+              if (terminalJob.error !== undefined) child.error = structuredClone(terminalJob.error);
+            }
+            throw error;
+          }
+        } else if (job.id !== child.jobId) {
+          throw new Error(`Orchestration ${record.id} resolved a different child identity`);
+        }
+        if (started === undefined && !terminal(job.status)) {
+          await this.#jobs.recoverInterruptedJob(job.id, {
+            waitForLease: true,
+            signal,
           });
-        } catch (error) {
-          const [, completed] = await Promise.allSettled([
-            started.cancel(),
-            started.completion,
-          ]);
-          if (completed.status === 'rejected') throw completed.reason;
-          const job = completed.value;
-          child.status = job.status;
-          if (job.result) child.output = job.result.output;
-          if (job.error) child.error = structuredClone(job.error);
-          throw error;
         }
         let cancellation: Promise<void> | undefined;
-        const cancel = () => (cancellation ??= started.cancel());
+        const cancel = () =>
+          (cancellation ??= this.#jobs
+            .cancel(job.id, 'parent-orchestration')
+            .then(() => undefined));
         const onAbort = () => {
           void cancel().catch(() => undefined);
         };
@@ -1227,7 +1410,7 @@ export class OrchestrationService {
         return {
           child,
           cancel,
-          completion: started.completion
+          completion: (started?.completion ?? this.#waitForJobId(job.id, signal))
             .then(async (job) => {
               if (cancellation !== undefined) await cancellation;
               return { job };
@@ -1273,7 +1456,8 @@ export class OrchestrationService {
           nextIndex < subtasks.length &&
           active.length < maxConcurrency
         ) {
-          active.push(await launch(subtasks[nextIndex] as PlannedSubtask));
+          const launched = await launch(subtasks[nextIndex] as PlannedSubtask);
+          if (launched !== undefined) active.push(launched);
           nextIndex += 1;
         }
         if (active.length === 0) break;

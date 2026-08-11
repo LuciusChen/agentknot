@@ -143,6 +143,11 @@ export class MemoryJobStore extends RecordStoreBackend<JobRecord> implements Job
       throw error;
     }
   }
+
+  async findIdempotent(scope: string, key: string): Promise<JobRecord | undefined> {
+    const existing = this.#idempotency.get(`${scope}\u0000${key}`);
+    return existing === undefined ? undefined : this.get(existing.recordId);
+  }
 }
 
 export class FileJobStore extends RecordStoreBackend<JobRecord> implements JobStore {

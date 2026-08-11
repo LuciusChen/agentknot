@@ -167,3 +167,6 @@ Incident records should also include severity, user/controller impact, immediate
 | [0053](./0053-controller-owned-planning-handoff.md) | Incident / Decision | Resolved / Accepted | Restore controller-owned planning and use a strict handoff |
 | [0054](./0054-portable-service-lifecycle.md) | Incident / Decision | Resolved / Accepted | Make controller service lifecycle portable and explicit |
 | [0055](./0055-durable-middleware-kernel.md) | Incident / Architecture Decision | Accepted / In progress | Replace process ownership with a durable middleware kernel |
+| [0056](./0056-opencode-statistics-advisory-boundary.md) | Incident / Boundary correction | Accepted | Keep OpenCode accounting evidence advisory |
+| [0057](./0057-independent-broker-and-thin-controller-clients.md) | Incident / Architecture Decision | Resolved / Accepted | Make the broker independent and controller clients thin |
+| [0058](./0058-controller-neutral-broker-activation.md) | Incident / Architecture Decision | Resolved / Accepted | Let common clients explicitly activate a non-running broker |

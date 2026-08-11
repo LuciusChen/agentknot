@@ -1,6 +1,6 @@
 {
   "name": "agentknot",
-  "version": "0.1.0+codex.20260811033259",
+  "version": "0.1.0+codex.20260811091356",
   "description": "Delegate bounded independent coding work through AgentKnot while keeping decisions and artifact promotion upstream.",
   "author": {
     "name": "AgentKnot"
@@ -12,10 +12,11 @@
     "coding-agents"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "AgentKnot",
     "shortDescription": "Delegate bounded coding work",
-    "longDescription": "Use the AgentKnot orchestration CLI for eligible independent implementation, test, analysis, repair, and documentation work while retaining product decisions and artifact promotion upstream.",
+    "longDescription": "Use the independent AgentKnot broker through its common MCP client for eligible bounded work while retaining planning, acceptance, and artifact promotion upstream.",
     "developerName": "AgentKnot",
     "category": "Productivity",
     "capabilities": [

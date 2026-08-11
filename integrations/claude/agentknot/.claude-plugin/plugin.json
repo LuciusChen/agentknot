@@ -10,5 +10,6 @@
     "orchestration",
     "delegation",
     "coding-agents"
-  ]
+  ],
+  "mcpServers": "./.mcp.json"
 }

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
+import { readBrokerStatus, startBroker, stopBroker, type BrokerStatus } from './broker-lifecycle.js';
 import { validateTaskAssessment } from './delegation-policy.js';
 import { AgentKnotHttpClient, type AgentKnotWaitUpdate } from './http-client.js';
 import { createAgentKnotHttpServer } from './http-server.js';
@@ -11,40 +13,18 @@ import {
   readLocalDiscovery,
   type LocalDiscoveryRegistration,
 } from './local-discovery.js';
+import { serveAgentKnotMcp } from './mcp-server.js';
 import type {
   OrchestrationRecord,
   OrchestrationRequest,
   TaskAssessment,
 } from './orchestration-types.js';
-import { limitTextSuffix } from './record-limits.js';
-import { dispatchServiceCommand, formatServiceResult } from './service-cli.js';
+import { buildOrchestrationHandoff } from './orchestration-handoff.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
 import type { JobEvent, JobRequest } from './types.js';
 import type { RouteSelectionModeUsage, UsageRate, UsageReport } from './usage-report.js';
 
-const MAX_HANDOFF_VALIDATION_STREAM_BYTES = 2 * 1024;
 const MAX_ASSESSMENT_JSON_BYTES = 64 * 1024;
-
-function compactArtifactValidation(
-  value: OrchestrationRecord['artifactValidation']
-): OrchestrationRecord['artifactValidation'] | object {
-  if (value === undefined || !('command' in value) || value.command === undefined) return value;
-  const command = value.command;
-  return {
-    ...value,
-    command: {
-      argv: command.argv,
-      outcome: command.outcome,
-      exitCode: command.exitCode,
-      signal: command.signal,
-      durationMs: command.durationMs,
-      stdoutTail: limitTextSuffix(command.stdout, MAX_HANDOFF_VALIDATION_STREAM_BYTES),
-      stderrTail: limitTextSuffix(command.stderr, MAX_HANDOFF_VALIDATION_STREAM_BYTES),
-      outputTruncated: command.outputTruncated,
-      maxOutputBytes: command.maxOutputBytes,
-    },
-  };
-}
 
 function takeOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -89,9 +69,12 @@ function help(): string {
 Usage:
   agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME] [--idempotency-key KEY]
   agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE] [--idempotency-key KEY]
-  agentknot serve [--host HOST] [--port PORT]
-  agentknot service install [--host HOST] [--port PORT] [--path PATH]
-  agentknot service start|stop|restart|status|uninstall
+  agentknot broker run [--host HOST] [--port PORT]
+  agentknot broker up [--port PORT] [--json]
+  agentknot broker down [--json]
+  agentknot broker status [--json]
+  agentknot serve [--host HOST] [--port PORT]   Deprecated alias for broker run
+  agentknot mcp
   agentknot doctor [--route NAME] [--live]
   agentknot routes [--json]
   agentknot jobs [--json]
@@ -350,107 +333,13 @@ function createWaitProgressReporter(enabled: boolean): (update: AgentKnotWaitUpd
   };
 }
 
-async function orchestrationHandoff(
-  runtime: Pick<AgentKnotRuntime, 'verifyArtifacts'>,
-  record: OrchestrationRecord
-): Promise<object> {
-  const artifacts = await Promise.all(
-    record.children.map(async (child) => {
-      const verification = await runtime.verifyArtifacts(child.jobId);
-      if (verification === undefined) return { jobId: child.jobId, status: 'unavailable' };
-      return {
-        jobId: child.jobId,
-        status: 'verified',
-        valid: verification.valid,
-        attempts: verification.artifacts.map((attempt) => ({
-          attempt: attempt.artifact.attempt,
-          size: attempt.artifact.size,
-          sha256: attempt.artifact.sha256,
-          baseCommit: attempt.artifact.baseCommit,
-          baseTree: attempt.artifact.baseTree,
-          changedFiles: attempt.artifact.changedFiles,
-          valid: attempt.valid,
-          issues: attempt.issues,
-          file: {
-            exists: attempt.file.exists,
-            actualSize: attempt.file.actualSize,
-            sizeMatches: attempt.file.sizeMatches,
-            actualSha256: attempt.file.actualSha256,
-            sha256Matches: attempt.file.sha256Matches,
-          },
-          source: {
-            repositoryAvailable: attempt.source.repositoryAvailable,
-            actualHead: attempt.source.actualHead,
-            headMatchesBase: attempt.source.headMatchesBase,
-            actualTree: attempt.source.actualTree,
-            treeMatchesBase: attempt.source.treeMatchesBase,
-          },
-        })),
-      };
-    })
-  );
-  const artifactValidation = compactArtifactValidation(record.artifactValidation);
-  return {
-    schemaVersion: record.schemaVersion,
-    id: record.id,
-    status: record.status,
-    request: {
-      source: record.request.source,
-      delegation: record.request.delegation,
-    },
-    plan:
-      record.plan === undefined
-        ? undefined
-        : {
-            policyVersion: record.plan.policyVersion,
-            planHash: record.plan.planHash,
-            mode: record.plan.mode,
-            decision: record.plan.decision,
-            willDispatch: record.plan.willDispatch,
-            reasoning: record.plan.reasoning,
-            assessment: {
-              recommendation: record.plan.assessment.recommendation,
-              complexity: record.plan.assessment.complexity,
-              parallelizable: record.plan.assessment.parallelizable,
-              taskKinds: record.plan.assessment.taskKinds,
-            },
-            subtasks: record.plan.subtasks.map((subtask) => ({
-              id: subtask.id,
-              title: subtask.title,
-              kind: subtask.kind,
-              route: subtask.route,
-              routeSelection: subtask.routeSelection,
-            })),
-          },
-    children: record.children.map((child) => ({
-      subtaskId: child.subtaskId,
-      jobId: child.jobId,
-      status: child.status,
-      route: child.route,
-      routePoolSelection: child.routePoolSelection,
-      output: child.output,
-      error: child.error,
-    })),
-    qualityReview: record.qualityReview,
-    artifactValidation,
-    artifacts,
-    result:
-      record.result === undefined
-        ? undefined
-        : {
-            action: record.result.action,
-            artifactReview: record.result.artifactReview,
-          },
-    error: record.error,
-  };
-}
 
-function cancelOnTermination(cancel: () => void | Promise<void>): () => void {
+function cancelOnTermination(cancel: () => void | Promise<void>, exitCode = 1): () => void {
   let requested = false;
   const onSignal = () => {
     if (requested) return;
     requested = true;
-    process.exitCode = 1;
+    process.exitCode = exitCode;
     void Promise.resolve(cancel()).catch((error: unknown) => {
       process.stderr.write(
         `agentknot: termination cancellation failed: ${error instanceof Error ? error.message : String(error)}\n`
@@ -588,6 +477,65 @@ async function closeServeResources(
   if (errors.length > 1) throw new AggregateError(errors, 'AgentKnot serve cleanup failed');
 }
 
+function formatBrokerStatus(status: BrokerStatus, json: boolean): string {
+  if (json) return `${JSON.stringify(status, null, 2)}\n`;
+  if (status.state === 'running') {
+    return `AgentKnot broker: running (${status.url}, pid ${status.pid})\n`;
+  }
+  if (status.state === 'stopped') return 'AgentKnot broker: stopped\n';
+  return `AgentKnot broker: unavailable${status.url === undefined ? '' : ` (${status.url})`}: ${status.error}\n`;
+}
+
+async function runBrokerForeground(
+  args: string[],
+  configPath: string | undefined,
+  explicitServerUrl: string | undefined,
+  environmentServerUrl: string | undefined
+): Promise<void> {
+  if (explicitServerUrl !== undefined || environmentServerUrl !== undefined) {
+    throw new Error('broker run cannot be used with --server');
+  }
+  const host = takeOption(args, '--host') ?? '127.0.0.1';
+  const portValue = takeOption(args, '--port') ?? '7391';
+  const port = Number(portValue);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('--port must be 0-65535');
+  if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
+
+  const discovery = host === '127.0.0.1' ? await createLocalDiscoveryRegistration() : undefined;
+  let runtime: AgentKnotRuntime | undefined;
+  let http: ReturnType<typeof createAgentKnotHttpServer> | undefined;
+  try {
+    runtime = await createRuntime({
+      ...(configPath === undefined ? {} : { configPath }),
+      reconcileOnStartup: true,
+    });
+    http = createAgentKnotHttpServer(runtime, {
+      ...(discovery === undefined
+        ? {}
+        : {
+            brokerIdentity: {
+              schemaVersion: 1,
+              service: 'agentknot-broker',
+              instanceId: discovery.instanceId,
+              pid: process.pid,
+              startedAt: discovery.startedAt,
+            } as const,
+          }),
+    });
+    const address = await http.listen(port, host);
+    if (discovery !== undefined) await discovery.publish(address.port);
+    cancelOnTermination(() => closeServeResources(http, runtime, discovery), 0);
+    process.stdout.write(`AgentKnot listening on http://${address.host}:${address.port}\n`);
+  } catch (error: unknown) {
+    try {
+      await closeServeResources(http, runtime, discovery);
+    } catch (cleanupError: unknown) {
+      throw new AggregateError([error, cleanupError], 'AgentKnot broker startup cleanup failed');
+    }
+    throw error;
+  }
+}
+
 async function main(argv: string[]): Promise<void> {
   const args = [...argv];
   const command = args.shift();
@@ -702,7 +650,7 @@ async function main(argv: string[]): Promise<void> {
         .waitForOrchestration(initial, createWaitProgressReporter(progress))
         .finally(stopCancellation);
       const handoff = handoffJson
-        ? await orchestrationHandoff(remote, orchestration)
+        ? await buildOrchestrationHandoff(remote, orchestration)
         : undefined;
       if (handoffJson) {
         process.stdout.write(`${JSON.stringify(handoff, null, 2)}\n`);
@@ -734,7 +682,7 @@ async function main(argv: string[]): Promise<void> {
     let handoff: object | undefined;
     try {
       orchestration = await started.completion;
-      if (handoffJson) handoff = await orchestrationHandoff(runtime, orchestration);
+      if (handoffJson) handoff = await buildOrchestrationHandoff(runtime, orchestration);
     } finally {
       stopCancellation();
       await runtime.close();
@@ -755,48 +703,69 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  if (command === 'service') {
-    if (explicitServerUrl !== undefined) throw new Error('service cannot be used with --server');
-    const json = takeFlag(args, '--json');
-    const result = await dispatchServiceCommand(args, {
-      ...(configPath === undefined ? {} : { configPath }),
-    });
-    process.stdout.write(formatServiceResult(result, json));
+  if (command === 'serve') {
+    await runBrokerForeground(args, configPath, explicitServerUrl, environmentServerUrl);
     return;
   }
 
-  if (command === 'serve') {
-    if (explicitServerUrl !== undefined || environmentServerUrl !== undefined) {
-      throw new Error('serve cannot be used with --server');
+  if (command === 'mcp') {
+    if (configPath !== undefined || explicitServerUrl !== undefined) {
+      throw new Error('mcp discovers the broker and does not accept --config or --server');
     }
-    const host = takeOption(args, '--host') ?? '127.0.0.1';
-    const portValue = takeOption(args, '--port') ?? '7391';
-    const port = Number(portValue);
-    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('--port must be 0-65535');
     if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-
-    const discovery = host === '127.0.0.1' ? await createLocalDiscoveryRegistration() : undefined;
-    let runtime: AgentKnotRuntime | undefined;
-    let http: ReturnType<typeof createAgentKnotHttpServer> | undefined;
-    try {
-      runtime = await createRuntime({
-        ...(configPath === undefined ? {} : { configPath }),
-        reconcileOnStartup: true,
-      });
-      http = createAgentKnotHttpServer(runtime);
-      const address = await http.listen(port, host);
-      if (discovery !== undefined) await discovery.publish(address.port);
-      cancelOnTermination(() => closeServeResources(http, runtime, discovery));
-      process.stdout.write(`AgentKnot listening on http://${address.host}:${address.port}\n`);
-    } catch (error: unknown) {
-      try {
-        await closeServeResources(http, runtime, discovery);
-      } catch (cleanupError: unknown) {
-        throw new AggregateError([error, cleanupError], 'AgentKnot serve startup cleanup failed');
-      }
-      throw error;
-    }
+    const handle = serveAgentKnotMcp();
+    cancelOnTermination(() => handle.close(), 0);
     return;
+  }
+
+  if (command === 'broker') {
+    if (explicitServerUrl !== undefined || environmentServerUrl !== undefined) {
+      throw new Error('broker lifecycle commands cannot be used with --server');
+    }
+    const operation = args.shift();
+    if (operation === 'run') {
+      await runBrokerForeground(args, configPath, explicitServerUrl, environmentServerUrl);
+      return;
+    }
+    const json = takeFlag(args, '--json');
+    if (operation === 'up') {
+      const portValue = takeOption(args, '--port') ?? '7391';
+      const port = Number(portValue);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        throw new Error('--port must be 0-65535');
+      }
+      if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
+      const result = await startBroker({
+        cliEntryPath: fileURLToPath(import.meta.url),
+        ...(configPath === undefined ? {} : { configPath }),
+        port,
+        rememberConfig: true,
+      });
+      process.stdout.write(
+        json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : `AgentKnot broker: ${result.action} (${result.broker.url}, pid ${result.broker.pid})\n`
+      );
+      return;
+    }
+    if (operation === 'down') {
+      if (configPath !== undefined) throw new Error('broker down does not accept --config');
+      if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
+      const result = await stopBroker();
+      process.stdout.write(
+        json ? `${JSON.stringify(result, null, 2)}\n` : `AgentKnot broker: ${result.action}\n`
+      );
+      return;
+    }
+    if (operation === 'status') {
+      if (configPath !== undefined) throw new Error('broker status does not accept --config');
+      if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
+      const status = await readBrokerStatus();
+      process.stdout.write(formatBrokerStatus(status, json));
+      if (status.state === 'unavailable') process.exitCode = 1;
+      return;
+    }
+    throw new Error('broker requires run, up, down, or status');
   }
 
   if (command === 'client') {

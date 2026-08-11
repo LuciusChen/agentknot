@@ -526,145 +526,179 @@ export class Orchestrator {
   }
 
   async recoverInterruptedJobs(
-    options: { waitForLease?: boolean; signal?: AbortSignal } = {}
+    options: { waitForLease?: boolean; signal?: AbortSignal; skipDelegated?: boolean } = {}
   ): Promise<JobRecord[]> {
     if (!this.#durability.enabled) {
       throw new Error('Job recovery requires a durable execution store');
     }
     const recovered: JobRecord[] = [];
-    for (const listedJob of await this.#store.list()) {
-      let job = listedJob;
+    for (const job of await this.#store.list()) {
       if (job.status !== 'queued' && job.status !== 'running') continue;
-      if (this.#activeJobs.has(job.id)) continue;
-
-      const lease = await this.#claimRecoveryLease(job.id, options);
-      if (lease === undefined) continue;
-      let activated = false;
-      try {
-        const current = await this.#store.get(job.id);
-        if (current === undefined) {
-          throw new Error(`Job ${job.id} disappeared after its recovery lease was claimed`);
-        }
-        if (isTerminalStatus(current.status)) continue;
-        if (current.status !== 'queued' && current.status !== 'running') {
-          throw new Error(`Job ${current.id} has unsupported recovery status ${current.status}`);
-        }
-        job = current;
-        const cancellation = await this.#durability.getCancellation(job.id);
-        if (cancellation !== undefined) {
-          await this.#settleRecoveredJob(job, 'cancelled', {
-            name: 'CancellationRequestedError',
-            message: `Job cancellation was requested by ${cancellation.source}`,
-            reason: 'cancellation-requested-before-recovery',
-            source: cancellation.source,
-            requestedAt: cancellation.requestedAt,
-          });
-          recovered.push(structuredClone(job));
-          continue;
-        }
-
-        const previousStatus = job.status;
-        const previousExecution = job.execution;
-        job.execution = structuredClone(this.#execution);
-        let startAttempt = 1;
-        if (previousStatus === 'running') {
-          const retryable = job.attempt < job.route.maxAttempts;
-          const message = `Worker attempt ${job.attempt} lost its execution owner before a terminal result was persisted`;
-          job.error = {
-            name: 'ExecutionLeaseLostError',
-            message,
-            attempt: job.attempt,
-            retryable,
-          };
-          await this.#emit(job, 'job.attempt.lost', {
-            attempt: job.attempt,
-            reason: 'lease-expired',
-            previousRuntimeId: previousExecution?.runtimeId ?? 'unknown',
-            recoveryFence: lease.fence,
-            retryable,
-          });
-          if (!retryable) {
-            await this.#settleRecoveredJob(job, 'failed', {
-              name: 'ExecutionLeaseLostError',
-              message,
-              reason: 'recovery-attempts-exhausted',
-            });
-            recovered.push(structuredClone(job));
-            continue;
-          }
-          startAttempt = job.attempt + 1;
-        } else if (job.attempt !== 0) {
-          await this.#settleRecoveredJob(job, 'failed', {
-            name: 'RecoveryStateError',
-            message: `Queued Job ${job.id} has invalid attempt ${job.attempt}`,
-            reason: 'invalid-queued-attempt',
-          });
-          recovered.push(structuredClone(job));
-          continue;
-        }
-
-        const adapter = this.#adapters.get(job.route.worker);
-        if (adapter === undefined) {
-          await this.#settleRecoveredJob(job, 'failed', {
-            name: 'RecoveryAdapterUnavailableError',
-            message: `Persisted worker adapter "${job.route.worker}" is unavailable during recovery`,
-            reason: 'worker-adapter-unavailable',
-          });
-          recovered.push(structuredClone(job));
-          continue;
-        }
-
-        if (this.#workspaceIsolation.mode !== 'git-worktree' || job.workspaceSnapshot === undefined) {
-          await this.#settleRecoveredJob(job, 'failed', {
-            name: 'RecoverySnapshotUnavailableError',
-            message: 'The Job has no immutable admitted workspace snapshot for recovery',
-            reason: 'workspace-snapshot-unavailable',
-          });
-          recovered.push(structuredClone(job));
-          continue;
-        }
-        let inspection: WorkspaceInspection;
-        try {
-          inspection = await this.#workspaceIsolation.restoreAdmissionSnapshot(
-            job.id,
-            job.request.workspace,
-            job.workspaceSnapshot
-          );
-        } catch (error) {
-          const details = limitErrorDetails(error);
-          await this.#settleRecoveredJob(job, 'failed', {
-            name: 'RecoverySnapshotUnavailableError',
-            message: details.message,
-            reason: 'workspace-snapshot-invalid',
-          });
-          recovered.push(structuredClone(job));
-          continue;
-        }
-
-        job.attempt = startAttempt;
-        await this.#emit(job, 'job.recovery.started', {
-          previousStatus,
-          previousRuntimeId: previousExecution?.runtimeId ?? 'unknown',
-          recoveryFence: lease.fence,
-          nextAttempt: startAttempt,
-        });
-        const reservation = this.#reservePersistedRoute(job);
-        const controller = new AbortController();
-        const started = this.#activate(
-          job,
-          adapter,
-          controller,
-          inspection,
-          reservation,
-          startAttempt
-        );
-        activated = true;
-        recovered.push(started.job);
-      } finally {
-        if (!activated) await this.#durability.release(job.id);
-      }
+      if (options.skipDelegated === true && this.#delegatedParentId(job) !== undefined) continue;
+      const current = await this.#recoverInterruptedJob(job, options);
+      if (current !== undefined) recovered.push(current);
     }
     return recovered;
+  }
+
+  async recoverInterruptedJob(
+    id: string,
+    options: { waitForLease?: boolean; signal?: AbortSignal } = {}
+  ): Promise<JobRecord | undefined> {
+    if (!this.#durability.enabled) {
+      throw new Error('Job recovery requires a durable execution store');
+    }
+    const job = await this.#store.get(id);
+    if (job === undefined || isTerminalStatus(job.status)) return job;
+    return this.#recoverInterruptedJob(job, options);
+  }
+
+  findIdempotent(idempotencyKey: string): Promise<JobRecord | undefined> {
+    if (this.#store.findIdempotent === undefined) {
+      throw new Error('Job idempotency lookup requires a durable execution store');
+    }
+    return this.#store.findIdempotent('job-admission-v1', idempotencyKey);
+  }
+
+  async #recoverInterruptedJob(
+    listedJob: JobRecord,
+    options: { waitForLease?: boolean; signal?: AbortSignal }
+  ): Promise<JobRecord | undefined> {
+    let job = listedJob;
+    if (job.status !== 'queued' && job.status !== 'running') return structuredClone(job);
+    if (this.#activeJobs.has(job.id)) return structuredClone(job);
+
+    const lease = await this.#claimRecoveryLease(job.id, options);
+    if (lease === undefined) return undefined;
+    let activated = false;
+    try {
+      const current = await this.#store.get(job.id);
+      if (current === undefined) {
+        throw new Error(`Job ${job.id} disappeared after its recovery lease was claimed`);
+      }
+      if (isTerminalStatus(current.status)) return structuredClone(current);
+      if (current.status !== 'queued' && current.status !== 'running') {
+        throw new Error(`Job ${current.id} has unsupported recovery status ${current.status}`);
+      }
+      job = current;
+      const cancellation = await this.#durability.getCancellation(job.id);
+      if (cancellation !== undefined) {
+        await this.#settleRecoveredJob(job, 'cancelled', {
+          name: 'CancellationRequestedError',
+          message: `Job cancellation was requested by ${cancellation.source}`,
+          reason: 'cancellation-requested-before-recovery',
+          source: cancellation.source,
+          requestedAt: cancellation.requestedAt,
+        });
+        return structuredClone(job);
+      }
+
+      const previousStatus = job.status;
+      const previousExecution = job.execution;
+      job.execution = structuredClone(this.#execution);
+      let startAttempt = 1;
+      if (previousStatus === 'running') {
+        const retryable = job.attempt < job.route.maxAttempts;
+        const message = `Worker attempt ${job.attempt} lost its execution owner before a terminal result was persisted`;
+        job.error = {
+          name: 'ExecutionLeaseLostError',
+          message,
+          attempt: job.attempt,
+          retryable,
+        };
+        await this.#emit(job, 'job.attempt.lost', {
+          attempt: job.attempt,
+          reason: 'lease-expired',
+          previousRuntimeId: previousExecution?.runtimeId ?? 'unknown',
+          recoveryFence: lease.fence,
+          retryable,
+        });
+        if (!retryable) {
+          await this.#settleRecoveredJob(job, 'failed', {
+            name: 'ExecutionLeaseLostError',
+            message,
+            reason: 'recovery-attempts-exhausted',
+          });
+          return structuredClone(job);
+        }
+        startAttempt = job.attempt + 1;
+      } else if (job.attempt !== 0) {
+        await this.#settleRecoveredJob(job, 'failed', {
+          name: 'RecoveryStateError',
+          message: `Queued Job ${job.id} has invalid attempt ${job.attempt}`,
+          reason: 'invalid-queued-attempt',
+        });
+        return structuredClone(job);
+      }
+
+      const adapter = this.#adapters.get(job.route.worker);
+      if (adapter === undefined) {
+        await this.#settleRecoveredJob(job, 'failed', {
+          name: 'RecoveryAdapterUnavailableError',
+          message: `Persisted worker adapter "${job.route.worker}" is unavailable during recovery`,
+          reason: 'worker-adapter-unavailable',
+        });
+        return structuredClone(job);
+      }
+
+      if (this.#workspaceIsolation.mode !== 'git-worktree' || job.workspaceSnapshot === undefined) {
+        await this.#settleRecoveredJob(job, 'failed', {
+          name: 'RecoverySnapshotUnavailableError',
+          message: 'The Job has no immutable admitted workspace snapshot for recovery',
+          reason: 'workspace-snapshot-unavailable',
+        });
+        return structuredClone(job);
+      }
+      let inspection: WorkspaceInspection;
+      try {
+        inspection = await this.#workspaceIsolation.restoreAdmissionSnapshot(
+          job.id,
+          job.request.workspace,
+          job.workspaceSnapshot
+        );
+      } catch (error) {
+        const details = limitErrorDetails(error);
+        await this.#settleRecoveredJob(job, 'failed', {
+          name: 'RecoverySnapshotUnavailableError',
+          message: details.message,
+          reason: 'workspace-snapshot-invalid',
+        });
+        return structuredClone(job);
+      }
+
+      job.attempt = startAttempt;
+      await this.#emit(job, 'job.recovery.started', {
+        previousStatus,
+        previousRuntimeId: previousExecution?.runtimeId ?? 'unknown',
+        recoveryFence: lease.fence,
+        nextAttempt: startAttempt,
+      });
+      const reservation = this.#reservePersistedRoute(job);
+      const controller = new AbortController();
+      const started = this.#activate(
+        job,
+        adapter,
+        controller,
+        inspection,
+        reservation,
+        startAttempt
+      );
+      activated = true;
+      return started.job;
+    } finally {
+      if (!activated) await this.#durability.release(job.id);
+    }
+  }
+
+  #delegatedParentId(job: JobRecord): string | undefined {
+    const delegated = job.request.metadata?.agentknotDelegation;
+    if (typeof delegated !== 'object' || delegated === null || Array.isArray(delegated)) return undefined;
+    const value = delegated as Record<string, unknown>;
+    return value.depth === 1 &&
+      (value.role === 'worker' || value.role === 'reviewer') &&
+      typeof value.orchestrationId === 'string'
+      ? value.orchestrationId
+      : undefined;
   }
 
   async #claimRecoveryLease(

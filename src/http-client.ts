@@ -1,4 +1,5 @@
 import type { DelegationConfig } from './config.js';
+import type { AgentKnotBrokerIdentity } from './http-server.js';
 import type { JobList } from './job-list.js';
 import type { OrchestrationRecord, OrchestrationRequest } from './orchestration-types.js';
 import type {
@@ -176,7 +177,11 @@ export class AgentKnotHttpClient {
     this.#baseUrl = parsed;
   }
 
-  async #request(pathname: string, init: RequestInit = {}): Promise<unknown> {
+  async #request(
+    pathname: string,
+    init: RequestInit = {},
+    timeoutMs = HTTP_OPERATION_TIMEOUT_MS
+  ): Promise<unknown> {
     let response: Response;
     try {
       response = await fetch(new URL(pathname, this.#baseUrl), {
@@ -185,7 +190,7 @@ export class AgentKnotHttpClient {
           ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
           ...init.headers,
         },
-        signal: AbortSignal.timeout(HTTP_OPERATION_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
       throw new AgentKnotHttpClientError(
@@ -238,6 +243,21 @@ export class AgentKnotHttpClient {
         inference: 'not-checked',
       },
     };
+  }
+
+  async brokerIdentity(timeoutMs = 1_000): Promise<AgentKnotBrokerIdentity> {
+    const body = asObject(await this.#request('/v1/broker', {}, timeoutMs), 'broker identity response');
+    if (
+      body.schemaVersion !== 1 ||
+      body.service !== 'agentknot-broker' ||
+      typeof body.instanceId !== 'string' ||
+      !Number.isSafeInteger(body.pid) ||
+      (body.pid as number) <= 0 ||
+      typeof body.startedAt !== 'string'
+    ) {
+      throw new AgentKnotHttpClientError('broker identity response is invalid');
+    }
+    return body as unknown as AgentKnotBrokerIdentity;
   }
 
   async routes(): Promise<Array<{ name: string; worker: string; provider: string; model: string }>> {

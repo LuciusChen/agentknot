@@ -144,7 +144,7 @@ test('runtime close and shutdown track recovery before active Job registration',
   assert.equal(ownershipClosed, true);
 });
 
-test('exclusive createRuntime refuses mutable legacy replay and keeps parent reconciliation explicit', async () => {
+test('exclusive createRuntime imports legacy state and fails unrecoverable historical parents explicitly', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-runtime-'));
   const storageDirectory = path.join(directory, 'jobs');
   const orchestrationStorageDirectory = path.join(directory, 'orchestrations');
@@ -326,9 +326,9 @@ test('exclusive createRuntime refuses mutable legacy replay and keeps parent rec
   assert.ok(observed.includes('job.attempt.lost'));
   const staleParent = await runtime.getOrchestration('orchestration_stale');
   assert.equal(staleParent?.status, 'failed');
-  assert.equal(staleParent?.error?.name, 'ExecutionInterruptedError');
+  assert.equal(staleParent?.error?.name, 'RecoveryStateError');
   assert.equal(staleParent?.events.at(-1)?.type, 'orchestration.failed');
-  assert.equal(staleParent?.events.at(-1)?.data?.reason, 'runtime_restart');
+  assert.equal(staleParent?.events.at(-1)?.data?.reason, 'recovery-state-unavailable');
   assert.equal(staleParent?.children[0]?.status, 'failed');
   assert.equal(staleParent?.children[0]?.error?.name, 'ExecutionLeaseLostError');
   assert.deepEqual(staleParent?.qualityReview, {
@@ -361,10 +361,10 @@ test('exclusive createRuntime refuses mutable legacy replay and keeps parent rec
   ] as const) {
     const parent = await runtime.getOrchestration(id);
     assert.equal(parent?.status, 'failed');
-    assert.equal(parent?.error?.name, 'ExecutionInterruptedError');
+    assert.equal(parent?.error?.name, 'RecoveryStateError');
     assert.equal(parent?.events.at(-1)?.type, 'orchestration.failed');
     assert.equal(parent?.events.at(-1)?.data?.previousStatus, previousStatus);
-    assert.equal(parent?.events.at(-1)?.data?.reason, 'runtime_restart');
+    assert.equal(parent?.events.at(-1)?.data?.reason, 'recovery-state-unavailable');
   }
   assert.equal(
     (await runtime.getOrchestration(stalePlanningParent.id))?.cancelRequestedAt,

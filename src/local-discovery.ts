@@ -20,8 +20,10 @@ const LOCAL_URL_PATTERN = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/;
 export interface LocalDiscoveryEnvironment {
   readonly XDG_RUNTIME_DIR?: string | undefined;
   readonly XDG_CACHE_HOME?: string | undefined;
+  readonly XDG_CONFIG_HOME?: string | undefined;
   readonly HOME?: string | undefined;
   readonly USERPROFILE?: string | undefined;
+  readonly APPDATA?: string | undefined;
 }
 
 export interface LocalDiscoveryPathOptions {
@@ -276,6 +278,36 @@ export async function readLocalDiscovery(
   }
   assertOwnedDirectoryStats(stats, paths.directory);
   return readRecordAtPath(paths.recordPath);
+}
+
+export async function removeLocalDiscoveryIfIdentity(
+  instanceId: string,
+  options: LocalDiscoveryPathOptions = {}
+): Promise<boolean> {
+  const paths = await resolveLocalDiscoveryPaths(options);
+  let directoryStats: Stats;
+  try {
+    directoryStats = await lstat(paths.directory);
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    throw error;
+  }
+  assertOwnedDirectoryStats(directoryStats, paths.directory);
+  const directory = await realpath(paths.directory);
+  const ownership = await acquireRuntimeOwnership([directory]);
+  try {
+    const current = await readRecordAtPath(path.join(directory, LOCAL_DISCOVERY_RECORD_FILE));
+    if (current === undefined || current.instanceId !== instanceId) return false;
+    try {
+      await unlink(path.join(directory, LOCAL_DISCOVERY_RECORD_FILE));
+      return true;
+    } catch (error) {
+      if (isNotFound(error)) return false;
+      throw error;
+    }
+  } finally {
+    await ownership.close();
+  }
 }
 
 function serializeRecord(record: LocalDiscoveryRecord): string {

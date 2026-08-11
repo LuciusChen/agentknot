@@ -382,6 +382,7 @@ export interface JobStore {
     requestHash: string,
     job: JobRecord
   ): Promise<{ created: boolean; record: JobRecord }>;
+  findIdempotent?(scope: string, key: string): Promise<JobRecord | undefined>;
 }
 
 export interface StartJobResult {

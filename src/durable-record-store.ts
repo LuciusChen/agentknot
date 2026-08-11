@@ -376,6 +376,23 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
     return { created: false, record: existing };
   }
 
+  async findIdempotent(scope: string, key: string): Promise<T | undefined> {
+    this.#assertOpen();
+    assertIdentifier('Idempotency scope', scope);
+    assertIdentifier('Idempotency key', key);
+    const existing = this.#selectIdempotency.get(scope, key) as
+      | { request_hash: string; record_id: string }
+      | undefined;
+    if (existing === undefined) return undefined;
+    const record = await this.get(existing.record_id);
+    if (record === undefined) {
+      throw new Error(
+        `Idempotency key references missing ${this.#kind.toLowerCase()} ${existing.record_id}`
+      );
+    }
+    return record;
+  }
+
   async save(record: T, lease?: ExecutionLease, now = new Date()): Promise<void> {
     this.#assertOpen();
     const expectedRevision = revisionOf(record);
@@ -726,6 +743,10 @@ export class SqliteDurableStoreAdapter<T extends DurableStoredRecord> {
 
   list(): Promise<T[]> {
     return this.backend.list();
+  }
+
+  findIdempotent(scope: string, key: string): Promise<T | undefined> {
+    return this.backend.findIdempotent(scope, key);
   }
 
   eventsAfter(id: string, sequence: number): Promise<T['events']> {

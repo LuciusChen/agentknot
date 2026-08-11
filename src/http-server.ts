@@ -240,7 +240,22 @@ export interface AgentKnotHttpServer {
   close(): Promise<void>;
 }
 
-export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentKnotHttpServer {
+export interface AgentKnotBrokerIdentity {
+  readonly schemaVersion: 1;
+  readonly service: 'agentknot-broker';
+  readonly instanceId: string;
+  readonly pid: number;
+  readonly startedAt: string;
+}
+
+export interface AgentKnotHttpServerOptions {
+  readonly brokerIdentity?: AgentKnotBrokerIdentity;
+}
+
+export function createAgentKnotHttpServer(
+  runtime: AgentKnotHttpRuntime,
+  options: AgentKnotHttpServerOptions = {}
+): AgentKnotHttpServer {
   let closing = false;
   let admissionsInFlight = 0;
   let admissionsDrained: (() => void) | undefined;
@@ -277,6 +292,14 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
 
       if (method === 'GET' && (pathname === '/health/live' || pathname === '/health')) {
         sendJson(response, 200, LIVE_HEALTH_RESPONSE);
+        return;
+      }
+      if (method === 'GET' && pathname === '/v1/broker') {
+        if (options.brokerIdentity === undefined) {
+          sendJson(response, 404, { error: 'Broker identity is not available on this server' });
+          return;
+        }
+        sendJson(response, 200, options.brokerIdentity);
         return;
       }
       if (method === 'GET' && pathname === '/v1/routes') {
