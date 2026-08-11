@@ -174,3 +174,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0060](./0060-artifact-capture-omitted-deletions.md) | Incident | Resolved | Preserve tracked-file deletions in worker patch artifacts |
 | [0061](./0061-atomic-durable-route-pool-admission.md) | Architecture Decision | Accepted | Bind least-active route selection to durable Job admission |
 | [0062](./0062-durable-event-subscription.md) | Incident / Architecture Decision | Accepted | Make durable cursor subscription the wait authority |
+| [0063](./0063-remove-per-prompt-controller-obligations.md) | Incident / Architecture Decision | Resolved / Accepted | Remove repeated controller prompt obligations |
