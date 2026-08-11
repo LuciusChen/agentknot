@@ -70,6 +70,14 @@ export interface AssessedSubtask {
   acceptanceCriteria: string[];
 }
 
+/** Bounded controller-authored navigation context shared by every child in one handoff. */
+export interface TaskContext {
+  schemaVersion: 1;
+  summary: string;
+  relevantPaths: string[];
+  constraints: string[];
+}
+
 export interface TaskAssessment {
   schemaVersion: 1;
   recommendation: 'delegate' | 'do-not-delegate';
@@ -77,6 +85,8 @@ export interface TaskAssessment {
   parallelizable: boolean;
   taskKinds: string[];
   reasoning: string;
+  /** Optional for protocol compatibility; controller Skills provide it for repository work. */
+  context?: TaskContext;
   subtasks: AssessedSubtask[];
 }
 

@@ -25,6 +25,12 @@ const upstreamAssessmentJson = JSON.stringify({
   parallelizable: false,
   taskKinds: [],
   reasoning: 'Keep this bounded controller task upstream.',
+  context: {
+    schemaVersion: 1,
+    summary: 'The mode-off fixture requires no repository discovery.',
+    relevantPaths: ['package.json'],
+    constraints: ['Remain upstream.'],
+  },
   subtasks: [],
 });
 

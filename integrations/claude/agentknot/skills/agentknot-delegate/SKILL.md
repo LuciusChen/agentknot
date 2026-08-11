@@ -19,6 +19,12 @@ Before admission, construct one strict assessment with exactly this shape:
   "parallelizable": false,
   "taskKinds": ["implementation"],
   "reasoning": "bounded repository work with objective acceptance criteria",
+  "context": {
+    "schemaVersion": 1,
+    "summary": "Only the concise architecture and current-state facts already known by the controller that this handoff needs.",
+    "relevantPaths": ["src/example.ts", "test/example.test.ts"],
+    "constraints": ["Do not inspect unrelated repository history or architecture documents."]
+  },
   "subtasks": [
     {
       "title": "bounded child",
@@ -29,6 +35,8 @@ Before admission, construct one strict assessment with exactly this shape:
   ]
 }
 ```
+
+For repository work, include one parent-level `context` built only from facts already available in the controller conversation. Keep its complete JSON below 2 KiB: no transcript, file contents, repository inventory, speculative facts, provider/model data, or repeated subtask instructions. Use repository-relative `relevantPaths` as the initial working set and name hard scope constraints. Every child receives the same compact prefix before its task-specific delta, so do not create a different full context per worker. If the controller lacks useful context, omit the field rather than scanning the repository merely to manufacture it.
 
 Use `recommendation: "do-not-delegate"` only with an empty `subtasks` array. Do not put routes, providers, models, controller transcripts, or promotion instructions in the assessment.
 

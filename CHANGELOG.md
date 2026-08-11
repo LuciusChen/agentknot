@@ -8,6 +8,8 @@ Entries in this unreleased history retain earlier implementation evidence; the `
 
 ### Added
 
+- Optional schemaVersion 1 `TaskAssessment.context` for one controller-authored shared navigation prefix. Its summary, unique repository-relative initial paths, and constraints are strictly validated within 2 KiB, copied into admitted evidence and the plan hash, and projected identically before each child-specific prompt. Controller Skills build it only from existing conversation facts and omit it instead of scanning; no transcript, fixed worker session, memory service, route/model choice, or provider-cache dependency is added ([incident/decision 0068](postmortems/0068-bounded-shared-task-context.md)).
+
 - Optional route-level `maxToolCalls` execution budgets. The orchestrator counts normalized tool starts per attempt, aborts the exact attempt before persisting an excess start, and fails without retry. Omission preserves existing timeout behavior; repository limits are conservative dogfood configuration based on persisted route maxima and do not rank models or move planning into middleware ([decision 0067](postmortems/0067-route-tool-execution-budget.md)).
 
 - Controller-, worker-, provider-, and transport-neutral durable event subscription for Job and Orchestration records. Same-process readers wake only after a successful commit, reconnect from an acknowledged sequence, and retain a durable refresh fallback across broker/process replacement. TypeScript exposes cursor replay and `AsyncIterable` subscriptions; HTTP/CLI follow cursor batches; MCP adds bounded `agentknot_orchestration_follow` without making transport state authoritative ([decision 0062](postmortems/0062-durable-event-subscription.md)).

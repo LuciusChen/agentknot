@@ -576,6 +576,43 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
   }
 });
 
+test('OrchestrationService persists one shared task context and projects it into child execution', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-context-');
+  const contextualAssessment: TaskAssessment = {
+    ...assessment,
+    parallelizable: false,
+    taskKinds: ['documentation'],
+    context: {
+      schemaVersion: 1,
+      summary: 'Documentation behavior is owned by the current README configuration section.',
+      relevantPaths: ['README.md', 'test/orchestration.test.ts'],
+      constraints: ['Do not inspect unrelated adapters or historical decisions.'],
+    },
+    subtasks: [assessment.subtasks[1]!],
+  };
+  const adapter = new PlannerAndWorkerAdapter(contextualAssessment);
+  const { jobStore, orchestrations } = createServices(adapter);
+
+  const record = await orchestrations.run({
+    prompt: 'Update one bounded documentation section.',
+    workspace,
+    assessment: contextualAssessment,
+    source: 'codex',
+  });
+
+  assert.deepEqual(record.request.assessment.context, contextualAssessment.context);
+  assert.deepEqual(record.plan?.assessment.context, contextualAssessment.context);
+  const jobs = await jobStore.list();
+  assert.equal(jobs.length, 1);
+  const prompt = jobs[0]?.request.prompt ?? '';
+  assert.match(prompt, /Controller-authored task context/);
+  assert.match(prompt, /README\.md/);
+  assert.match(prompt, /Do not inspect unrelated adapters or historical decisions/);
+  assert.equal(prompt.match(/Controller-authored task context/g)?.length, 1);
+
+  await rm(workspace, { recursive: true, force: true });
+});
+
 test('serial children derive from one immutable parent admission after source mutation', async () => {
   const workspace = await createGitWorkspace('agentknot-parent-snapshot-');
   const adapter = new ParentSnapshotAdapter();

@@ -12,6 +12,14 @@ import { buildOrchestrationHandoff } from './orchestration-handoff.js';
 
 const text = z.string().min(1).max(64 * 1024);
 const shortText = z.string().min(1).max(1_000);
+const taskContextSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    summary: z.string().min(1).max(1_000),
+    relevantPaths: z.array(z.string().min(1).max(500)).max(20),
+    constraints: z.array(z.string().min(1).max(500)).max(20),
+  })
+  .strict();
 const assessmentSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -20,6 +28,7 @@ const assessmentSchema = z
     parallelizable: z.boolean(),
     taskKinds: z.array(shortText).max(20),
     reasoning: text,
+    context: taskContextSchema.optional(),
     subtasks: z
       .array(
         z

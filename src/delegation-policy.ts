@@ -8,7 +8,10 @@ import type {
   RouteSelectionEvidence,
   TaskAssessment,
   TaskComplexity,
+  TaskContext,
 } from './orchestration-types.js';
+
+export const MAX_TASK_CONTEXT_BYTES = 2 * 1024;
 
 function assertRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -47,14 +50,64 @@ function boundedString(value: unknown, label: string, maximum: number): string {
   return result;
 }
 
+function boundedStringArray(
+  value: unknown,
+  label: string,
+  maximumItems: number,
+  maximumCharacters: number
+): string[] {
+  const items = stringArray(value, label);
+  if (items.length > maximumItems) {
+    throw new Error(`${label} must contain at most ${maximumItems} entries`);
+  }
+  if (items.some((item) => item.length > maximumCharacters)) {
+    throw new Error(`${label} entries must contain at most ${maximumCharacters} characters`);
+  }
+  if (new Set(items).size !== items.length) throw new Error(`${label} entries must be unique`);
+  return items;
+}
+
+function validateTaskContext(value: unknown, label: string): TaskContext {
+  assertRecord(value, label);
+  assertExactKeys(value, ['schemaVersion', 'summary', 'relevantPaths', 'constraints'], label);
+  if (value.schemaVersion !== 1) throw new Error(`${label} schemaVersion must be 1`);
+  const relevantPaths = boundedStringArray(value.relevantPaths, `${label}.relevantPaths`, 20, 500);
+  if (
+    relevantPaths.some(
+      (item) =>
+        item.startsWith('/') ||
+        item.startsWith('\\') ||
+        /^[a-zA-Z]:/u.test(item) ||
+        item.split(/[\\/]/u).includes('..')
+    )
+  ) {
+    throw new Error(`${label}.relevantPaths entries must be repository-relative paths`);
+  }
+  const context: TaskContext = {
+    schemaVersion: 1,
+    summary: boundedString(value.summary, `${label}.summary`, 1_000),
+    relevantPaths,
+    constraints: boundedStringArray(value.constraints, `${label}.constraints`, 20, 500),
+  };
+  if (Buffer.byteLength(JSON.stringify(context), 'utf8') > MAX_TASK_CONTEXT_BYTES) {
+    throw new Error(`${label} exceeds maximum ${MAX_TASK_CONTEXT_BYTES} bytes`);
+  }
+  return context;
+}
+
 export function validateTaskAssessment(value: unknown): TaskAssessment {
   const label = 'Controller assessment';
   assertRecord(value, label);
-  assertExactKeys(
-    value,
-    ['schemaVersion', 'recommendation', 'complexity', 'parallelizable', 'taskKinds', 'reasoning', 'subtasks'],
-    label
-  );
+  assertExactKeys(value, [
+    'schemaVersion',
+    'recommendation',
+    'complexity',
+    'parallelizable',
+    'taskKinds',
+    'reasoning',
+    ...(value.context === undefined ? [] : ['context']),
+    'subtasks',
+  ], label);
 
   if (value.schemaVersion !== 1) throw new Error(`${label} schemaVersion must be 1`);
   if (value.recommendation !== 'delegate' && value.recommendation !== 'do-not-delegate') {
@@ -70,6 +123,9 @@ export function validateTaskAssessment(value: unknown): TaskAssessment {
   const taskKinds = stringArray(value.taskKinds, `${label} taskKinds`);
   if (taskKinds.length > 20) throw new Error(`${label} taskKinds must contain at most 20 entries`);
   const reasoning = boundedString(value.reasoning, `${label} reasoning`, 2_000);
+  const context = value.context === undefined
+    ? undefined
+    : validateTaskContext(value.context, `${label} context`);
   if (!Array.isArray(value.subtasks)) throw new Error(`${label} subtasks must be an array`);
   if (value.subtasks.length > 20) throw new Error(`${label} subtasks must contain at most 20 entries`);
 
@@ -109,11 +165,30 @@ export function validateTaskAssessment(value: unknown): TaskAssessment {
     parallelizable: value.parallelizable,
     taskKinds,
     reasoning,
+    ...(context === undefined ? {} : { context }),
     subtasks,
   };
 }
 
 function executionPrompt(request: OrchestrationRequest, subtask: AssessedSubtask): string {
+  const taskContext = request.assessment.context;
+  const contextBoundary = taskContext === undefined
+    ? []
+    : [
+        '',
+        'Controller-authored task context (bounded navigation guidance, not verified evidence):',
+        taskContext.summary,
+        ...(taskContext.relevantPaths.length === 0
+          ? []
+          : [
+              'Relevant repository paths:',
+              ...taskContext.relevantPaths.map((item) => `- ${item}`),
+            ]),
+        ...(taskContext.constraints.length === 0
+          ? []
+          : ['Constraints:', ...taskContext.constraints.map((item) => `- ${item}`)]),
+        'Begin with this working set. Verify only facts needed for the acceptance criteria; do not inventory the repository or read unrelated architecture/history files. If the context is insufficient or conflicts with the admitted workspace, report the missing or stale context before broadening scope.',
+      ];
   const repositoryAnalysisBoundary = subtask.kind === 'repository-analysis'
     ? [
         '',
@@ -130,6 +205,7 @@ function executionPrompt(request: OrchestrationRequest, subtask: AssessedSubtask
     'AgentKnot has placed you in an isolated execution worktree for that repository. The active worktree/current working directory is the only writable repository; do not access or modify the source checkout path directly.',
     'Every other repository is a read-only reference. If the task requires modifying a different repository, report the workspace mismatch and do not edit either repository.',
     'Stay within the subtask\'s stated file/component scope. Report any necessary out-of-scope or overlapping change instead of silently broadening the edit.',
+    ...contextBoundary,
     '',
     'Parent task:',
     request.prompt,

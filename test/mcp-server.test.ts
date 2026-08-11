@@ -244,6 +244,12 @@ test('MCP explicitly starts and follows a broker without owning its runtime', as
           parallelizable: false,
           taskKinds: [],
           reasoning: 'Transport acceptance fixture.',
+          context: {
+            schemaVersion: 1,
+            summary: 'The transport fixture requires no repository discovery.',
+            relevantPaths: ['package.json'],
+            constraints: ['Do not inspect unrelated files.'],
+          },
           subtasks: [],
         },
       })

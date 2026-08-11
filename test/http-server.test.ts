@@ -39,6 +39,16 @@ const upstreamAssessment: TaskAssessment = {
   subtasks: [],
 };
 
+const contextualUpstreamAssessment: TaskAssessment = {
+  ...upstreamAssessment,
+  context: {
+    schemaVersion: 1,
+    summary: 'The cursor event API is authoritative and the wait alias is retired.',
+    relevantPaths: ['src/http-server.ts', 'test/http-server.test.ts'],
+    constraints: ['Do not inspect unrelated runtime or worker code.'],
+  },
+};
+
 async function git(directory: string, ...args: string[]): Promise<string> {
   const result = await execFileAsync('git', args, { cwd: directory, encoding: 'utf8' });
   return String(result.stdout);
@@ -676,14 +686,14 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
         prompt: 'Coordinate this task.',
         workspace,
         source: 'claude',
-        assessment: upstreamAssessment,
+        assessment: contextualUpstreamAssessment,
       }),
     });
     assert.equal(createdResponse.status, 202);
     const created = (await createdResponse.json()) as { orchestration: OrchestrationRecord };
     const terminal = await new AgentKnotHttpClient(baseUrl).waitForOrchestration(created.orchestration);
     assert.equal(terminal.status, 'succeeded');
-    assert.deepEqual(terminal.request.assessment, upstreamAssessment);
+    assert.deepEqual(terminal.request.assessment, contextualUpstreamAssessment);
     assert.equal(terminal.result?.action, 'upstream');
     assert.equal(
       (await fetch(`${baseUrl}/v1/orchestrations/${created.orchestration.id}/wait`)).status,

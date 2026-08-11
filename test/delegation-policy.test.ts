@@ -76,6 +76,53 @@ test('validateTaskAssessment strictly rejects a subtask that omits acceptanceCri
   );
 });
 
+test('validateTaskAssessment bounds and defensively copies shared task context', () => {
+  const contextual = {
+    ...assessment,
+    context: {
+      schemaVersion: 1 as const,
+      summary: 'The HTTP cursor path is authoritative; no parallel wait alias remains.',
+      relevantPaths: ['src/http-client.ts', 'test/http-server.test.ts'],
+      constraints: ['Do not inspect unrelated storage or controller integration code.'],
+    },
+  };
+  const validated = validateTaskAssessment(contextual);
+  assert.deepEqual(validated, contextual);
+  assert.notEqual(validated.context, contextual.context);
+  assert.notEqual(validated.context?.relevantPaths, contextual.context.relevantPaths);
+
+  for (const invalidPath of ['/absolute/path', '../outside', 'C:drive-relative']) {
+    assert.throws(
+      () => validateTaskAssessment({
+        ...contextual,
+        context: { ...contextual.context, relevantPaths: [invalidPath] },
+      }),
+      /repository-relative paths/
+    );
+  }
+  assert.throws(
+    () => validateTaskAssessment({
+      ...contextual,
+      context: { ...contextual.context, relevantPaths: ['src/http-client.ts', 'src/http-client.ts'] },
+    }),
+    /entries must be unique/
+  );
+  assert.throws(
+    () => validateTaskAssessment({
+      ...contextual,
+      context: { ...contextual.context, summary: '界'.repeat(1_000) },
+    }),
+    /exceeds maximum 2048 bytes/
+  );
+  assert.throws(
+    () => validateTaskAssessment({
+      ...contextual,
+      context: { ...contextual.context, unknown: true },
+    }),
+    /unknown: unknown/
+  );
+});
+
 test('composeDelegationPlan uses ordered shadow rules with AND predicates and keeps default execution routes', () => {
   const shadowConfig: DelegationConfig = {
     ...config,
@@ -285,8 +332,14 @@ test('small low-complexity repository work is delegated once and selected by the
     ]
   );
 
-  const analysisPlan = composeDelegationPlan(request, {
+  const contextualAnalysis = validateTaskAssessment({
     ...single,
+    context: {
+      schemaVersion: 1,
+      summary: 'Spam matching is implemented by the existing URL classifier.',
+      relevantPaths: ['src/spam.ts', 'test/spam.test.ts'],
+      constraints: ['Do not inventory unrelated transport or persistence code.'],
+    },
     taskKinds: ['repository-analysis'],
     subtasks: [{
       title: 'Search spam keywords',
@@ -294,7 +347,12 @@ test('small low-complexity repository work is delegated once and selected by the
       prompt: 'Search the repository for spam-keyword evidence and report exact matches.',
       acceptanceCriteria: ['Findings cite exact repository paths and matched evidence'],
     }],
-  }, activeConfig);
+  });
+  const analysisPlan = composeDelegationPlan(
+    { ...request, assessment: contextualAnalysis },
+    contextualAnalysis,
+    activeConfig
+  );
   assert.deepEqual(
     analysisPlan.subtasks.map((subtask) => [subtask.kind, subtask.route, subtask.routeSelection?.basis]),
     [['repository-analysis', 'deepseek-flash', 'rule']]
@@ -311,6 +369,11 @@ test('small low-complexity repository work is delegated once and selected by the
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /report the workspace mismatch/);
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /at most five findings and 4000 characters/);
   assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Do not inventory the repository/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /Controller-authored task context/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /src\/spam\.ts/);
+  assert.match(analysisPlan.subtasks[0]?.executionPrompt ?? '', /report the missing or stale context before broadening scope/);
+  const noContextPlan = composeDelegationPlan(request, single, activeConfig);
+  assert.notEqual(analysisPlan.planHash, noContextPlan.planHash);
 });
 
 test('composeDelegationPlan deterministically applies allowlists, keep-upstream rules, caps, and suggest mode', () => {
@@ -331,6 +394,36 @@ test('composeDelegationPlan deterministically applies allowlists, keep-upstream 
     plan.subtasks.every((subtask) => subtask.executionPrompt.includes('out-of-scope or overlapping change')),
     true
   );
+
+  const sharedContextPlan = composeDelegationPlan(
+    {
+      ...request,
+      assessment: {
+        ...assessment,
+        context: {
+          schemaVersion: 1,
+          summary: 'Only the two named implementation surfaces are relevant.',
+          relevantPaths: ['src/feature.ts', 'test/feature.test.ts'],
+          constraints: ['Do not read unrelated design history.'],
+        },
+      },
+    },
+    {
+      ...assessment,
+      context: {
+        schemaVersion: 1,
+        summary: 'Only the two named implementation surfaces are relevant.',
+        relevantPaths: ['src/feature.ts', 'test/feature.test.ts'],
+        constraints: ['Do not read unrelated design history.'],
+      },
+    },
+    config
+  );
+  const commonPrefixes = sharedContextPlan.subtasks.map(
+    (subtask) => subtask.executionPrompt.split('\nSubtask:', 1)[0]
+  );
+  assert.equal(commonPrefixes.length, 2);
+  assert.equal(commonPrefixes[0], commonPrefixes[1]);
 
   const suggested = composeDelegationPlan({ ...request, delegation: 'suggest' }, assessment, config);
   assert.equal(suggested.mode, 'suggest');

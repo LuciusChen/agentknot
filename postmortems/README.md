@@ -175,3 +175,8 @@ Incident records should also include severity, user/controller impact, immediate
 | [0061](./0061-atomic-durable-route-pool-admission.md) | Architecture Decision | Accepted | Bind least-active route selection to durable Job admission |
 | [0062](./0062-durable-event-subscription.md) | Incident / Architecture Decision | Accepted | Make durable cursor subscription the wait authority |
 | [0063](./0063-remove-per-prompt-controller-obligations.md) | Incident / Architecture Decision | Resolved / Accepted | Remove repeated controller prompt obligations |
+| [0064](./0064-broker-startup-child-cleanup.md) | Incident / Architecture Decision | Resolved / Accepted | Bound broker startup child cleanup |
+| [0065](./0065-retire-http-wait-aliases.md) | Incident / Architecture Decision | Resolved / Accepted | Retire pre-release HTTP wait aliases |
+| [0066](./0066-pi-duplicate-tool-start-events.md) | Incident | Resolved | Remove duplicate Pi tool-start events |
+| [0067](./0067-route-tool-execution-budget.md) | Incident / Architecture Decision | Accepted | Add an optional route tool-execution budget |
+| [0068](./0068-bounded-shared-task-context.md) | Incident / Architecture Decision | Resolved / Accepted | Bound shared task context without worker-session coupling |
