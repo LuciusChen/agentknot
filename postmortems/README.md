@@ -180,4 +180,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0066](./0066-pi-duplicate-tool-start-events.md) | Incident | Resolved | Remove duplicate Pi tool-start events |
 | [0067](./0067-route-tool-execution-budget.md) | Incident / Architecture Decision | Accepted | Add an optional route tool-execution budget |
 | [0068](./0068-bounded-shared-task-context.md) | Incident / Architecture Decision | Resolved / Accepted | Bound shared task context without worker-session coupling |
-| [0069](./0069-repeated-shared-context-scope-trials.md) | Experiment / Incident | Accepted / Follow-up open | Repeat shared-context scope trials and remove contradictory check guidance |
+| [0069](./0069-repeated-shared-context-scope-trials.md) | Experiment / Incident | Accepted / Resolved | Repeat shared-context scope trials, remove contradictory check guidance, and settle blocked reports without retry |

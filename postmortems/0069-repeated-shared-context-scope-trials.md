@@ -1,8 +1,8 @@
 # 0069: Repeat shared-context scope trials and remove contradictory check guidance
 
 - Type: Experiment / Incident
-- Status: Accepted / Follow-up open
-- Implementation: Prompt-precedence correction delivered in this slice
+- Status: Accepted / Resolved
+- Implementation: Prompt-precedence correction and route-neutral blocked settlement delivered
 - Date: 2026-08-11
 - Owners: AgentKnot maintainers
 - Related: [decision 0068](./0068-bounded-shared-task-context.md), [decision 0067](./0067-route-tool-execution-budget.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md)
@@ -40,9 +40,11 @@ Six different tasks across both configured models obeyed every post-correction p
 
 Natural-language constraints remain advisory. Exact capability enforcement would require an explicit route-neutral tool-authority contract and adapter support; this experiment does not justify adding that implementation surface yet. The existing optional route `maxToolCalls` remains only a whole-attempt circuit, not a file or command allowlist.
 
-## Follow-up
+## Resolution: blocked is a terminal report, not a transient adapter failure
 
-Define whether a valid terminal worker report with `taskOutcome: blocked` is intrinsically non-retryable. The current parser surfaces it as a generic adapter error, and the orchestrator retries any otherwise unclassified error while attempts remain. Repeating the same route and immutable snapshot consumed another attempt without new information. Any correction must remain worker- and route-neutral and avoid another completion schema unless evidence requires one.
+A valid `taskOutcome: blocked` report is intrinsically non-retryable because it is the worker's terminal semantic claim about the admitted task and immutable working set. Repeating the same route cannot change those admitted inputs. Required-report parsers now reject only absent or malformed envelopes and return a valid blocked report through the existing `WorkerRunResult.completionReport` contract. The orchestrator validates that common report, settles the Job as `failed` with `retryable: false`, retains the worker report and terminal artifact evidence, and emits no `job.retrying` event.
+
+This interpretation applies to every adapter, worker, provider, model, and route that returns the shared report. It adds no Job status, second result schema, route flag, fallback, or adapter-specific error branch. Missing or malformed reports and transient adapter, transport, process, timeout, and cancellation failures retain their existing behavior. Focused Pi parsing and replaceable mock-adapter tests prove the boundary independently; the full suite remains the release gate.
 
 ## Privacy and security review
 

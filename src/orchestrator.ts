@@ -14,6 +14,7 @@ import { isTerminalStatus } from './execution-status.js';
 import { DurableEventSubscription } from './durable-subscription.js';
 import {
   capturedChangedFilesSummary,
+  validateWorkerCompletionReport,
   workerReportedSummary,
 } from './completion-summary.js';
 import { assertJsonMetadata } from './metadata.js';
@@ -77,6 +78,10 @@ export class JobPersistenceError extends Error {
 
 class WorkerToolCallLimitError extends Error {
   readonly name = 'WorkerToolCallLimitError';
+}
+
+class WorkerTaskBlockedError extends Error {
+  readonly name = 'WorkerTaskBlockedError';
 }
 
 export const ROUTE_DIAGNOSTIC_TIMEOUT_MS = 30_000;
@@ -1276,6 +1281,24 @@ export class Orchestrator {
       }
 
       if (failure === undefined && result !== undefined) {
+        const completionReport = validateWorkerCompletionReport(result.completionReport);
+        if (completionReport?.taskOutcome === 'blocked') {
+          const note = completionReport.notes[0];
+          const details = limitErrorDetails(
+            new WorkerTaskBlockedError(`Worker reported task blocked${note ? `: ${note}` : ''}`)
+          );
+          job.status = 'failed';
+          job.completedAt = this.#now().toISOString();
+          job.error = { ...details, attempt, retryable: false };
+          job.completionSummary = this.#completionSummary(
+            job,
+            'failed',
+            true,
+            completionReport
+          );
+          await this.#emit(job, 'job.failed', { ...details, attempt });
+          return;
+        }
         const boundedOutput = limitText(result.output, MAX_RESULT_OUTPUT_BYTES);
         job.status = 'succeeded';
         job.completedAt = this.#now().toISOString();

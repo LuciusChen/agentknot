@@ -136,6 +136,52 @@ test('Orchestrator stops one attempt at its configured normalized tool-call limi
   );
 });
 
+test('Orchestrator treats a valid blocked worker result as route-neutral and non-retryable', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-worker-blocked-'));
+  let runs = 0;
+  const completionReport = {
+    schemaVersion: 1 as const,
+    taskOutcome: 'blocked' as const,
+    changedFiles: [],
+    checksRun: [],
+    remainingRisks: ['Required context is unavailable.'],
+    notes: ['Cannot verify the requested behavior from the admitted working set.'],
+  };
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'ready' };
+    },
+    async run() {
+      runs += 1;
+      return { output: 'available evidence', completionReport };
+    },
+  };
+  const retryConfig = structuredClone(config);
+  retryConfig.routes.mock!.maxAttempts = 3;
+
+  try {
+    const job = await new Orchestrator({
+      config: retryConfig,
+      store: new MemoryJobStore(),
+      adapters: new Map([['mock', adapter]]),
+    }).run({ prompt: 'analyze bounded evidence', workspace });
+
+    assert.equal(job.status, 'failed');
+    assert.equal(job.attempt, 1);
+    assert.equal(job.error?.name, 'WorkerTaskBlockedError');
+    assert.equal(job.error?.retryable, false);
+    assert.equal(runs, 1);
+    assert.equal(job.events.some((event) => event.type === 'job.retrying'), false);
+    assert.deepEqual(job.completionSummary?.workerReported, {
+      status: 'reported',
+      report: completionReport,
+    });
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('Job admission atomically creates the queued event or starts no worker', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-admission-failure-'));
   let runs = 0;

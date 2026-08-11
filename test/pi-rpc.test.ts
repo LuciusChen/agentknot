@@ -428,45 +428,46 @@ test('Pi normal runs append the report instruction after prompt-injection text',
   }
 });
 
-test('Pi normal runs validate and strip a valid completion envelope while preserving output', async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-completion-valid-'));
-  try {
-    const adapter = new PiRpcWorkerAdapter('pi', {
-      adapter: 'pi-rpc',
-      command: process.execPath,
-      commandArgs: [fakePiFixture],
-      noSession: true,
-      environment: {
-        FAKE_PI_COMPLETION_MODE: 'valid',
-        FAKE_PI_HUMAN_OUTPUT: 'human summary',
-      },
-    });
-    const result = await adapter.run(
-      {
-        jobId: 'job_pi_completion_valid',
-        prompt: 'complete the task',
-        workspace: directory,
-        route,
-        attempt: 1,
-        signal: new AbortController().signal,
-      },
-      () => undefined
-    );
+test('Pi normal runs preserve valid completed and blocked envelopes for shared settlement', async () => {
+  for (const mode of ['valid', 'blocked'] as const) {
+    const directory = await mkdtemp(path.join(os.tmpdir(), `agentknot-pi-completion-${mode}-`));
+    try {
+      const adapter = new PiRpcWorkerAdapter('pi', {
+        adapter: 'pi-rpc',
+        command: process.execPath,
+        commandArgs: [fakePiFixture],
+        noSession: true,
+        environment: { FAKE_PI_COMPLETION_MODE: mode, FAKE_PI_HUMAN_OUTPUT: 'human summary' },
+      });
+      const result = await adapter.run(
+        {
+          jobId: `job_pi_completion_${mode}`,
+          prompt: 'complete the task',
+          workspace: directory,
+          route,
+          attempt: 1,
+          signal: new AbortController().signal,
+        },
+        () => undefined
+      );
 
-    assert.equal(result.output, 'human summary');
-    assert.deepEqual(result.completionReport, fakeCompletionReport);
-    assert.equal(result.output.includes(WORKER_COMPLETION_REPORT_MARKER), false);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+      assert.equal(result.output, 'human summary');
+      assert.deepEqual(result.completionReport, {
+        ...fakeCompletionReport,
+        taskOutcome: mode === 'blocked' ? 'blocked' : 'completed',
+      });
+      assert.equal(result.output.includes(WORKER_COMPLETION_REPORT_MARKER), false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 });
 
-test('Pi normal runs reject missing, inferred, trailing, and blocked completion reports', async () => {
+test('Pi normal runs reject missing, inferred, and trailing completion reports', async () => {
   const cases = [
     { mode: 'missing', error: /missing required completion report/ },
     { mode: 'prose', error: /missing required completion report/ },
     { mode: 'trailing', error: /missing required completion report/ },
-    { mode: 'blocked', error: /reported task blocked/ },
   ] as const;
   for (const { mode, error } of cases) {
     const directory = await mkdtemp(path.join(os.tmpdir(), `agentknot-pi-completion-${mode}-`));
@@ -537,8 +538,8 @@ test('Pi normal runs reject malformed and unsupported completion envelopes', asy
   }
 });
 
-test('Pi normal completion reports propagate while invalid reports fail the Job', async () => {
-  for (const mode of ['valid', 'missing', 'malformed'] as const) {
+test('Pi normal completion reports propagate while blocked and invalid reports fail the Job', async () => {
+  for (const mode of ['valid', 'blocked', 'missing', 'malformed'] as const) {
     const directory = await mkdtemp(path.join(os.tmpdir(), `agentknot-pi-completion-summary-${mode}-`));
     try {
       const orchestrator = createFakePiOrchestrator({
@@ -554,6 +555,15 @@ test('Pi normal completion reports propagate while invalid reports fail the Job'
           report: fakeCompletionReport,
         });
         assert.equal(job.result?.output, 'human summary');
+      } else if (mode === 'blocked') {
+        assert.equal(job.status, 'failed');
+        assert.equal(job.attempt, 1);
+        assert.equal(job.error?.name, 'WorkerTaskBlockedError');
+        assert.equal(job.error?.retryable, false);
+        assert.deepEqual(job.completionSummary?.workerReported, {
+          status: 'reported',
+          report: { ...fakeCompletionReport, taskOutcome: 'blocked' },
+        });
       } else {
         assert.equal(job.status, 'failed');
         assert.match(job.error?.message ?? '', new RegExp(`${mode} required completion report`));

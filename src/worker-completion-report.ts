@@ -55,9 +55,5 @@ export function parseRequiredWorkerCompletionOutput(
   if (parsed.completionReport === null) {
     throw new Error(`${adapter} output contains a malformed required completion report`);
   }
-  if (parsed.completionReport.taskOutcome === 'blocked') {
-    const note = parsed.completionReport.notes[0];
-    throw new Error(`${adapter} reported task blocked${note ? `: ${note}` : ''}`);
-  }
   return { output: parsed.output, completionReport: parsed.completionReport };
 }

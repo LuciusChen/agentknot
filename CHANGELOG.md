@@ -61,6 +61,8 @@ Entries in this unreleased history retain earlier implementation evidence; the `
 
 ### Changed
 
+- Valid schemaVersion 1 worker reports with `taskOutcome: blocked` now cross the existing `WorkerRunResult.completionReport` contract and settle once in the orchestrator as `failed`, `retryable: false`. The terminal summary retains the worker report and captured artifact evidence; missing/malformed reports and transient adapter, transport, process, timeout, or cancellation failures keep their existing semantics. No worker, provider, model, or route-specific retry branch and no second result schema were added ([incident/decision 0069](postmortems/0069-repeated-shared-context-scope-trials.md)).
+
 - Shared task-context constraints now explicitly override the generic worker request to run relevant checks. When the supplied working set is insufficient or stale, workers finish with available evidence and report the gap instead of broadening scope. Six post-correction real trials across Luna/max and DeepSeek Flash/max stayed within all named path and command boundaries using 6, 3, 5, 8, 3, and 2 tool calls respectively; this is repeated behavioral evidence, not a sandbox or universal token claim ([experiment 0069](postmortems/0069-repeated-shared-context-scope-trials.md)).
 
 - Job and Orchestration waits now share the durable subscription kernel instead of maintaining separate 100 ms full-record polling loops. HTTP cursor-follow returns committed event deltas plus compact active or terminal evidence; disconnect retries preserve the exact record ID and last sequence ([decision 0062](postmortems/0062-durable-event-subscription.md)).
