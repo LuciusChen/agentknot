@@ -358,6 +358,11 @@ export class OrchestrationService {
 
     const now = this.#now().toISOString();
     const id = `orchestration_${randomUUID()}`;
+    const plan = composeDelegationPlan(normalized, normalized.assessment, this.#config);
+    let workspaceSnapshot: OrchestrationRecord['workspaceSnapshot'];
+    if (plan.willDispatch && plan.subtasks.length > 0) {
+      workspaceSnapshot = await this.#jobs.captureWorkspaceSnapshot(normalized.workspace, id);
+    }
     const record: OrchestrationRecord = {
       id,
       schemaVersion: 1,
@@ -376,43 +381,53 @@ export class OrchestrationService {
           data: { source: normalized.source ?? 'unknown', mode: this.#config.mode },
         },
       ],
+      plan,
+      ...(workspaceSnapshot === undefined ? {} : { workspaceSnapshot }),
       children: [],
     };
     const controller = new AbortController();
     let admitted = true;
     let admittedRecord = record;
-    if (this.#durability.enabled) {
-      const result = await this.#durability.admit(record, {
-        ownerId: this.#runtimeId,
-        ...(normalized.idempotencyKey === undefined
-          ? {}
-          : {
-              idempotency: {
-                scope: 'orchestration-admission-v1',
-                key: normalized.idempotencyKey,
-                requestHash: canonicalJsonSha256(normalized),
-              },
-            }),
-      });
-      if (result === undefined) throw new Error('Durable Orchestration admission is unavailable');
-      admitted = result.created;
-      admittedRecord = result.record;
-    } else if (normalized.idempotencyKey !== undefined) {
-      if (this.#store.createIdempotent === undefined) {
-        throw new Error('The selected Orchestration store does not support idempotent admission');
+    try {
+      if (this.#durability.enabled) {
+        const result = await this.#durability.admit(record, {
+          ownerId: this.#runtimeId,
+          ...(normalized.idempotencyKey === undefined
+            ? {}
+            : {
+                idempotency: {
+                  scope: 'orchestration-admission-v1',
+                  key: normalized.idempotencyKey,
+                  requestHash: canonicalJsonSha256(normalized),
+                },
+              }),
+        });
+        if (result === undefined) throw new Error('Durable Orchestration admission is unavailable');
+        admitted = result.created;
+        admittedRecord = result.record;
+      } else if (normalized.idempotencyKey !== undefined) {
+        if (this.#store.createIdempotent === undefined) {
+          throw new Error('The selected Orchestration store does not support idempotent admission');
+        }
+        const result = await this.#store.createIdempotent(
+          'orchestration-admission-v1',
+          normalized.idempotencyKey,
+          canonicalJsonSha256(normalized),
+          record
+        );
+        admitted = result.created;
+        admittedRecord = result.record;
+      } else {
+        await this.#store.create(record);
       }
-      const result = await this.#store.createIdempotent(
-        'orchestration-admission-v1',
-        normalized.idempotencyKey,
-        canonicalJsonSha256(normalized),
-        record
-      );
-      admitted = result.created;
-      admittedRecord = result.record;
-    } else {
-      await this.#store.create(record);
+    } catch (error) {
+      if (workspaceSnapshot !== undefined) {
+        await this.#jobs.discardWorkspaceSnapshot(id).catch(() => undefined);
+      }
+      throw error;
     }
     if (!admitted) {
+      if (workspaceSnapshot !== undefined) await this.#jobs.discardWorkspaceSnapshot(id);
       const active = this.#activeOrchestrations.get(admittedRecord.id);
       if (active !== undefined) {
         return {
@@ -519,7 +534,10 @@ export class OrchestrationService {
     record.startedAt = this.#now().toISOString();
     throwIfAborted(signal);
 
-    const plan = composeDelegationPlan(record.request, record.request.assessment, record.policy);
+    const plan = record.plan;
+    if (plan === undefined) {
+      throw new Error(`Orchestration ${record.id} has no persisted delegation plan`);
+    }
     await this.#appendEvent(
       record,
       'orchestration.handoff.accepted',
@@ -529,15 +547,7 @@ export class OrchestrationService {
         willDispatch: plan.willDispatch,
         subtaskCount: plan.subtasks.length,
       },
-      record.startedAt,
-      {
-        apply: () => {
-          record.plan = plan;
-        },
-        rollback: () => {
-          delete record.plan;
-        },
-      }
+      record.startedAt
     );
     throwIfAborted(signal);
 
@@ -980,7 +990,7 @@ export class OrchestrationService {
     }
     let started: Awaited<ReturnType<Orchestrator['start']>>;
     try {
-      started = await this.#jobs.start({
+      started = await this.#startDelegatedJob(record, {
         prompt,
         workspace: record.request.workspace,
         route: config.route,
@@ -1123,6 +1133,20 @@ export class OrchestrationService {
     }
   }
 
+  #startDelegatedJob(
+    record: OrchestrationRecord,
+    request: Parameters<Orchestrator['start']>[0]
+  ): ReturnType<Orchestrator['start']> {
+    if (record.workspaceSnapshot === undefined) {
+      throw new Error(`Orchestration ${record.id} has no immutable admitted workspace snapshot`);
+    }
+    return this.#jobs.startFromWorkspaceSnapshot(
+      request,
+      record.id,
+      record.workspaceSnapshot
+    );
+  }
+
   async #dispatch(
     record: OrchestrationRecord,
     subtasks: PlannedSubtask[],
@@ -1150,7 +1174,7 @@ export class OrchestrationService {
             ? {}
             : { routeSelection: subtask.routeSelection }),
         };
-        const started = await this.#jobs.start({
+        const started = await this.#startDelegatedJob(record, {
           prompt: subtask.executionPrompt,
           workspace: record.request.workspace,
           route: subtask.route,

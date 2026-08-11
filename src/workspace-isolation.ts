@@ -219,12 +219,12 @@ export class WorkspaceIsolationManager {
    */
   async persistAdmissionSnapshot(
     inspection: WorkspaceInspection,
-    jobId: string
+    executionId: string
   ): Promise<JobWorkspaceSnapshot> {
     const bytes = inspection.snapshotPatch;
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     if (bytes.byteLength > 0) {
-      const target = this.#snapshotPath(jobId);
+      const target = this.#snapshotPath(executionId);
       const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
       await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
       try {
@@ -247,8 +247,8 @@ export class WorkspaceIsolationManager {
     };
   }
 
-  async discardAdmissionSnapshot(jobId: string): Promise<void> {
-    const target = this.#snapshotPath(jobId);
+  async discardAdmissionSnapshot(executionId: string): Promise<void> {
+    const target = this.#snapshotPath(executionId);
     await rm(target, { force: true });
     try {
       await rmdir(path.dirname(target));
@@ -260,7 +260,7 @@ export class WorkspaceIsolationManager {
 
   /** Reconstructs only the immutable admitted input; it never re-inspects mutable source state. */
   async restoreAdmissionSnapshot(
-    jobId: string,
+    executionId: string,
     workspace: string,
     snapshot: JobWorkspaceSnapshot
   ): Promise<WorkspaceInspection> {
@@ -273,28 +273,28 @@ export class WorkspaceIsolationManager {
       !/^[a-f0-9]{40,64}$/.test(snapshot.baseCommit) ||
       !/^[a-f0-9]{40,64}$/.test(snapshot.baseTree)
     ) {
-      throw new Error(`Job ${jobId} has invalid admitted workspace snapshot evidence`);
+      throw new Error(`Execution ${executionId} has invalid admitted workspace snapshot evidence`);
     }
     const expectedWorkspace = path.resolve(workspace);
     if (path.resolve(snapshot.sourceWorkspace) !== expectedWorkspace) {
-      throw new Error(`Job ${jobId} admitted workspace does not match its request`);
+      throw new Error(`Execution ${executionId} admitted workspace does not match its request`);
     }
     const repository = await this.#repository(expectedWorkspace);
     if (path.resolve(snapshot.repository) !== repository) {
-      throw new Error(`Job ${jobId} admitted repository is no longer available at its original path`);
+      throw new Error(`Execution ${executionId} admitted repository is no longer available at its original path`);
     }
     if (path.resolve(repository, snapshot.relativeSubdirectory) !== expectedWorkspace) {
-      throw new Error(`Job ${jobId} admitted repository subdirectory evidence is inconsistent`);
+      throw new Error(`Execution ${executionId} admitted repository subdirectory evidence is inconsistent`);
     }
     const resolvedCommit = outputText(
       (await git(['rev-parse', `${snapshot.baseCommit}^{commit}`], repository)).stdout
     ).trim();
     let bytes = Buffer.alloc(0);
     if (snapshot.size > 0) {
-      const snapshotPath = this.#snapshotPath(jobId);
+      const snapshotPath = this.#snapshotPath(executionId);
       const snapshotStat = await lstat(snapshotPath);
       if (!snapshotStat.isFile() || (snapshotStat.mode & 0o077) !== 0) {
-        throw new Error(`Job ${jobId} admitted workspace snapshot is not a private regular file`);
+        throw new Error(`Execution ${executionId} admitted workspace snapshot is not a private regular file`);
       }
       bytes = await readFile(snapshotPath);
     }
@@ -302,7 +302,7 @@ export class WorkspaceIsolationManager {
       bytes.byteLength !== snapshot.size ||
       createHash('sha256').update(bytes).digest('hex') !== snapshot.sha256
     ) {
-      throw new Error(`Job ${jobId} admitted workspace snapshot failed integrity verification`);
+      throw new Error(`Execution ${executionId} admitted workspace snapshot failed integrity verification`);
     }
     const reconstructedTree = await this.#withTemporaryGitState(
       repository,
@@ -315,7 +315,7 @@ export class WorkspaceIsolationManager {
       }
     );
     if (resolvedCommit !== snapshot.baseCommit || reconstructedTree !== snapshot.baseTree) {
-      throw new Error(`Job ${jobId} admitted Git input no longer matches its tree identity`);
+      throw new Error(`Execution ${executionId} admitted Git input no longer matches its tree identity`);
     }
     return {
       sourceWorkspace: snapshot.sourceWorkspace,
@@ -662,11 +662,11 @@ export class WorkspaceIsolationManager {
     });
   }
 
-  #snapshotPath(jobId: string): string {
-    if (!/^job_[A-Za-z0-9_-]+$/.test(jobId)) {
-      throw new Error('Invalid Job identity for an admitted workspace snapshot');
+  #snapshotPath(executionId: string): string {
+    if (!/^(?:job|orchestration)_[A-Za-z0-9_-]+$/.test(executionId)) {
+      throw new Error('Invalid execution identity for an admitted workspace snapshot');
     }
-    return path.resolve(this.#artifactDirectory, jobId, 'admitted-workspace.patch');
+    return path.resolve(this.#artifactDirectory, executionId, 'admitted-workspace.patch');
   }
 
   async create(

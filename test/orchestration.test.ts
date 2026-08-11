@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -268,6 +268,36 @@ class BlockingWorkerAdapter implements WorkerAdapter {
     } finally {
       this.activeRuns -= 1;
     }
+  }
+}
+
+class ParentSnapshotAdapter implements WorkerAdapter {
+  readonly name = 'test';
+  readonly observedInputs: string[] = [];
+  #firstStartedResolve: (() => void) | undefined;
+  #releaseFirstResolve: (() => void) | undefined;
+  readonly firstStarted = new Promise<void>((resolve) => {
+    this.#firstStartedResolve = resolve;
+  });
+  readonly #releaseFirst = new Promise<void>((resolve) => {
+    this.#releaseFirstResolve = resolve;
+  });
+
+  async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
+    return { ok: true, message: 'parent snapshot adapter ready' };
+  }
+
+  releaseFirst(): void {
+    this.#releaseFirstResolve?.();
+  }
+
+  async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+    this.observedInputs.push(await readFile(path.join(input.workspace, 'README.md'), 'utf8'));
+    if (this.observedInputs.length === 1) {
+      this.#firstStartedResolve?.();
+      await this.#releaseFirst;
+    }
+    return { output: `observed parent input ${this.observedInputs.length}` };
   }
 }
 
@@ -565,6 +595,34 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
     assert.equal(provenance.planHash, record.plan?.planHash);
     assert.equal(provenance.policyVersion, 1);
   }
+});
+
+test('serial children derive from one immutable parent admission after source mutation', async () => {
+  const workspace = await createGitWorkspace('agentknot-parent-snapshot-');
+  const adapter = new ParentSnapshotAdapter();
+  const { orchestrations, orchestrationStore } = createServices(adapter);
+  await writeFile(path.join(workspace, 'README.md'), '# admitted dirty input\n');
+
+  const started = await orchestrations.start({
+    prompt: 'Run two bounded tasks from one admitted repository state.',
+    workspace,
+    assessment: { ...assessment, parallelizable: false },
+    source: 'codex',
+  });
+  await adapter.firstStarted;
+  await writeFile(path.join(workspace, 'README.md'), '# changed after parent admission\n');
+  adapter.releaseFirst();
+
+  const terminal = await started.completion;
+  assert.equal(terminal.status, 'succeeded');
+  assert.deepEqual(adapter.observedInputs, ['# admitted dirty input\n', '# admitted dirty input\n']);
+  assert.equal(await readFile(path.join(workspace, 'README.md'), 'utf8'), '# changed after parent admission\n');
+  const persisted = await orchestrationStore.get(terminal.id);
+  assert.ok(persisted?.plan, 'the deterministic plan is part of admission state');
+  assert.equal(persisted?.workspaceSnapshot?.baseTree, terminal.workspaceSnapshot?.baseTree);
+  assert.ok((persisted?.workspaceSnapshot?.size ?? 0) > 0);
+
+  await rm(workspace, { recursive: true, force: true });
 });
 
 test('OrchestrationService idempotency reuses one parent and one child set', async () => {

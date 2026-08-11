@@ -5,6 +5,7 @@ import type {
   JobExecution,
   JobRoutePoolSelection,
   JobStatus,
+  JobWorkspaceSnapshot,
   ResolvedRoute,
 } from './types.js';
 
@@ -360,6 +361,8 @@ export interface OrchestrationRecord {
   cancelRequestedAt?: string;
   execution: JobExecution;
   events: OrchestrationEvent[];
+  /** Immutable parent input used for every child and reviewer admission. */
+  workspaceSnapshot?: JobWorkspaceSnapshot;
   plan?: DelegationPlan;
   children: OrchestrationChild[];
   /** Optional advisory evidence from one separately configured depth-one reviewer Job. */

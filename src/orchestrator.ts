@@ -779,15 +779,58 @@ export class Orchestrator {
     return this.#trackRoute(structuredClone(job.route));
   }
 
+  async captureWorkspaceSnapshot(
+    workspace: string,
+    executionId: string
+  ): Promise<NonNullable<JobRecord['workspaceSnapshot']>> {
+    if (this.#workspaceIsolation.mode !== 'git-worktree') {
+      throw new Error('Immutable parent workspace admission requires git-worktree isolation');
+    }
+    const resolved = path.resolve(workspace);
+    const workspaceStat = await stat(resolved).catch(() => undefined);
+    if (!workspaceStat?.isDirectory()) throw new Error(`Workspace is not a directory: ${resolved}`);
+    const inspection = await this.#workspaceIsolation.inspect(resolved);
+    return this.#workspaceIsolation.persistAdmissionSnapshot(inspection, executionId);
+  }
+
+  discardWorkspaceSnapshot(executionId: string): Promise<void> {
+    return this.#workspaceIsolation.discardAdmissionSnapshot(executionId);
+  }
+
+  async startFromWorkspaceSnapshot(
+    request: JobRequest,
+    executionId: string,
+    snapshot: NonNullable<JobRecord['workspaceSnapshot']>
+  ): Promise<StartJobResult> {
+    if (this.#workspaceIsolation.mode !== 'git-worktree') {
+      throw new Error('Immutable child workspace admission requires git-worktree isolation');
+    }
+    const normalized = normalizeRequest(request);
+    const inspection = await this.#workspaceIsolation.restoreAdmissionSnapshot(
+      executionId,
+      normalized.workspace,
+      snapshot
+    );
+    return this.#startInspected(normalized, inspection);
+  }
+
   async start(request: JobRequest): Promise<StartJobResult> {
     const normalized = normalizeRequest(request);
-    const workspace = await stat(normalized.workspace).catch(() => undefined);
-    if (!workspace?.isDirectory()) throw new Error(`Workspace is not a directory: ${normalized.workspace}`);
+    const workspaceStat = await stat(normalized.workspace).catch(() => undefined);
+    if (!workspaceStat?.isDirectory()) {
+      throw new Error(`Workspace is not a directory: ${normalized.workspace}`);
+    }
     const inspection =
       this.#workspaceIsolation.mode === 'git-worktree'
         ? await this.#workspaceIsolation.inspect(normalized.workspace)
         : undefined;
+    return this.#startInspected(normalized, inspection);
+  }
 
+  async #startInspected(
+    normalized: ReturnType<typeof normalizeRequest>,
+    inspection: WorkspaceInspection | undefined
+  ): Promise<StartJobResult> {
     const reservation = this.#reserveRoute(normalized.route);
     const route = reservation.route;
     const adapter = this.#adapters.get(route.worker);
