@@ -51,13 +51,16 @@ if (mode === 'block') {
             part: {
               type: 'step-finish',
               reason: 'stop',
-              tokens: {
-                total: 19,
-                input: 3,
-                output: 5,
-                reasoning: 7,
-                cache: { read: 2, write: 9 },
-              },
+              tokens:
+                process.env.FAKE_OPENCODE_STATS === 'invalid'
+                  ? { total: 19, input: null, output: 5, cache: {} }
+                  : {
+                      total: 19,
+                      input: 3,
+                      output: 5,
+                      reasoning: 7,
+                      cache: { read: 2, write: 9 },
+                    },
               cost: 0.125,
             },
           },

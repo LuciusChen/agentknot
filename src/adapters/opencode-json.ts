@@ -51,6 +51,8 @@ interface SessionStats {
   cost: number;
 }
 
+type SessionStatsEvidence = SessionStats | { unavailableReason: 'invalid' };
+
 type AuthStatus = {
   path: string;
   credential: boolean;
@@ -115,10 +117,11 @@ function addSafe(left: number, right: number): number {
   return value;
 }
 
-function addStepStats(current: SessionStats, part: Record<string, unknown>): SessionStats {
+function addStepStats(current: SessionStatsEvidence, part: Record<string, unknown>): SessionStatsEvidence {
+  if ('unavailableReason' in current) return current;
   const tokens = part.tokens;
   if (!isRecord(tokens) || !isRecord(tokens.cache)) {
-    throw new Error('OpenCode step_finish contained invalid token statistics');
+    return { unavailableReason: 'invalid' };
   }
   const input = tokens.input;
   const output = tokens.output;
@@ -134,19 +137,25 @@ function addStepStats(current: SessionStats, part: Record<string, unknown>): Ses
     !nonNegativeInteger(cacheWrite) ||
     !nonNegativeNumber(cost)
   ) {
-    throw new Error('OpenCode step_finish contained invalid token statistics');
+    return { unavailableReason: 'invalid' };
   }
-  return {
-    toolCalls: current.toolCalls,
-    tokens: {
-      input: addSafe(current.tokens.input, input),
-      output: addSafe(current.tokens.output, output),
-      cacheRead: addSafe(current.tokens.cacheRead, cacheRead),
-      cacheWrite: addSafe(current.tokens.cacheWrite, cacheWrite),
-      total: addSafe(current.tokens.total, total),
-    },
-    cost: current.cost + cost,
-  };
+  try {
+    const combinedCost = current.cost + cost;
+    if (!nonNegativeNumber(combinedCost)) return { unavailableReason: 'invalid' };
+    return {
+      toolCalls: current.toolCalls,
+      tokens: {
+        input: addSafe(current.tokens.input, input),
+        output: addSafe(current.tokens.output, output),
+        cacheRead: addSafe(current.tokens.cacheRead, cacheRead),
+        cacheWrite: addSafe(current.tokens.cacheWrite, cacheWrite),
+        total: addSafe(current.tokens.total, total),
+      },
+      cost: combinedCost,
+    };
+  } catch {
+    return { unavailableReason: 'invalid' };
+  }
 }
 
 function formatWorkerError(value: unknown): string {
@@ -310,7 +319,7 @@ export class OpenCodeJsonWorkerAdapter implements WorkerAdapter {
     let rawEventCount = 0;
     let stepFinished = false;
     let started = false;
-    let sessionStats: SessionStats = {
+    let sessionStats: SessionStatsEvidence = {
       toolCalls: 0,
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       cost: 0,
@@ -333,7 +342,13 @@ export class OpenCodeJsonWorkerAdapter implements WorkerAdapter {
           break;
         }
         case 'tool_use':
-          sessionStats = { ...sessionStats, toolCalls: addSafe(sessionStats.toolCalls, 1) };
+          if (!('unavailableReason' in sessionStats)) {
+            try {
+              sessionStats = { ...sessionStats, toolCalls: addSafe(sessionStats.toolCalls, 1) };
+            } catch {
+              sessionStats = { unavailableReason: 'invalid' };
+            }
+          }
           await emit('worker.tool.completed', {
             toolCallId: event.part?.callID,
             toolName: event.part?.tool,
@@ -342,8 +357,8 @@ export class OpenCodeJsonWorkerAdapter implements WorkerAdapter {
           break;
         case 'step_finish':
           if (!event.part) throw new Error('OpenCode step_finish did not contain part');
-          sessionStats = addStepStats(sessionStats, event.part);
           stepFinished = true;
+          sessionStats = addStepStats(sessionStats, event.part);
           break;
         case 'error':
           throw new Error(formatWorkerError(event.error));

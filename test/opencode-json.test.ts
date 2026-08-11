@@ -175,6 +175,19 @@ test('OpenCode JSON preserves exact session statistics and requires a valid comp
   );
 });
 
+test('OpenCode JSON keeps invalid provider token statistics advisory', async () => {
+  const result = await createAdapter('success', {
+    FAKE_OPENCODE_COMPLETION: 'valid',
+    FAKE_OPENCODE_STATS: 'invalid',
+  }).run(input(new AbortController().signal), () => undefined);
+
+  assert.equal(result.output, 'OpenCode conformance output');
+  assert.equal(result.completionReport?.taskOutcome, 'completed');
+  assert.deepEqual((result.metadata as Record<string, unknown>).sessionStats, {
+    unavailableReason: 'invalid',
+  });
+});
+
 test('OpenCode JSON rejects missing report, malformed JSONL, error, incomplete, and nonzero settlements', async () => {
   await assert.rejects(
     createAdapter('success', { FAKE_OPENCODE_COMPLETION: 'missing' }).run(
