@@ -27,7 +27,6 @@ import type {
 import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { MemoryJobStore } from '../src/store.js';
 import type {
-  JobRecord,
   ResolvedRoute,
   WorkerAdapter,
   WorkerEventSink,
@@ -371,26 +370,6 @@ class SwitchableOrchestrationStore implements OrchestrationStore {
 
   list(): Promise<OrchestrationRecord[]> {
     return this.delegate.list();
-  }
-}
-
-class ParentAwareJobStore extends MemoryJobStore {
-  constructor(readonly parentStore: OrchestrationStore) {
-    super();
-  }
-
-  override async create(record: JobRecord): Promise<void> {
-    const metadata = record.request.metadata?.agentknotDelegation as Record<string, unknown> | undefined;
-    if (metadata?.role === 'worker') {
-      const parent = await this.parentStore.get(String(metadata.orchestrationId));
-      assert.ok(parent?.plan, 'the deterministic handoff plan must be persisted before child admission');
-      assert.equal(
-        parent.events.some((event) => event.type === 'orchestration.handoff.accepted'),
-        true,
-        'the handoff event must be persisted before child admission'
-      );
-    }
-    await super.create(record);
   }
 }
 

@@ -50,7 +50,8 @@
         "OPENCODE_API_KEY"
       ],
       "maxAttempts": 2,
-      "timeoutMs": 3600000
+      "timeoutMs": 3600000,
+      "maxToolCalls": 160
     },
     "quality-review": {
       "worker": "repository-review",
@@ -61,7 +62,8 @@
         "OPENCODE_API_KEY"
       ],
       "maxAttempts": 1,
-      "timeoutMs": 3600000
+      "timeoutMs": 3600000,
+      "maxToolCalls": 64
     },
     "deepseek-flash": {
       "worker": "pi",
@@ -72,7 +74,8 @@
         "OPENCODE_API_KEY"
       ],
       "maxAttempts": 2,
-      "timeoutMs": 3600000
+      "timeoutMs": 3600000,
+      "maxToolCalls": 64
     }
   },
   "delegation": {

@@ -5,7 +5,6 @@ import type {
   AssessedSubtask,
   DelegationPlan,
   OrchestrationRequest,
-  PlannedSubtask,
   RouteSelectionEvidence,
   TaskAssessment,
   TaskComplexity,

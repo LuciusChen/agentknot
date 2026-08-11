@@ -27,7 +27,6 @@ export function parseWorkerCompletionOutput(output: string): ParsedWorkerComplet
   const match = WORKER_COMPLETION_REPORT_SUFFIX.exec(output);
   if (!match) return { output };
 
-  const separator = match[1] ?? '';
   const payload = match[2] ?? '';
   let value: unknown;
   try {

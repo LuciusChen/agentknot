@@ -1,4 +1,5 @@
 import type { DelegationConfig } from './config.js';
+import { isTerminalStatus } from './execution-status.js';
 import type { AgentKnotBrokerIdentity } from './http-server.js';
 import type { JobList } from './job-list.js';
 import type {
@@ -73,6 +74,12 @@ export interface AgentKnotEventBatch<Event, Record> {
   readonly progress?: AgentKnotWaitProgress;
 }
 
+interface WaitableRecord<Event extends { sequence: number }> {
+  readonly id: string;
+  readonly status: string;
+  readonly events: readonly Event[];
+}
+
 export interface AgentKnotHealthResponse {
   readonly ok: true;
   readonly service: 'agentknot';
@@ -133,10 +140,6 @@ async function boundedResponseText(response: Response): Promise<string> {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8');
-}
-
-function terminal(status: string): boolean {
-  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
 }
 
 function latestSequence(events: ReadonlyArray<{ sequence: number }>, initial = 0): number {
@@ -277,6 +280,91 @@ export class AgentKnotHttpClient {
     return body;
   }
 
+  async #waitForRecord<
+    Event extends { sequence: number },
+    Record extends WaitableRecord<Event>,
+  >(
+    initial: Record,
+    follow: (
+      id: string,
+      afterSequence: number,
+      signal?: AbortSignal
+    ) => Promise<AgentKnotEventBatch<Event, Record>>,
+    onUpdate?: (update: AgentKnotWaitUpdate) => void,
+    signal?: AbortSignal
+  ): Promise<Record> {
+    if (isTerminalStatus(initial.status)) return initial;
+    let reconnectAttempts = 0;
+    let cursor = latestSequence(initial.events);
+    while (true) {
+      try {
+        const batch = await follow(initial.id, cursor, signal);
+        reconnectAttempts = 0;
+        cursor = batch.nextSequence;
+        if (batch.record !== undefined) return batch.record;
+        if (batch.progress !== undefined) {
+          onUpdate?.({ connectivity: 'connected', progress: batch.progress });
+        }
+      } catch (error) {
+        if (signal?.aborted) throw clientAbortError(signal);
+        if (!retryableTransportError(error)) throw error;
+        reconnectAttempts += 1;
+        onUpdate?.({
+          connectivity: 'disconnected',
+          id: initial.id,
+          attempt: reconnectAttempts,
+          maxAttempts: WAIT_RECONNECT_ATTEMPTS,
+          message: error.message,
+        });
+        if (reconnectAttempts >= WAIT_RECONNECT_ATTEMPTS) throw error;
+        await delay(WAIT_RETRY_DELAY_MS, signal);
+      }
+    }
+  }
+
+  async #followRecord<
+    Event extends { sequence: number },
+    Record extends WaitableRecord<Event>,
+  >(
+    kind: 'job' | 'orchestration',
+    id: string,
+    afterSequence: number,
+    signal?: AbortSignal
+  ): Promise<AgentKnotEventBatch<Event, Record>> {
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new AgentKnotHttpClientError(
+        `${kind} event cursor must be a non-negative integer`
+      );
+    }
+    const label = `${kind} wait response`;
+    const body = asObject(
+      await this.#request(
+        `/v1/${kind === 'job' ? 'jobs' : 'orchestrations'}/${encodeURIComponent(id)}/events?after=${afterSequence}`,
+        signal === undefined ? {} : { signal }
+      ),
+      label
+    );
+    const value = body[kind];
+    const record =
+      value === undefined
+        ? undefined
+        : asObject(value, `${label}.${kind}`) as unknown as Record;
+    const events =
+      body.events === undefined
+        ? record?.events.filter((event) => event.sequence > afterSequence) ?? []
+        : sequencedEvents<Event>(body.events, `${label}.events`);
+    return {
+      events: [...events],
+      nextSequence: responseSequence(
+        body.nextSequence,
+        latestSequence(events, afterSequence),
+        `${label}.nextSequence`
+      ),
+      ...(record === undefined ? {} : { record }),
+      ...(body.wait === undefined ? {} : { progress: waitProgress(body.wait, kind, id) }),
+    };
+  }
+
   async health(): Promise<AgentKnotHealthResponse> {
     const body = asObject(await this.#request('/health/live'), 'health response');
     if (body.ok !== true) throw new AgentKnotHttpClientError('health response.ok must be true');
@@ -354,7 +442,10 @@ export class AgentKnotHttpClient {
         await this.#request(`/v1/orchestrations/${encodeURIComponent(id)}`),
         'orchestration response'
       );
-      return asObject(body.orchestration, 'orchestration response.orchestration') as unknown as OrchestrationRecord;
+      return asObject(
+        body.orchestration,
+        'orchestration response.orchestration'
+      ) as unknown as OrchestrationRecord;
     } catch (error) {
       if (error instanceof AgentKnotHttpClientError && error.status === 404) return undefined;
       throw error;
@@ -374,33 +465,13 @@ export class AgentKnotHttpClient {
     onUpdate?: (update: AgentKnotWaitUpdate) => void,
     signal?: AbortSignal
   ): Promise<OrchestrationRecord> {
-    if (terminal(initial.status)) return initial;
-    let reconnectAttempts = 0;
-    let cursor = latestSequence(initial.events);
-    while (true) {
-      try {
-        const batch = await this.followOrchestration(initial.id, cursor, signal);
-        reconnectAttempts = 0;
-        cursor = batch.nextSequence;
-        if (batch.record !== undefined) return batch.record;
-        if (batch.progress !== undefined) {
-          onUpdate?.({ connectivity: 'connected', progress: batch.progress });
-        }
-      } catch (error) {
-        if (signal?.aborted) throw clientAbortError(signal);
-        if (!retryableTransportError(error)) throw error;
-        reconnectAttempts += 1;
-        onUpdate?.({
-          connectivity: 'disconnected',
-          id: initial.id,
-          attempt: reconnectAttempts,
-          maxAttempts: WAIT_RECONNECT_ATTEMPTS,
-          message: error.message,
-        });
-        if (reconnectAttempts >= WAIT_RECONNECT_ATTEMPTS) throw error;
-        await delay(WAIT_RETRY_DELAY_MS, signal);
-      }
-    }
+    return this.#waitForRecord(
+      initial,
+      (id, afterSequence, currentSignal) =>
+        this.followOrchestration(id, afterSequence, currentSignal),
+      onUpdate,
+      signal
+    );
   }
 
   async followOrchestration(
@@ -408,40 +479,7 @@ export class AgentKnotHttpClient {
     afterSequence: number,
     signal?: AbortSignal
   ): Promise<AgentKnotEventBatch<OrchestrationEvent, OrchestrationRecord>> {
-    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
-      throw new AgentKnotHttpClientError('orchestration event cursor must be a non-negative integer');
-    }
-    const body = asObject(
-      await this.#request(
-        `/v1/orchestrations/${encodeURIComponent(id)}/events?after=${afterSequence}`,
-        signal === undefined ? {} : { signal }
-      ),
-      'orchestration wait response'
-    );
-    const record = body.orchestration === undefined
-      ? undefined
-      : asObject(
-          body.orchestration,
-          'orchestration wait response.orchestration'
-        ) as unknown as OrchestrationRecord;
-    const events = body.events === undefined
-      ? record?.events.filter((event) => event.sequence > afterSequence) ?? []
-      : sequencedEvents<OrchestrationEvent>(
-          body.events,
-          'orchestration wait response.events'
-        );
-    return {
-      events,
-      nextSequence: responseSequence(
-        body.nextSequence,
-        latestSequence(events, afterSequence),
-        'orchestration wait response.nextSequence'
-      ),
-      ...(record === undefined ? {} : { record }),
-      ...(body.wait === undefined
-        ? {}
-        : { progress: waitProgress(body.wait, 'orchestration', id) }),
-    };
+    return this.#followRecord('orchestration', id, afterSequence, signal);
   }
 
   async cancelOrchestration(id: string): Promise<void> {
@@ -490,33 +528,12 @@ export class AgentKnotHttpClient {
     onUpdate?: (update: AgentKnotWaitUpdate) => void,
     signal?: AbortSignal
   ): Promise<JobRecord> {
-    if (terminal(initial.status)) return initial;
-    let reconnectAttempts = 0;
-    let cursor = latestSequence(initial.events);
-    while (true) {
-      try {
-        const batch = await this.followJob(initial.id, cursor, signal);
-        reconnectAttempts = 0;
-        cursor = batch.nextSequence;
-        if (batch.record !== undefined) return batch.record;
-        if (batch.progress !== undefined) {
-          onUpdate?.({ connectivity: 'connected', progress: batch.progress });
-        }
-      } catch (error) {
-        if (signal?.aborted) throw clientAbortError(signal);
-        if (!retryableTransportError(error)) throw error;
-        reconnectAttempts += 1;
-        onUpdate?.({
-          connectivity: 'disconnected',
-          id: initial.id,
-          attempt: reconnectAttempts,
-          maxAttempts: WAIT_RECONNECT_ATTEMPTS,
-          message: error.message,
-        });
-        if (reconnectAttempts >= WAIT_RECONNECT_ATTEMPTS) throw error;
-        await delay(WAIT_RETRY_DELAY_MS, signal);
-      }
-    }
+    return this.#waitForRecord(
+      initial,
+      (id, afterSequence, currentSignal) => this.followJob(id, afterSequence, currentSignal),
+      onUpdate,
+      signal
+    );
   }
 
   async followJob(
@@ -524,32 +541,7 @@ export class AgentKnotHttpClient {
     afterSequence: number,
     signal?: AbortSignal
   ): Promise<AgentKnotEventBatch<JobEvent, JobRecord>> {
-    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
-      throw new AgentKnotHttpClientError('job event cursor must be a non-negative integer');
-    }
-    const body = asObject(
-      await this.#request(
-        `/v1/jobs/${encodeURIComponent(id)}/events?after=${afterSequence}`,
-        signal === undefined ? {} : { signal }
-      ),
-      'job wait response'
-    );
-    const record = body.job === undefined
-      ? undefined
-      : asObject(body.job, 'job wait response.job') as unknown as JobRecord;
-    const events = body.events === undefined
-      ? record?.events.filter((event) => event.sequence > afterSequence) ?? []
-      : sequencedEvents<JobEvent>(body.events, 'job wait response.events');
-    return {
-      events,
-      nextSequence: responseSequence(
-        body.nextSequence,
-        latestSequence(events, afterSequence),
-        'job wait response.nextSequence'
-      ),
-      ...(record === undefined ? {} : { record }),
-      ...(body.wait === undefined ? {} : { progress: waitProgress(body.wait, 'job', id) }),
-    };
+    return this.#followRecord('job', id, afterSequence, signal);
   }
 
   async cancelJob(id: string): Promise<void> {

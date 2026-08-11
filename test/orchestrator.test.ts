@@ -81,6 +81,61 @@ test('Orchestrator persists a complete evented job without knowing the controlle
   assert.equal((await store.get(job.id))?.status, 'succeeded');
 });
 
+test('Orchestrator stops one attempt at its configured normalized tool-call limit', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-tool-budget-'));
+  let runs = 0;
+  let attemptAborted = false;
+  const adapter: WorkerAdapter = {
+    name: 'budgeted',
+    async doctor() {
+      return { ok: true, message: 'ready' };
+    },
+    async run(input, emit) {
+      runs += 1;
+      try {
+        for (let index = 1; index <= 3; index += 1) {
+          await emit('worker.tool.started', { toolCallId: `tool-${index}` });
+        }
+      } catch (error) {
+        attemptAborted = input.signal.aborted;
+        throw error;
+      }
+      return { output: 'must not pass the budget' };
+    },
+  };
+  const budgetedConfig: AgentKnotConfig = {
+    ...config,
+    workers: { budgeted: { adapter: 'mock' } },
+    routes: {
+      budgeted: {
+        worker: 'budgeted',
+        provider: 'mock-provider',
+        model: 'mock-model',
+        maxAttempts: 2,
+        maxToolCalls: 2,
+      },
+    },
+    defaultRoute: 'budgeted',
+  };
+  const job = await new Orchestrator({
+    config: budgetedConfig,
+    store: new MemoryJobStore(),
+    adapters: new Map([['budgeted', adapter]]),
+  }).run({ prompt: 'respect the tool budget', workspace });
+
+  assert.equal(job.status, 'failed');
+  assert.equal(job.attempt, 1);
+  assert.equal(job.error?.name, 'WorkerToolCallLimitError');
+  assert.equal(job.error?.retryable, false);
+  assert.equal(runs, 1);
+  assert.equal(attemptAborted, true);
+  assert.equal(job.route.maxToolCalls, 2);
+  assert.equal(
+    job.events.filter((event) => event.type === 'worker.tool.started').length,
+    2
+  );
+});
+
 test('Job admission atomically creates the queued event or starts no worker', async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-admission-failure-'));
   let runs = 0;

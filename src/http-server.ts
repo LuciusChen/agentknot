@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import type { DelegationConfig } from './config.js';
+import { isTerminalStatus } from './execution-status.js';
 import { validateTaskAssessment } from './delegation-policy.js';
 import { assertJsonMetadata } from './metadata.js';
 import { buildJobList } from './job-list.js';
@@ -41,10 +42,6 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
     'cache-control': 'no-store',
   });
   response.end(data);
-}
-
-function terminal(status: string): boolean {
-  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
 }
 
 function compactJobProgress(job: JobRecord): object {
@@ -424,7 +421,7 @@ export function createAgentKnotHttpServer(
         return;
       }
 
-      const match = /^\/v1\/jobs\/([a-zA-Z0-9_-]+)(?:\/(events|cancel|wait))?$/.exec(pathname);
+      const match = /^\/v1\/jobs\/([a-zA-Z0-9_-]+)(?:\/(events|cancel))?$/.exec(pathname);
       if (match) {
         const id = match[1];
         const action = match[2];
@@ -453,7 +450,7 @@ export function createAgentKnotHttpServer(
           let events = jobEventsAfter
             ? await jobEventsAfter.call(runtime, id, after)
             : job.events.filter((event) => event.sequence > after);
-          if (events.length === 0 && !terminal(job.status)) {
+          if (events.length === 0 && !isTerminalStatus(job.status)) {
             const waitForJob = runtime.waitForJob ?? runtime.wait;
             if (!waitForJob) {
               sendJson(response, 501, { error: 'Durable Job wait is not available on this runtime' });
@@ -470,39 +467,12 @@ export function createAgentKnotHttpServer(
               ? await jobEventsAfter.call(runtime, id, after)
               : job.events.filter((event) => event.sequence > after);
           }
-          const nextSequence = terminal(job.status)
+          const nextSequence = isTerminalStatus(job.status)
             ? nextEventSequence(job.events, after)
             : nextEventSequence(events, after);
-          sendJson(response, terminal(job.status) ? 200 : 202, terminal(job.status)
+          sendJson(response, isTerminalStatus(job.status) ? 200 : 202, isTerminalStatus(job.status)
             ? { nextSequence, job }
             : { events, nextSequence, wait: compactJobProgress(job) });
-          return;
-        }
-        if (method === 'GET' && action === 'wait') {
-          const job = await runtime.get(id);
-          if (!job) {
-            sendJson(response, 404, { error: 'Job not found' });
-            return;
-          }
-          if (terminal(job.status)) {
-            sendJson(response, 200, { job });
-            return;
-          }
-          const waitForJob = runtime.waitForJob ?? runtime.wait;
-          if (!waitForJob) {
-            sendJson(response, 501, { error: 'Durable Job wait is not available on this runtime' });
-            return;
-          }
-          const current = await observeWhileConnected(request, response, (signal) =>
-            waitForJob.call(runtime, id, WAIT_HEARTBEAT_MS, signal)
-          );
-          if (!current) {
-            sendJson(response, 404, { error: 'Job not found' });
-            return;
-          }
-          sendJson(response, terminal(current.status) ? 200 : 202, terminal(current.status)
-            ? { job: current }
-            : { wait: compactJobProgress(current) });
           return;
         }
         if (method === 'POST' && action === 'cancel') {
@@ -520,7 +490,7 @@ export function createAgentKnotHttpServer(
       }
 
       const orchestrationMatch =
-        /^\/v1\/orchestrations\/([a-zA-Z0-9_-]+)(?:\/(events|cancel|wait))?$/.exec(pathname);
+        /^\/v1\/orchestrations\/([a-zA-Z0-9_-]+)(?:\/(events|cancel))?$/.exec(pathname);
       if (orchestrationMatch) {
         const id = orchestrationMatch[1];
         const action = orchestrationMatch[2];
@@ -552,7 +522,7 @@ export function createAgentKnotHttpServer(
           let events = runtime.orchestrationEventsAfter
             ? await runtime.orchestrationEventsAfter(id, after)
             : orchestration.events.filter((event) => event.sequence > after);
-          if (events.length === 0 && !terminal(orchestration.status)) {
+          if (events.length === 0 && !isTerminalStatus(orchestration.status)) {
             if (!runtime.waitForOrchestration) {
               sendJson(response, 501, {
                 error: 'Durable Orchestration wait is not available on this runtime',
@@ -570,44 +540,16 @@ export function createAgentKnotHttpServer(
               ? await runtime.orchestrationEventsAfter(id, after)
               : orchestration.events.filter((event) => event.sequence > after);
           }
-          const nextSequence = terminal(orchestration.status)
+          const nextSequence = isTerminalStatus(orchestration.status)
             ? nextEventSequence(orchestration.events, after)
             : nextEventSequence(events, after);
-          sendJson(response, terminal(orchestration.status) ? 200 : 202, terminal(orchestration.status)
+          sendJson(response, isTerminalStatus(orchestration.status) ? 200 : 202, isTerminalStatus(orchestration.status)
             ? { nextSequence, orchestration }
             : {
                 events,
                 nextSequence,
                 wait: await compactOrchestrationProgress(runtime, orchestration),
               });
-          return;
-        }
-        if (method === 'GET' && action === 'wait') {
-          const orchestration = await runtime.getOrchestration(id);
-          if (!orchestration) {
-            sendJson(response, 404, { error: 'Orchestration not found' });
-            return;
-          }
-          if (terminal(orchestration.status)) {
-            sendJson(response, 200, { orchestration });
-            return;
-          }
-          if (!runtime.waitForOrchestration) {
-            sendJson(response, 501, {
-              error: 'Durable Orchestration wait is not available on this runtime',
-            });
-            return;
-          }
-          const current = await observeWhileConnected(request, response, (signal) =>
-            runtime.waitForOrchestration!(id, WAIT_HEARTBEAT_MS, signal)
-          );
-          if (!current) {
-            sendJson(response, 404, { error: 'Orchestration not found' });
-            return;
-          }
-          sendJson(response, terminal(current.status) ? 200 : 202, terminal(current.status)
-            ? { orchestration: current }
-            : { wait: await compactOrchestrationProgress(runtime, current) });
           return;
         }
         if (method === 'POST' && action === 'cancel') {

@@ -575,9 +575,10 @@ test('PiRpcWorkerAdapter normalizes Pi tool events', async () => {
     command: process.execPath,
     commandArgs: [fixture],
     noSession: true,
+    environment: { FAKE_PI_TOOLCALL_END: 'true' },
   });
   const controller = new AbortController();
-  const events: JobEventType[] = [];
+  const events: Array<{ type: JobEventType; data?: Record<string, unknown> }> = [];
 
   await adapter.run(
     {
@@ -588,13 +589,15 @@ test('PiRpcWorkerAdapter normalizes Pi tool events', async () => {
       attempt: 1,
       signal: controller.signal,
     },
-    (type) => {
-      events.push(type);
+    (type, data) => {
+      events.push(data === undefined ? { type } : { type, data });
     }
   );
 
-  assert.ok(events.includes('worker.tool.started'));
-  assert.ok(events.includes('worker.tool.completed'));
+  const started = events.filter((event) => event.type === 'worker.tool.started');
+  assert.equal(started.length, 1);
+  assert.equal(started[0]?.data?.toolCallId, 'tool-1');
+  assert.equal(events.filter((event) => event.type === 'worker.tool.completed').length, 1);
 });
 
 test('PiRpcWorkerAdapter filters Pi lifecycle envelopes while counting every normal-run frame', async () => {

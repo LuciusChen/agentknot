@@ -126,6 +126,8 @@ export interface ResolvedRoute {
   requiredEnv: string[];
   maxAttempts: number;
   timeoutMs: number;
+  /** Omission leaves tool-call execution bounded only by timeout and adapter settlement. */
+  maxToolCalls?: number;
 }
 
 export interface JobResult {

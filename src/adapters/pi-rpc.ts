@@ -622,12 +622,6 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           if (delta?.type === 'text_delta' && typeof delta.delta === 'string') {
             output += delta.delta;
             await emit('worker.text.delta', { delta: delta.delta });
-          } else if (delta?.type === 'toolcall_end') {
-            await emit('worker.tool.started', {
-              toolCallId: delta.toolCall?.id,
-              toolName: delta.toolCall?.name,
-              arguments: delta.toolCall?.arguments,
-            });
           }
           break;
         }

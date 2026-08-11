@@ -330,6 +330,7 @@ test('HTTP API accepts work from a vendor-neutral controller and exposes the res
     const created = (await createdResponse.json()) as { job: JobRecord };
     const terminal = await new AgentKnotHttpClient(baseUrl).waitForJob(created.job);
     assert.equal(terminal.status, 'succeeded');
+    assert.equal((await fetch(`${baseUrl}/v1/jobs/${created.job.id}/wait`)).status, 404);
     const eventPaths = requestedPaths.filter((requestedPath) =>
       requestedPath.startsWith(`/v1/jobs/${created.job.id}/events?after=`)
     );
@@ -684,6 +685,10 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
     assert.equal(terminal.status, 'succeeded');
     assert.deepEqual(terminal.request.assessment, upstreamAssessment);
     assert.equal(terminal.result?.action, 'upstream');
+    assert.equal(
+      (await fetch(`${baseUrl}/v1/orchestrations/${created.orchestration.id}/wait`)).status,
+      404
+    );
     assert.deepEqual(
       requestedPaths.filter(
         (requestedPath) =>

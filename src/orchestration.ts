@@ -8,6 +8,7 @@ import {
   CancellationRequestedError,
 } from './durable-record-store.js';
 import { DurableExecutionCoordinator } from './durable-execution.js';
+import { isTerminalStatus } from './execution-status.js';
 import { DurableEventSubscription } from './durable-subscription.js';
 import { MAX_ARTIFACT_VALIDATION_PATCH_BYTES } from './artifact-validation.js';
 import { assertJsonMetadata } from './metadata.js';
@@ -128,10 +129,6 @@ function throwIfAborted(signal: AbortSignal): void {
   throw signal.reason instanceof Error ? signal.reason : new Error('Orchestration cancelled');
 }
 
-function terminal(status: string): boolean {
-  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
-}
-
 function delayWithSignal(milliseconds: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
@@ -214,7 +211,7 @@ export class OrchestrationService {
         : { leaseHeartbeatMs: options.leaseHeartbeatMs }),
     });
     this.#subscriptions = new DurableEventSubscription(this.#store, (record) =>
-      terminal(record.status)
+      isTerminalStatus(record.status)
     );
     this.#dispatchSlots = new Semaphore(this.#config.dispatch.maxConcurrency);
   }
@@ -260,7 +257,7 @@ export class OrchestrationService {
 
   async cancel(id: string, source = 'controller'): Promise<boolean> {
     const current = await this.#store.get(id);
-    if (current === undefined || terminal(current.status)) return false;
+    if (current === undefined || isTerminalStatus(current.status)) return false;
     const active = this.#activeOrchestrations.get(id);
     if (active !== undefined) {
       await active.cancel(source);
@@ -324,7 +321,7 @@ export class OrchestrationService {
         if (current === undefined) {
           throw new Error(`Orchestration ${record.id} disappeared after its recovery lease was claimed`);
         }
-        if (terminal(current.status)) continue;
+        if (isTerminalStatus(current.status)) continue;
         record = current;
         const previousStatus = record.status;
         const previousExecution = record.execution;
@@ -397,9 +394,9 @@ export class OrchestrationService {
     previousStatus: OrchestrationRecord['status']
   ): Promise<void> {
     for (const child of record.children) {
-      if (terminal(child.status)) continue;
+      if (isTerminalStatus(child.status)) continue;
       const job = await this.#jobs.get(child.jobId);
-      if (job === undefined || !terminal(job.status)) continue;
+      if (job === undefined || !isTerminalStatus(job.status)) continue;
       child.status = job.status;
       if (job.result !== undefined) child.output = job.result.output;
       if (job.error !== undefined) child.error = structuredClone(job.error);
@@ -526,7 +523,7 @@ export class OrchestrationService {
       }
       return {
         orchestration: structuredClone(admittedRecord),
-        completion: terminal(admittedRecord.status)
+        completion: isTerminalStatus(admittedRecord.status)
           ? Promise.resolve(structuredClone(admittedRecord))
           : this.#waitUntilTerminal(admittedRecord.id),
         cancel: async () => {
@@ -548,7 +545,7 @@ export class OrchestrationService {
       persist: boolean
     ): Promise<void> => {
       cancellation ??= (async () => {
-        if (controller.signal.aborted || terminal(record.status)) return;
+        if (controller.signal.aborted || isTerminalStatus(record.status)) return;
         const previousCancelRequestedAt = record.cancelRequestedAt;
         try {
           if (persist) {
@@ -1148,7 +1145,7 @@ export class OrchestrationService {
         releaseSlot();
         throw error;
       }
-    } else if (!terminal(started.job.status)) {
+    } else if (!isTerminalStatus(started.job.status)) {
       await this.#jobs.recoverInterruptedJob(started.job.id, {
         waitForLease: true,
         signal,
@@ -1309,7 +1306,7 @@ export class OrchestrationService {
       while (true) {
         const job = await this.#jobs.wait(jobId, 60_000);
         if (job === undefined) throw new Error(`Delegated Job ${jobId} disappeared`);
-        if (terminal(job.status)) {
+        if (isTerminalStatus(job.status)) {
           if (cancellation !== undefined) await cancellation;
           return job;
         }
@@ -1346,9 +1343,9 @@ export class OrchestrationService {
 
     const launch = async (subtask: PlannedSubtask): Promise<ActiveChild | undefined> => {
       let child = childrenBySubtask.get(subtask.id);
-      if (child !== undefined && terminal(child.status)) {
+      if (child !== undefined && isTerminalStatus(child.status)) {
         const job = await this.#jobs.get(child.jobId);
-        if (job === undefined || !terminal(job.status) || job.status !== child.status) {
+        if (job === undefined || !isTerminalStatus(job.status) || job.status !== child.status) {
           throw new Error(`Orchestration ${record.id} has inconsistent terminal child ${child.jobId}`);
         }
         return undefined;
@@ -1406,7 +1403,7 @@ export class OrchestrationService {
         } else if (job.id !== child.jobId) {
           throw new Error(`Orchestration ${record.id} resolved a different child identity`);
         }
-        if (started === undefined && !terminal(job.status)) {
+        if (started === undefined && !isTerminalStatus(job.status)) {
           await this.#jobs.recoverInterruptedJob(job.id, {
             waitForLease: true,
             signal,

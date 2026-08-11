@@ -7,6 +7,8 @@
 - Owners: AgentKnot maintainers
 - Related: [decision 0052](./0052-bounded-analysis-and-observable-waiting.md), [decision 0055](./0055-durable-middleware-kernel.md), [PRD](../docs/PRD.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md)
 
+The temporary `/wait` compatibility decision below was superseded before release by [decision 0065](./0065-retire-http-wait-aliases.md); the durable cursor subscription remains authoritative.
+
 ## Context
 
 AgentKnot already persisted ordered Job and Orchestration events and SQLite exposed `eventsAfter(id, sequence)`, but the service `wait` implementations independently fetched a full record every 100 ms. HTTP wrapped those loops in five-second heartbeats and clients repeatedly called `/wait`. Documentation described middleware-owned wakeup before a shared wakeup primitive existed. Long worker execution therefore looked like opaque controller polling, duplicated Job/Orchestration code, and offered no public replay subscription contract.

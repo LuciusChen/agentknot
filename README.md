@@ -315,17 +315,16 @@ curl -sS http://127.0.0.1:7391/v1/jobs \
   }'
 ```
 
-The response is `202 Accepted` with a job ID. Wait for a compact progress heartbeat or terminal record, inspect exact state when needed, or cancel it:
+The response is `202 Accepted` with a job ID. Follow committed event progress or the terminal record, inspect exact state when needed, or cancel it:
 
 ```bash
 curl -sS http://127.0.0.1:7391/v1/jobs/JOB_ID
-curl -sS http://127.0.0.1:7391/v1/jobs/JOB_ID/wait
 curl -sS http://127.0.0.1:7391/v1/jobs/JOB_ID/events
 curl -sS 'http://127.0.0.1:7391/v1/jobs/JOB_ID/events?after=SEQUENCE'
 curl -sS -X POST http://127.0.0.1:7391/v1/jobs/JOB_ID/cancel
 ```
 
-`GET /v1/jobs/:id/events?after=SEQUENCE` and its Orchestration equivalent are the preferred follow boundary. Active responses contain only committed events after the cursor, `nextSequence`, and a compact heartbeat; terminal responses carry `nextSequence` and the full terminal record once, without duplicating its event history. A successful save wakes same-process readers immediately; reconnecting or replacement processes resume from the acknowledged sequence and use durable refresh when no process-local notification exists. Connections are never state authority. CLI `run` and `orchestrate`, the HTTP client, and MCP follow reuse this contract. The older `/wait` endpoints remain compatibility adapters over the same kernel ([decision 0062](postmortems/0062-durable-event-subscription.md)).
+`GET /v1/jobs/:id/events?after=SEQUENCE` and its Orchestration equivalent are the only remote follow boundary. Active responses contain only committed events after the cursor, `nextSequence`, and a compact heartbeat; terminal responses carry `nextSequence` and the full terminal record once, without duplicating its event history. A successful save wakes same-process readers immediately; reconnecting or replacement processes resume from the acknowledged sequence and use durable refresh when no process-local notification exists. Connections are never state authority. CLI `run` and `orchestrate`, the HTTP client, and MCP follow reuse this contract ([decisions 0062](postmortems/0062-durable-event-subscription.md) and [0065](postmortems/0065-retire-http-wait-aliases.md)).
 
 Inspect a completed job's patch artifacts without applying them:
 
@@ -424,7 +423,8 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "thinkingLevel": "max",
       "requiredEnv": ["OPENCODE_API_KEY"],
       "maxAttempts": 2,
-      "timeoutMs": 3600000
+      "timeoutMs": 3600000,
+      "maxToolCalls": 160
     },
     "deepseek-flash": {
       "worker": "pi",
@@ -433,7 +433,8 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "thinkingLevel": "max",
       "requiredEnv": ["OPENCODE_API_KEY"],
       "maxAttempts": 2,
-      "timeoutMs": 3600000
+      "timeoutMs": 3600000,
+      "maxToolCalls": 64
     },
     "quality-review": {
       "worker": "repository-review",
@@ -442,7 +443,8 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "thinkingLevel": "max",
       "requiredEnv": ["OPENCODE_API_KEY"],
       "maxAttempts": 1,
-      "timeoutMs": 3600000
+      "timeoutMs": 3600000,
+      "maxToolCalls": 64
     }
   },
   "delegation": {
@@ -476,7 +478,7 @@ The separation between worker and provider is deliberate. Workspace isolation is
 }
 ```
 
-Use `--config PATH` or `AGENTKNOT_CONFIG` for another configuration file. Route and worker names above describe only this dogfood deployment: controller identity, worker, reviewer, adapter, provider, model, and effort are not fixed in core. A leaf request, dispatch default/rule, or quality-review target may name a pool; top-level default and `doctor` remain exact-route surfaces. Pools contain 2–20 unique exact routes, use `least-active` with rotating equal-load ties, and never switch a selected Job during retry. Production SQLite admission derives activity from unexpired exact-route Job leases and commits the choice, Job, first lease, and cursor in one transaction; memory and legacy file stores keep local test/migration behavior. Every candidate in a quality-review pool must have `maxAttempts: 1`; omission disables review. `artifactValidation` is also optional and remains bounded/shell-free as configured. JSON configuration selects the built-in `mock` and `pi-rpc` adapters; custom TypeScript adapters remain available through direct construction.
+Use `--config PATH` or `AGENTKNOT_CONFIG` for another configuration file. Route and worker names above describe only this dogfood deployment: controller identity, worker, reviewer, adapter, provider, model, and effort are not fixed in core. Optional `maxToolCalls` is a per-attempt hard stop over normalized tool executions; omission leaves the existing timeout and event-size limits unchanged. The repository values are conservative operational bounds derived from persisted dogfood evidence, not model intelligence rankings or planner decisions ([decision 0067](postmortems/0067-route-tool-execution-budget.md)). A leaf request, dispatch default/rule, or quality-review target may name a pool; top-level default and `doctor` remain exact-route surfaces. Pools contain 2–20 unique exact routes, use `least-active` with rotating equal-load ties, and never switch a selected Job during retry. Production SQLite admission derives activity from unexpired exact-route Job leases and commits the choice, Job, first lease, and cursor in one transaction; memory and legacy file stores keep local test/migration behavior. Every candidate in a quality-review pool must have `maxAttempts: 1`; omission disables review. `artifactValidation` is also optional and remains bounded/shell-free as configured. JSON configuration selects the built-in `mock` and `pi-rpc` adapters; custom TypeScript adapters remain available through direct construction.
 
 When `workspaceIsolation.mode` is `git-worktree`, AgentKnot requires a valid `HEAD` and snapshots supported top-level staged, unstaged, and non-ignored untracked content, capped by the existing 16 MiB binary-patch budget. Before durable leaf Job admission, and before admission of a parent that will dispatch, a non-empty input patch is atomically retained under that exact execution identity with mode 0600; the record keeps its SHA-256, size, commit, tree, repository, workspace, and subdirectory. Parent children and reviewers derive their Job snapshots from that one admitted parent input, while restart recovery can verify and replay each retained boundary instead of mutable source state. Each attempt is a detached worktree at that base with the snapshot replayed only inside it; the worker receives the matching repository subdirectory. After every attempt, a binary worker-delta patch up to 16 MiB is written under storage, including tracked-file deletions, worker untracked files, and commits, and metadata records `baseTree` plus Git-derived repository-relative `changedFiles`, including `[]` for an empty delta. The exact managed worktree is then removed. A larger snapshot fails before admission; a larger worker patch fails without retry or partial artifact. These paths are controller-captured evidence, not a worker claim, completion proof, or semantic verification; the terminal summary keeps worker claims separate and includes the same optional `baseTree` identity. Patches are artifacts only and are never applied automatically. Legacy artifacts and summaries may omit `baseTree` or `changedFiles`. Ignored dependencies/build outputs remain absent and dirty submodule contents are rejected. Compatibility mode `none` passes the caller's directory directly and provides no isolation.
 

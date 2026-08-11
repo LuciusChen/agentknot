@@ -10,6 +10,7 @@ import {
   CancellationRequestedError,
 } from './durable-record-store.js';
 import { DurableExecutionCoordinator } from './durable-execution.js';
+import { isTerminalStatus } from './execution-status.js';
 import { DurableEventSubscription } from './durable-subscription.js';
 import {
   capturedChangedFilesSummary,
@@ -74,6 +75,10 @@ export class JobPersistenceError extends Error {
   }
 }
 
+class WorkerToolCallLimitError extends Error {
+  readonly name = 'WorkerToolCallLimitError';
+}
+
 export const ROUTE_DIAGNOSTIC_TIMEOUT_MS = 30_000;
 
 export interface RouteDiagnosticOptions {
@@ -96,10 +101,6 @@ interface RouteReservation {
 interface ActiveJob {
   completion: Promise<JobRecord>;
   cancel: () => void;
-}
-
-function isTerminalStatus(status: string): boolean {
-  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
 }
 
 function delayWithSignal(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -1191,8 +1192,21 @@ export class Orchestrator {
         job.route.timeoutMs
       );
       let attemptActive = true;
-      const workerEmit: WorkerEventSink = (type, data) =>
-        attemptActive ? this.#emit(job, type, data) : Promise.resolve();
+      let toolCalls = 0;
+      const workerEmit: WorkerEventSink = async (type, data) => {
+        if (!attemptActive) return;
+        if (type === 'worker.tool.started' && job.route.maxToolCalls !== undefined) {
+          toolCalls += 1;
+          if (toolCalls > job.route.maxToolCalls) {
+            const error = new WorkerToolCallLimitError(
+              `Worker exceeded route ${job.route.name} tool-call limit of ${job.route.maxToolCalls}`
+            );
+            attemptController.abort(error);
+            throw error;
+          }
+        }
+        await this.#emit(job, type, data);
+      };
       let isolated: IsolatedWorkspace | undefined;
       let result: Awaited<ReturnType<WorkerAdapter['run']>> | undefined;
       let failure: unknown;
@@ -1289,6 +1303,7 @@ export class Orchestrator {
       const details = limitErrorDetails(failure ?? new Error('Worker returned no result'));
       const retryable =
         !(failure instanceof ArtifactSizeLimitError) &&
+        !(failure instanceof WorkerToolCallLimitError) &&
         !jobSignal.aborted &&
         attempt < job.route.maxAttempts;
       job.error = { ...details, attempt, retryable };

@@ -40,6 +40,8 @@ export interface RouteConfig {
   requiredEnv?: string[];
   maxAttempts?: number;
   timeoutMs?: number;
+  /** Optional hard stop for normalized tool executions in one worker attempt. */
+  maxToolCalls?: number;
 }
 
 export interface RoutePoolConfig {
@@ -280,6 +282,14 @@ function parseRoute(name: string, value: unknown, workers: Record<string, Worker
   if (value.timeoutMs !== undefined && (!Number.isInteger(value.timeoutMs) || Number(value.timeoutMs) < 1)) {
     throw new Error(`routes.${name}.timeoutMs must be a positive integer`);
   }
+  if (
+    value.maxToolCalls !== undefined &&
+    (!Number.isInteger(value.maxToolCalls) ||
+      Number(value.maxToolCalls) < 1 ||
+      Number(value.maxToolCalls) > 1_000)
+  ) {
+    throw new Error(`routes.${name}.maxToolCalls must be an integer between 1 and 1000`);
+  }
   return {
     worker: value.worker,
     provider: value.provider,
@@ -288,6 +298,7 @@ function parseRoute(name: string, value: unknown, workers: Record<string, Worker
     ...(value.requiredEnv === undefined ? {} : { requiredEnv: [...value.requiredEnv] as string[] }),
     ...(value.maxAttempts === undefined ? {} : { maxAttempts: Number(value.maxAttempts) }),
     ...(value.timeoutMs === undefined ? {} : { timeoutMs: Number(value.timeoutMs) }),
+    ...(value.maxToolCalls === undefined ? {} : { maxToolCalls: Number(value.maxToolCalls) }),
   };
 }
 
@@ -643,5 +654,6 @@ export function resolveRoute(config: AgentKnotConfig, name?: string): ResolvedRo
     requiredEnv: [...(route.requiredEnv ?? [])],
     maxAttempts: route.maxAttempts ?? 1,
     timeoutMs: route.timeoutMs ?? 30 * 60_000,
+    ...(route.maxToolCalls === undefined ? {} : { maxToolCalls: route.maxToolCalls }),
   };
 }

@@ -163,6 +163,15 @@ function handle(command) {
     type: 'message_update',
     assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: output.slice(0, splitAt) },
   });
+  if (process.env.FAKE_PI_TOOLCALL_END === 'true') {
+    send({
+      type: 'message_update',
+      assistantMessageEvent: {
+        type: 'toolcall_end',
+        toolCall: { id: 'tool-1', name: 'read', arguments: { path: 'README.md' } },
+      },
+    });
+  }
   send({
     type: 'tool_execution_start',
     toolCallId: 'tool-1',
