@@ -36,6 +36,9 @@ const assessmentSchema = z
   .strict();
 
 const orchestrationIdSchema = z.object({ id: shortText }).strict();
+const orchestrationFollowSchema = z
+  .object({ id: shortText, afterSequence: z.number().int().nonnegative().default(0) })
+  .strict();
 const cliEntryPath = fileURLToPath(new URL('./cli.js', import.meta.url));
 
 function jsonResult(value: object) {
@@ -80,7 +83,7 @@ export function createAgentKnotMcpServer(): McpServer {
     {
       capabilities: { tools: {} },
       instructions:
-        'AgentKnot is controller-neutral orchestration middleware. The controller owns planning, task assessment, acceptance, and artifact promotion. If the broker is stopped or unavailable and a launch profile is configured, explicitly try agentknot_broker_start once. Use the remaining tools only to submit a controller-authored assessment to the independent broker and inspect its durable evidence.',
+        'AgentKnot is controller-neutral orchestration middleware. The controller owns planning, task assessment, acceptance, and artifact promotion. If the broker is stopped or unavailable and a launch profile is configured, explicitly try agentknot_broker_start once. Submit only a controller-authored assessment, follow durable work by sequence cursor, and inspect evidence without making transport state authoritative.',
     }
   );
 
@@ -200,6 +203,33 @@ export function createAgentKnotMcpServer(): McpServer {
         const orchestration = await client.getOrchestration(id);
         if (orchestration === undefined) throw new Error(`Orchestration not found: ${id}`);
         return buildOrchestrationHandoff(client, orchestration);
+      })
+  );
+
+  server.registerTool(
+    'agentknot_orchestration_follow',
+    {
+      title: 'Follow AgentKnot orchestration',
+      description:
+        'Wait for the next durable orchestration event batch after a sequence cursor. Returns after activity, terminal completion, or a bounded heartbeat; reconnect with nextSequence.',
+      inputSchema: orchestrationFollowSchema,
+      annotations: { readOnlyHint: true },
+    },
+    async ({ id, afterSequence }) =>
+      withErrors(async () => {
+        const client = await resolveBrokerClient();
+        const batch = await client.followOrchestration(id, afterSequence);
+        if (batch.record !== undefined) {
+          return {
+            nextSequence: batch.nextSequence,
+            terminal: await buildOrchestrationHandoff(client, batch.record),
+          };
+        }
+        return {
+          nextSequence: batch.nextSequence,
+          events: batch.events,
+          ...(batch.progress === undefined ? {} : { progress: batch.progress }),
+        };
       })
   );
 

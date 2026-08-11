@@ -10,6 +10,7 @@ import {
   CancellationRequestedError,
 } from './durable-record-store.js';
 import { DurableExecutionCoordinator } from './durable-execution.js';
+import { DurableEventSubscription } from './durable-subscription.js';
 import {
   capturedChangedFilesSummary,
   workerReportedSummary,
@@ -101,10 +102,6 @@ function isTerminalStatus(status: string): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'cancelled';
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
 function delayWithSignal(milliseconds: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(abortError(signal));
   return new Promise((resolve, reject) => {
@@ -192,6 +189,7 @@ export class Orchestrator {
   readonly #routePoolCursor = new Map<string, number>();
   readonly #activeJobs = new Map<string, ActiveJob>();
   readonly #durability: DurableExecutionCoordinator<JobRecord>;
+  readonly #subscriptions: DurableEventSubscription<JobEvent, JobRecord>;
 
   constructor(options: OrchestratorOptions) {
     this.#config = options.config;
@@ -218,6 +216,9 @@ export class Orchestrator {
         ? {}
         : { leaseHeartbeatMs: options.leaseHeartbeatMs }),
     });
+    this.#subscriptions = new DurableEventSubscription(this.#store, (job) =>
+      isTerminalStatus(job.status)
+    );
     this.#execution = {
       runtimeId: randomUUID(),
       pid: process.pid,
@@ -400,18 +401,31 @@ export class Orchestrator {
     return this.#store.list();
   }
 
-  async wait(id: string, timeoutMs = 5_000): Promise<JobRecord | undefined> {
+  async wait(
+    id: string,
+    timeoutMs = 5_000,
+    signal?: AbortSignal
+  ): Promise<JobRecord | undefined> {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) {
       throw new Error('Job wait timeout must be an integer between 0 and 60000');
     }
-    const deadline = Date.now() + timeoutMs;
-    while (true) {
-      const current = await this.#store.get(id);
-      if (current === undefined || isTerminalStatus(current.status) || Date.now() >= deadline) {
-        return current;
-      }
-      await delay(Math.min(100, Math.max(1, deadline - Date.now())));
-    }
+    return this.#subscriptions.wait(id, timeoutMs, signal === undefined ? {} : { signal });
+  }
+
+  eventsAfter(id: string, sequence: number): Promise<JobEvent[]> {
+    return this.#subscriptions.eventsAfter(id, sequence);
+  }
+
+  subscribe(
+    id: string,
+    afterSequence = 0,
+    signal?: AbortSignal
+  ): AsyncIterable<JobEvent> {
+    return this.#subscriptions.subscribe(
+      id,
+      afterSequence,
+      signal === undefined ? {} : { signal }
+    );
   }
 
   async cancel(id: string, source = 'controller'): Promise<boolean> {
@@ -444,16 +458,14 @@ export class Orchestrator {
   }
 
   async #waitUntilTerminal(id: string): Promise<JobRecord> {
-    while (true) {
-      const record = await this.#store.get(id);
-      if (record === undefined) throw new Error(`Job ${id} disappeared while waiting`);
-      if (isTerminalStatus(record.status)) return record;
-      await delay(100);
-    }
+    const record = await this.#subscriptions.awaitTerminal(id);
+    if (record === undefined) throw new Error(`Job ${id} disappeared while waiting`);
+    return record;
   }
 
-  #save(job: JobRecord): Promise<void> {
-    return this.#durability.save(job);
+  async #save(job: JobRecord): Promise<void> {
+    await this.#durability.save(job);
+    this.#subscriptions.notifyPersisted(job.id);
   }
 
   #startLeaseMonitor(job: JobRecord, controller: AbortController): () => Promise<void> {
@@ -977,6 +989,7 @@ export class Orchestrator {
     if (admittedRecord === undefined) {
       throw new JobPersistenceError('admission', undefined, new Error('Job admission returned no record'));
     }
+    if (admitted) this.#subscriptions.notifyPersisted(admittedRecord.id);
     if (!admitted) {
       if (snapshotPersisted) {
         await this.#workspaceIsolation.discardAdmissionSnapshot(id);

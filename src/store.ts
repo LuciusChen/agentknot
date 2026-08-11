@@ -19,6 +19,7 @@ interface StoredRecord {
   id: string;
   schemaVersion: 1;
   createdAt: string;
+  events: Array<{ sequence: number }>;
 }
 
 /** @internal Shared persistence engine behind the four public record-store wrappers. */
@@ -92,6 +93,14 @@ export default class RecordStoreBackend<T extends StoredRecord> {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw error;
     }
+  }
+
+  async eventsAfter(id: string, sequence: number): Promise<T['events']> {
+    if (!Number.isSafeInteger(sequence) || sequence < 0) {
+      throw new Error('Event cursor sequence must be a non-negative integer');
+    }
+    const record = await this.get(id);
+    return (record?.events.filter((event) => event.sequence > sequence) ?? []) as T['events'];
   }
 
   #path(id: string): string {

@@ -30,6 +30,7 @@ import type {
   JobArtifactPreview,
   JobArtifactVerificationReport,
   JobRecord,
+  JobEvent,
   JobRequest,
   RouteDiagnostic,
   StartJobResult,
@@ -90,8 +91,16 @@ export class AgentKnotRuntime {
     return this.jobs.get(id);
   }
 
-  waitForJob(id: string, timeoutMs?: number): Promise<JobRecord | undefined> {
-    return this.jobs.wait(id, timeoutMs);
+  waitForJob(id: string, timeoutMs?: number, signal?: AbortSignal): Promise<JobRecord | undefined> {
+    return this.jobs.wait(id, timeoutMs, signal);
+  }
+
+  jobEventsAfter(id: string, sequence: number): Promise<JobEvent[]> {
+    return this.jobs.eventsAfter(id, sequence);
+  }
+
+  subscribeToJob(id: string, afterSequence = 0, signal?: AbortSignal): AsyncIterable<JobEvent> {
+    return this.jobs.subscribe(id, afterSequence, signal);
   }
 
   cancelJob(id: string, source?: string): Promise<boolean> {
@@ -157,8 +166,27 @@ export class AgentKnotRuntime {
     return this.orchestrations.get(id);
   }
 
-  waitForOrchestration(id: string, timeoutMs?: number): Promise<OrchestrationRecord | undefined> {
-    return this.orchestrations.wait(id, timeoutMs);
+  waitForOrchestration(
+    id: string,
+    timeoutMs?: number,
+    signal?: AbortSignal
+  ): Promise<OrchestrationRecord | undefined> {
+    return this.orchestrations.wait(id, timeoutMs, signal);
+  }
+
+  orchestrationEventsAfter(
+    id: string,
+    sequence: number
+  ): ReturnType<OrchestrationService['eventsAfter']> {
+    return this.orchestrations.eventsAfter(id, sequence);
+  }
+
+  subscribeToOrchestration(
+    id: string,
+    afterSequence = 0,
+    signal?: AbortSignal
+  ): ReturnType<OrchestrationService['subscribe']> {
+    return this.orchestrations.subscribe(id, afterSequence, signal);
   }
 
   cancelOrchestration(id: string, source?: string): Promise<boolean> {

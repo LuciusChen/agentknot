@@ -8,6 +8,7 @@ import {
   CancellationRequestedError,
 } from './durable-record-store.js';
 import { DurableExecutionCoordinator } from './durable-execution.js';
+import { DurableEventSubscription } from './durable-subscription.js';
 import { MAX_ARTIFACT_VALIDATION_PATCH_BYTES } from './artifact-validation.js';
 import { assertJsonMetadata } from './metadata.js';
 import {
@@ -131,10 +132,6 @@ function terminal(status: string): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'cancelled';
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
 function delayWithSignal(milliseconds: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
@@ -199,6 +196,7 @@ export class OrchestrationService {
   readonly #recordMutations = new Map<string, Promise<void>>();
   readonly #activeOrchestrations = new Map<string, ActiveOrchestration>();
   readonly #durability: DurableExecutionCoordinator<OrchestrationRecord>;
+  readonly #subscriptions: DurableEventSubscription<OrchestrationEvent, OrchestrationRecord>;
 
   constructor(options: OrchestrationServiceOptions) {
     if (options.config.mode !== 'off' && options.jobs.workspaceIsolationMode() !== 'git-worktree') {
@@ -215,6 +213,9 @@ export class OrchestrationService {
         ? {}
         : { leaseHeartbeatMs: options.leaseHeartbeatMs }),
     });
+    this.#subscriptions = new DurableEventSubscription(this.#store, (record) =>
+      terminal(record.status)
+    );
     this.#dispatchSlots = new Semaphore(this.#config.dispatch.maxConcurrency);
   }
 
@@ -230,16 +231,31 @@ export class OrchestrationService {
     return this.#store.list();
   }
 
-  async wait(id: string, timeoutMs = 5_000): Promise<OrchestrationRecord | undefined> {
+  async wait(
+    id: string,
+    timeoutMs = 5_000,
+    signal?: AbortSignal
+  ): Promise<OrchestrationRecord | undefined> {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) {
       throw new Error('Orchestration wait timeout must be an integer between 0 and 60000');
     }
-    const deadline = Date.now() + timeoutMs;
-    while (true) {
-      const current = await this.#store.get(id);
-      if (current === undefined || terminal(current.status) || Date.now() >= deadline) return current;
-      await delay(Math.min(100, Math.max(1, deadline - Date.now())));
-    }
+    return this.#subscriptions.wait(id, timeoutMs, signal === undefined ? {} : { signal });
+  }
+
+  eventsAfter(id: string, sequence: number): Promise<OrchestrationEvent[]> {
+    return this.#subscriptions.eventsAfter(id, sequence);
+  }
+
+  subscribe(
+    id: string,
+    afterSequence = 0,
+    signal?: AbortSignal
+  ): AsyncIterable<OrchestrationEvent> {
+    return this.#subscriptions.subscribe(
+      id,
+      afterSequence,
+      signal === undefined ? {} : { signal }
+    );
   }
 
   async cancel(id: string, source = 'controller'): Promise<boolean> {
@@ -269,16 +285,14 @@ export class OrchestrationService {
   }
 
   async #waitUntilTerminal(id: string): Promise<OrchestrationRecord> {
-    while (true) {
-      const record = await this.#store.get(id);
-      if (record === undefined) throw new Error(`Orchestration ${id} disappeared while waiting`);
-      if (terminal(record.status)) return record;
-      await delay(100);
-    }
+    const record = await this.#subscriptions.awaitTerminal(id);
+    if (record === undefined) throw new Error(`Orchestration ${id} disappeared while waiting`);
+    return record;
   }
 
-  #save(record: OrchestrationRecord): Promise<void> {
-    return this.#durability.save(record);
+  async #save(record: OrchestrationRecord): Promise<void> {
+    await this.#durability.save(record);
+    this.#subscriptions.notifyPersisted(record.id);
   }
 
   #startLeaseMonitor(
@@ -499,6 +513,7 @@ export class OrchestrationService {
       }
       throw error;
     }
+    if (admitted) this.#subscriptions.notifyPersisted(admittedRecord.id);
     if (!admitted) {
       if (workspaceSnapshot !== undefined) await this.#jobs.discardWorkspaceSnapshot(id);
       const active = this.#activeOrchestrations.get(admittedRecord.id);
@@ -1292,7 +1307,7 @@ export class OrchestrationService {
     else signal.addEventListener('abort', onAbort, { once: true });
     try {
       while (true) {
-        const job = await this.#jobs.wait(jobId, 100);
+        const job = await this.#jobs.wait(jobId, 60_000);
         if (job === undefined) throw new Error(`Delegated Job ${jobId} disappeared`);
         if (terminal(job.status)) {
           if (cancellation !== undefined) await cancellation;

@@ -376,6 +376,7 @@ export interface JobStore {
   save(job: JobRecord): Promise<void>;
   get(id: string): Promise<JobRecord | undefined>;
   list(): Promise<JobRecord[]>;
+  eventsAfter?(id: string, sequence: number): Promise<JobEvent[]>;
   createIdempotent?(
     scope: string,
     key: string,

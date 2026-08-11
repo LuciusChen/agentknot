@@ -5,6 +5,7 @@ import { validateTaskAssessment } from './delegation-policy.js';
 import { assertJsonMetadata } from './metadata.js';
 import { buildJobList } from './job-list.js';
 import type {
+  OrchestrationEvent,
   OrchestrationRecord,
   OrchestrationRequest,
   StartOrchestrationResult,
@@ -13,6 +14,7 @@ import type {
   JobArtifactList,
   JobArtifactPreview,
   JobArtifactVerificationReport,
+  JobEvent,
   JobRequest,
   StartJobResult,
 } from './types.js';
@@ -43,20 +45,6 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
 
 function terminal(status: string): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'cancelled';
-}
-
-async function pollUntilHeartbeat<T>(load: () => Promise<T | undefined>): Promise<T | undefined> {
-  const deadline = Date.now() + WAIT_HEARTBEAT_MS;
-  let current = await load();
-  while (
-    current !== undefined &&
-    !terminal((current as { status: string }).status) &&
-    Date.now() < deadline
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    current = await load();
-  }
-  return current;
 }
 
 function compactJobProgress(job: JobRecord): object {
@@ -144,6 +132,39 @@ function requestPath(request: IncomingMessage): string {
   return new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
 }
 
+function eventCursor(request: IncomingMessage): number | undefined {
+  const raw = new URL(request.url ?? '/', 'http://127.0.0.1').searchParams.get('after');
+  if (raw === null) return undefined;
+  const sequence = Number(raw);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    throw new Error('after must be a non-negative integer event sequence');
+  }
+  return sequence;
+}
+
+function nextEventSequence(events: ReadonlyArray<{ sequence: number }>, after: number): number {
+  return events.reduce((sequence, event) => Math.max(sequence, event.sequence), after);
+}
+
+async function observeWhileConnected<T>(
+  request: IncomingMessage,
+  response: ServerResponse,
+  operation: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  const controller = new AbortController();
+  const disconnect = () => {
+    if (!response.writableEnded) controller.abort(new Error('HTTP observer disconnected'));
+  };
+  request.once('aborted', disconnect);
+  response.once('close', disconnect);
+  try {
+    return await operation(controller.signal);
+  } finally {
+    request.off('aborted', disconnect);
+    response.off('close', disconnect);
+  }
+}
+
 function asJobRequest(value: unknown): JobRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('Request body must be an object');
@@ -223,13 +244,22 @@ export interface AgentKnotHttpRuntime {
   verifyArtifacts(id: string): Promise<JobArtifactVerificationReport | undefined>;
   previewArtifact(id: string, attempt: number): Promise<JobArtifactPreview | undefined>;
   start(request: JobRequest): Promise<StartJobResult>;
-  waitForJob?(id: string, timeoutMs?: number): Promise<JobRecord | undefined>;
+  waitForJob?(id: string, timeoutMs?: number, signal?: AbortSignal): Promise<JobRecord | undefined>;
+  jobEventsAfter?(id: string, sequence: number): Promise<JobEvent[]>;
+  /** Direct Orchestrator compatibility; AgentKnotRuntime uses waitForJob/jobEventsAfter. */
+  wait?(id: string, timeoutMs?: number, signal?: AbortSignal): Promise<JobRecord | undefined>;
+  eventsAfter?(id: string, sequence: number): Promise<JobEvent[]>;
   cancelJob?(id: string, source?: string): Promise<boolean>;
   delegationPolicy?(): DelegationConfig;
   getOrchestration?(id: string): Promise<OrchestrationRecord | undefined>;
   listOrchestrations?(): Promise<OrchestrationRecord[]>;
   startOrchestration?(request: OrchestrationRequest): Promise<StartOrchestrationResult>;
-  waitForOrchestration?(id: string, timeoutMs?: number): Promise<OrchestrationRecord | undefined>;
+  waitForOrchestration?(
+    id: string,
+    timeoutMs?: number,
+    signal?: AbortSignal
+  ): Promise<OrchestrationRecord | undefined>;
+  orchestrationEventsAfter?(id: string, sequence: number): Promise<OrchestrationEvent[]>;
   cancelOrchestration?(id: string, source?: string): Promise<boolean>;
   shutdown?(): Promise<void>;
 }
@@ -409,12 +439,43 @@ export function createAgentKnotHttpServer(
           return;
         }
         if (method === 'GET' && action === 'events') {
-          const job = await runtime.get(id);
+          let job = await runtime.get(id);
           if (!job) {
             sendJson(response, 404, { error: 'Job not found' });
             return;
           }
-          sendJson(response, 200, { events: job.events });
+          const after = eventCursor(request);
+          if (after === undefined) {
+            sendJson(response, 200, { events: job.events });
+            return;
+          }
+          const jobEventsAfter = runtime.jobEventsAfter ?? runtime.eventsAfter;
+          let events = jobEventsAfter
+            ? await jobEventsAfter.call(runtime, id, after)
+            : job.events.filter((event) => event.sequence > after);
+          if (events.length === 0 && !terminal(job.status)) {
+            const waitForJob = runtime.waitForJob ?? runtime.wait;
+            if (!waitForJob) {
+              sendJson(response, 501, { error: 'Durable Job wait is not available on this runtime' });
+              return;
+            }
+            job = await observeWhileConnected(request, response, (signal) =>
+              waitForJob.call(runtime, id, WAIT_HEARTBEAT_MS, signal)
+            );
+            if (!job) {
+              sendJson(response, 404, { error: 'Job not found' });
+              return;
+            }
+            events = jobEventsAfter
+              ? await jobEventsAfter.call(runtime, id, after)
+              : job.events.filter((event) => event.sequence > after);
+          }
+          const nextSequence = terminal(job.status)
+            ? nextEventSequence(job.events, after)
+            : nextEventSequence(events, after);
+          sendJson(response, terminal(job.status) ? 200 : 202, terminal(job.status)
+            ? { nextSequence, job }
+            : { events, nextSequence, wait: compactJobProgress(job) });
           return;
         }
         if (method === 'GET' && action === 'wait') {
@@ -427,9 +488,14 @@ export function createAgentKnotHttpServer(
             sendJson(response, 200, { job });
             return;
           }
-          const current = runtime.waitForJob
-            ? await runtime.waitForJob(id, WAIT_HEARTBEAT_MS)
-            : await pollUntilHeartbeat(() => runtime.get(id));
+          const waitForJob = runtime.waitForJob ?? runtime.wait;
+          if (!waitForJob) {
+            sendJson(response, 501, { error: 'Durable Job wait is not available on this runtime' });
+            return;
+          }
+          const current = await observeWhileConnected(request, response, (signal) =>
+            waitForJob.call(runtime, id, WAIT_HEARTBEAT_MS, signal)
+          );
           if (!current) {
             sendJson(response, 404, { error: 'Job not found' });
             return;
@@ -473,12 +539,47 @@ export function createAgentKnotHttpServer(
           return;
         }
         if (method === 'GET' && action === 'events') {
-          const orchestration = await runtime.getOrchestration(id);
+          let orchestration = await runtime.getOrchestration(id);
           if (!orchestration) {
             sendJson(response, 404, { error: 'Orchestration not found' });
             return;
           }
-          sendJson(response, 200, { events: orchestration.events });
+          const after = eventCursor(request);
+          if (after === undefined) {
+            sendJson(response, 200, { events: orchestration.events });
+            return;
+          }
+          let events = runtime.orchestrationEventsAfter
+            ? await runtime.orchestrationEventsAfter(id, after)
+            : orchestration.events.filter((event) => event.sequence > after);
+          if (events.length === 0 && !terminal(orchestration.status)) {
+            if (!runtime.waitForOrchestration) {
+              sendJson(response, 501, {
+                error: 'Durable Orchestration wait is not available on this runtime',
+              });
+              return;
+            }
+            orchestration = await observeWhileConnected(request, response, (signal) =>
+              runtime.waitForOrchestration!(id, WAIT_HEARTBEAT_MS, signal)
+            );
+            if (!orchestration) {
+              sendJson(response, 404, { error: 'Orchestration not found' });
+              return;
+            }
+            events = runtime.orchestrationEventsAfter
+              ? await runtime.orchestrationEventsAfter(id, after)
+              : orchestration.events.filter((event) => event.sequence > after);
+          }
+          const nextSequence = terminal(orchestration.status)
+            ? nextEventSequence(orchestration.events, after)
+            : nextEventSequence(events, after);
+          sendJson(response, terminal(orchestration.status) ? 200 : 202, terminal(orchestration.status)
+            ? { nextSequence, orchestration }
+            : {
+                events,
+                nextSequence,
+                wait: await compactOrchestrationProgress(runtime, orchestration),
+              });
           return;
         }
         if (method === 'GET' && action === 'wait') {
@@ -491,9 +592,15 @@ export function createAgentKnotHttpServer(
             sendJson(response, 200, { orchestration });
             return;
           }
-          const current = runtime.waitForOrchestration
-            ? await runtime.waitForOrchestration(id, WAIT_HEARTBEAT_MS)
-            : await pollUntilHeartbeat(() => runtime.getOrchestration!(id));
+          if (!runtime.waitForOrchestration) {
+            sendJson(response, 501, {
+              error: 'Durable Orchestration wait is not available on this runtime',
+            });
+            return;
+          }
+          const current = await observeWhileConnected(request, response, (signal) =>
+            runtime.waitForOrchestration!(id, WAIT_HEARTBEAT_MS, signal)
+          );
           if (!current) {
             sendJson(response, 404, { error: 'Orchestration not found' });
             return;

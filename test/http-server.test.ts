@@ -163,7 +163,7 @@ test('HTTP client distinguishes disconnects and reconnects only to the same admi
       response.end(JSON.stringify({ job: admitted }));
       return;
     }
-    if (request.url === `/v1/jobs/${admitted.id}/wait`) {
+    if (request.url === `/v1/jobs/${admitted.id}/events?after=0`) {
       waitPaths.push(request.url);
       request.socket.destroy();
       return;
@@ -182,7 +182,10 @@ test('HTTP client distinguishes disconnects and reconnects only to the same admi
     const initial = await client.startJob(admitted.request);
     await assert.rejects(client.waitForJob(initial, (update) => updates.push(update)), /fetch failed/);
     assert.equal(admissions, 1);
-    assert.deepEqual(waitPaths, Array.from({ length: 3 }, () => `/v1/jobs/${admitted.id}/wait`));
+    assert.deepEqual(
+      waitPaths,
+      Array.from({ length: 3 }, () => `/v1/jobs/${admitted.id}/events?after=0`)
+    );
     assert.deepEqual(
       updates.map((update) =>
         update.connectivity === 'disconnected' ? [update.connectivity, update.attempt] : [update.connectivity]
@@ -195,6 +198,68 @@ test('HTTP client distinguishes disconnects and reconnects only to the same admi
     );
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('HTTP client aborts one cursor follow without reconnecting or cancelling work', async () => {
+  const now = new Date().toISOString();
+  const admitted: JobRecord = {
+    schemaVersion: 1,
+    id: 'job_observer_abort',
+    status: 'running',
+    request: { prompt: 'bounded test', workspace: '/tmp/test' },
+    route: {
+      name: 'mock',
+      worker: 'mock',
+      provider: 'mock',
+      model: 'mock',
+      requiredEnv: [],
+      maxAttempts: 1,
+      timeoutMs: 30_000,
+    },
+    createdAt: now,
+    updatedAt: now,
+    attempt: 1,
+    events: [],
+  };
+  let follows = 0;
+  let markFollowStarted!: () => void;
+  const followStarted = new Promise<void>((resolve) => {
+    markFollowStarted = resolve;
+  });
+  const server = createServer((request, response) => {
+    request.resume();
+    if (request.method === 'POST') {
+      response.writeHead(202, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ job: admitted }));
+      return;
+    }
+    if (request.url === `/v1/jobs/${admitted.id}/events?after=0`) {
+      follows += 1;
+      markFollowStarted();
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string');
+  const client = new AgentKnotHttpClient(`http://127.0.0.1:${address.port}`);
+  const controller = new AbortController();
+  try {
+    const initial = await client.startJob(admitted.request);
+    const observation = client.waitForJob(initial, undefined, controller.signal);
+    await followStarted;
+    controller.abort(new Error('stop observing'));
+    await assert.rejects(observation, /stop observing/);
+    assert.equal(follows, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    );
   }
 });
 
@@ -265,14 +330,51 @@ test('HTTP API accepts work from a vendor-neutral controller and exposes the res
     const created = (await createdResponse.json()) as { job: JobRecord };
     const terminal = await new AgentKnotHttpClient(baseUrl).waitForJob(created.job);
     assert.equal(terminal.status, 'succeeded');
+    const eventPaths = requestedPaths.filter((requestedPath) =>
+      requestedPath.startsWith(`/v1/jobs/${created.job.id}/events?after=`)
+    );
+    assert.equal(eventPaths[0], `/v1/jobs/${created.job.id}/events?after=1`);
+    assert.ok(eventPaths.length >= 1);
     assert.deepEqual(
-      requestedPaths.filter((requestedPath) => requestedPath === `/v1/jobs/${created.job.id}/wait`),
-      [`/v1/jobs/${created.job.id}/wait`]
+      eventPaths.map((requestedPath) => Number(new URL(requestedPath, baseUrl).searchParams.get('after'))),
+      [...eventPaths]
+        .map((requestedPath) => Number(new URL(requestedPath, baseUrl).searchParams.get('after')))
+        .sort((left, right) => left - right)
     );
     assert.equal(
       requestedPaths.filter((requestedPath) => requestedPath === `/v1/jobs/${created.job.id}`).length,
       0
     );
+  } finally {
+    await http.close();
+  }
+});
+
+test('disconnecting an HTTP cursor observer does not cancel its durable Job', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-http-observer-'));
+  const config: AgentKnotConfig = {
+    version: 1,
+    defaultRoute: 'mock',
+    storage: { directory: '.agentknot/jobs' },
+    workers: { mock: { adapter: 'mock', delayMs: 5_000 } },
+    routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock' } },
+  };
+  const orchestrator = new Orchestrator({
+    config,
+    store: new MemoryJobStore(),
+    adapters: createAdapters(config),
+  });
+  const http = createAgentKnotHttpServer(orchestrator);
+  const address = await http.listen(0);
+  const client = new AgentKnotHttpClient(`http://${address.host}:${address.port}`);
+  const controller = new AbortController();
+  try {
+    const initial = await client.startJob({ prompt: 'keep running', workspace });
+    const observation = client.waitForJob(initial, undefined, controller.signal);
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort(new Error('observer left'));
+    await assert.rejects(observation, /observer left/);
+    assert.equal((await client.getJob(initial.id))?.status, 'running');
   } finally {
     await http.close();
   }
@@ -584,9 +686,10 @@ test('HTTP API exposes controller-neutral orchestration policy and durable orche
     assert.equal(terminal.result?.action, 'upstream');
     assert.deepEqual(
       requestedPaths.filter(
-        (requestedPath) => requestedPath === `/v1/orchestrations/${created.orchestration.id}/wait`
+        (requestedPath) =>
+          requestedPath.startsWith(`/v1/orchestrations/${created.orchestration.id}/events?after=`)
       ),
-      [`/v1/orchestrations/${created.orchestration.id}/wait`]
+      [`/v1/orchestrations/${created.orchestration.id}/events?after=1`]
     );
     assert.equal(
       requestedPaths.filter(

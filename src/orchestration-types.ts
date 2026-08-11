@@ -379,6 +379,7 @@ export interface OrchestrationStore {
   save(record: OrchestrationRecord): Promise<void>;
   get(id: string): Promise<OrchestrationRecord | undefined>;
   list(): Promise<OrchestrationRecord[]>;
+  eventsAfter?(id: string, sequence: number): Promise<OrchestrationEvent[]>;
   createIdempotent?(
     scope: string,
     key: string,

@@ -199,6 +199,7 @@ test('MCP explicitly starts and follows a broker without owning its runtime', as
       'agentknot_routes',
       'agentknot_orchestration_start',
       'agentknot_orchestration_status',
+      'agentknot_orchestration_follow',
       'agentknot_orchestration_cancel',
       'agentknot_artifact_preview',
     ]);
@@ -248,14 +249,14 @@ test('MCP explicitly starts and follows a broker without owning its runtime', as
       })
     );
     assert.ok(['queued', 'dispatching', 'succeeded'].includes(String(admitted.status)));
-    let terminalStatus = admitted;
-    for (let attempt = 0; attempt < 50 && terminalStatus.status !== 'succeeded'; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      terminalStatus = toolJson(
-        await mcp.callTool('agentknot_orchestration_status', { id: admitted.id })
-      );
-    }
-    assert.equal(terminalStatus.status, 'succeeded');
+    const followed = toolJson(
+      await mcp.callTool('agentknot_orchestration_follow', {
+        id: admitted.id,
+        afterSequence: 0,
+      })
+    );
+    assert.ok(Number(followed.nextSequence) >= 2);
+    assert.equal((followed.terminal as { status: string }).status, 'succeeded');
 
     await stopBroker({ environment });
     detachedBrokerRunning = false;
