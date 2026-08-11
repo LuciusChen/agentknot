@@ -1,9 +1,14 @@
 import path from 'node:path';
+import { access } from 'node:fs/promises';
 
 import { createAdapters } from './adapters/index.js';
 import { loadConfig, resolveDelegationConfig, type DelegationConfig } from './config.js';
 import { OrchestrationService } from './orchestration.js';
-import { FileOrchestrationStore } from './orchestration-store.js';
+import {
+  FileOrchestrationStore,
+  SqliteOrchestrationStore,
+} from './orchestration-store.js';
+import { durableStorePath } from './durable-record-store.js';
 import type {
   OrchestrationRecord,
   OrchestrationRequest,
@@ -14,7 +19,7 @@ import {
   type JobEventListener,
   type RouteDiagnosticOptions,
 } from './orchestrator.js';
-import { FileJobStore } from './store.js';
+import { FileJobStore, SqliteJobStore } from './store.js';
 import {
   acquireRuntimeOwnership,
   RuntimeOwnershipError,
@@ -42,14 +47,20 @@ export class AgentKnotRuntime {
   readonly #ownership: RuntimeOwnership | undefined;
   readonly #executionEnabled: boolean;
   readonly #active = new Set<Promise<unknown>>();
+  readonly #resources: Array<{ close(): Promise<void> }>;
 
   constructor(
     readonly jobs: Orchestrator,
     readonly orchestrations: OrchestrationService,
-    options: { ownership?: RuntimeOwnership; executionEnabled?: boolean } = {}
+    options: {
+      ownership?: RuntimeOwnership;
+      executionEnabled?: boolean;
+      resources?: Array<{ close(): Promise<void> }>;
+    } = {}
   ) {
     this.#ownership = options.ownership;
     this.#executionEnabled = options.executionEnabled ?? true;
+    this.#resources = options.resources ?? [];
   }
 
   #assertExecutionOwner(): void {
@@ -75,6 +86,15 @@ export class AgentKnotRuntime {
 
   get(id: string): Promise<JobRecord | undefined> {
     return this.jobs.get(id);
+  }
+
+  waitForJob(id: string, timeoutMs?: number): Promise<JobRecord | undefined> {
+    return this.jobs.wait(id, timeoutMs);
+  }
+
+  cancelJob(id: string, source?: string): Promise<boolean> {
+    this.#assertExecutionOwner();
+    return this.jobs.cancel(id, source);
   }
 
   list(): Promise<JobRecord[]> {
@@ -126,6 +146,15 @@ export class AgentKnotRuntime {
     return this.orchestrations.get(id);
   }
 
+  waitForOrchestration(id: string, timeoutMs?: number): Promise<OrchestrationRecord | undefined> {
+    return this.orchestrations.wait(id, timeoutMs);
+  }
+
+  cancelOrchestration(id: string, source?: string): Promise<boolean> {
+    this.#assertExecutionOwner();
+    return this.orchestrations.cancel(id, source);
+  }
+
   listOrchestrations(): Promise<OrchestrationRecord[]> {
     return this.orchestrations.list();
   }
@@ -150,11 +179,41 @@ export class AgentKnotRuntime {
     );
   }
 
+  async shutdown(): Promise<void> {
+    this.#assertExecutionOwner();
+    await this.orchestrations.shutdown();
+    await this.jobs.shutdown();
+  }
+
   async close(): Promise<void> {
     if (this.#ownership !== undefined && this.#active.size > 0) {
       throw new RuntimeOwnershipError('Cannot release runtime storage ownership while work is active');
     }
-    await this.#ownership?.close();
+    const failures: unknown[] = [];
+    for (const resource of this.#resources) {
+      try {
+        await resource.close();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    try {
+      await this.#ownership?.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, 'Failed to close AgentKnot runtime');
+  }
+}
+
+async function exists(file: string): Promise<boolean> {
+  try {
+    await access(file);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
   }
 }
 
@@ -172,11 +231,32 @@ export async function createRuntime(options: CreateRuntimeOptions = {}): Promise
         loaded.orchestrationStorageDirectory,
       ])
     : undefined;
+  let jobStore: FileJobStore | SqliteJobStore | undefined;
+  let orchestrationStore: FileOrchestrationStore | SqliteOrchestrationStore | undefined;
   try {
+    if (executionEnabled || (await exists(durableStorePath(loaded.storageDirectory)))) {
+      jobStore = await SqliteJobStore.open(loaded.storageDirectory, {
+        readOnly: !executionEnabled,
+        importLegacy: executionEnabled,
+      });
+    } else {
+      jobStore = new FileJobStore(loaded.storageDirectory);
+    }
+    if (
+      executionEnabled ||
+      (await exists(durableStorePath(loaded.orchestrationStorageDirectory)))
+    ) {
+      orchestrationStore = await SqliteOrchestrationStore.open(
+        loaded.orchestrationStorageDirectory,
+        { readOnly: !executionEnabled, importLegacy: executionEnabled }
+      );
+    } else {
+      orchestrationStore = new FileOrchestrationStore(loaded.orchestrationStorageDirectory);
+    }
     const jobs = new Orchestrator({
       config: loaded.config,
       baseDirectory: loaded.baseDirectory,
-      store: new FileJobStore(loaded.storageDirectory),
+      store: jobStore,
       adapters: createAdapters(loaded.config),
       ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
     });
@@ -186,7 +266,7 @@ export async function createRuntime(options: CreateRuntimeOptions = {}): Promise
     const orchestrations = new OrchestrationService({
       config: resolveDelegationConfig(loaded.config),
       jobs,
-      store: new FileOrchestrationStore(loaded.orchestrationStorageDirectory),
+      store: orchestrationStore,
     });
     if (executionEnabled) {
       await orchestrations.reconcileInterruptedOrchestrations({ exclusiveOwner: true });
@@ -194,8 +274,15 @@ export async function createRuntime(options: CreateRuntimeOptions = {}): Promise
     return new AgentKnotRuntime(jobs, orchestrations, {
       ...(ownership === undefined ? {} : { ownership }),
       executionEnabled,
+      resources: [jobStore, orchestrationStore].filter(
+        (store): store is SqliteJobStore | SqliteOrchestrationStore => 'close' in store
+      ),
     });
   } catch (error) {
+    if (jobStore && 'close' in jobStore) await jobStore.close().catch(() => undefined);
+    if (orchestrationStore && 'close' in orchestrationStore) {
+      await orchestrationStore.close().catch(() => undefined);
+    }
     await ownership?.close();
     throw error;
   }

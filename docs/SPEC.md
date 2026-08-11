@@ -68,6 +68,49 @@ The controller, worker, provider, and model are separate concepts:
 
 Moving a responsibility across this table requires a SPEC update and a decision record before implementation.
 
+## Stage 3 durable-kernel contract
+
+This section is the accepted target contract for the in-progress Stage 3 migration. It supersedes the single-process authority and mandatory native-service conclusions in decisions 0022, 0038, 0040, and 0054 only as each gate becomes implemented and verified. Transactional records are current authority; explicitly labelled lifetime scheduler ownership and fail-without-resume behavior remain transitional until recovery cutover.
+
+### Controller handoff v1
+
+The versioned controller handoff is the existing `OrchestrationRequest` plus its strict `TaskAssessment`, not a new planner payload. `assessment.schemaVersion: 1` is the handoff schema version for 0.0.x. The controller authors intent, decomposition, complexity, task kinds, independence, and acceptance criteria. AgentKnot validates and records that evidence, then applies configuration-owned deterministic policy and routing. No controller adapter, transport, or middleware model may synthesize a semantic assessment from the raw prompt.
+
+The optional additive `idempotencyKey` is a bounded opaque controller/caller identity for one intended admission. Reusing the same scoped key with the same canonical request returns the original durable identity; reusing it with a different request is a conflict. It does not grant route, depth, or promotion authority and must not contain credentials or a transcript.
+
+### Durable state and events
+
+One transactional local store is authoritative for each migrated record kind. A successful transition atomically commits:
+
+- a bounded materialized record projection;
+- a monotonically increasing compare-and-swap revision;
+- the new append-only event suffix with gap-free per-record sequence numbers.
+
+Persisted events cannot be removed or rewritten. Readers resume after a sequence cursor and may reconstruct or validate a projection from the log. Live listeners, long-poll, SSE, callback, and controller wakeups may accelerate delivery only after commit; none is state authority. Two store instances attempting to save the same prior revision cannot silently overwrite each other.
+
+The implemented persistence foundation is `SqliteDurableRecordStore`: it uses one mode-0600 local SQLite database, WAL, `synchronous=FULL`, bounded record serialization, atomic projection/event transactions, compare-and-swap revisions, scoped idempotency records, durable cancellation intent, and execution leases. Production `createRuntime()` uses it for Job and Orchestration records and imports only legacy JSON snapshots whose filename identity matches the record, without rewriting or deleting them. Admission commits record, first event, optional idempotency mapping, and first lease atomically. Accepted cancellation fences a concurrent success transition. Restart reclaim is not yet implemented, so the old lifetime scheduler lock and fail-without-resume startup behavior remain transitional and are not silently advertised as recovery.
+
+### Execution leases and fencing
+
+An execution lease contains opaque `ownerId`, positive monotonically increasing `fence`, acquisition time, heartbeat time, and expiry time. Claim, renew, and release are transactional compare-and-swap operations:
+
+- an unexpired lease cannot be claimed by another owner;
+- the same owner may renew only its current unexpired fence;
+- after expiry or explicit release, a new claim receives a strictly larger fence;
+- stale owners cannot renew, release, append execution effects, or publish terminal completion after a newer fence exists.
+
+Lease expiry means ownership evidence was lost; it does not by itself mean the task failed or the client disconnected. Recovery may reclaim the last durable boundary as a new fenced attempt. AgentKnot must not claim that it reattached to an arbitrary child process unless the selected worker adapter exposes and passes an explicit resume contract.
+
+### Kernel and adapter convergence
+
+One orchestration kernel owns admission, deterministic policy/routing, scheduling, durable transitions, isolation, cancellation intent, completion, and artifact evidence. TypeScript calls it directly; CLI, HTTP, future MCP, prompt hooks, and native controller callbacks are edge adapters. Entry transports do not own a second scheduler, state machine, route policy, or active-work truth.
+
+Correctness does not require a shell-profile edit, systemd, launchd, a Unix-domain socket, or one controller process. A foreground process, container, application-managed local process, or optional native service manager may host the same kernel. Controller integrations remain capability-tiered: prompt-hook-only adapters are best-effort obligation injection, while deterministic automatic submission requires a native lifecycle callback able to supply the controller-authored handoff.
+
+### Migration gates
+
+The durable store is now the production record/event authority after deterministic duplicate-admission, append-conflict, stale-write, lease-renew/reclaim/fencing, same-ID wait/cancel, cancellation/success race, and cursor-resume tests. Scheduler cutover still requires restart recovery, late fenced completion, parent crash without duplicate child dispatch, durable capacity accounting, CLI/HTTP/TypeScript/MCP parity, and two independent controller-session/restart tests. Only after those gates pass may lifetime directory ownership, fail-without-resume reconciliation, required native-service setup, and superseded discovery/hook code be deleted. There must remain one production write path and one scheduler implementation after cutover.
+
 ## Current public contracts
 
 The canonical TypeScript definitions are in `src/types.ts` and `src/orchestration-types.ts`. Other transports and documentation must derive from or remain mechanically checked against those contracts; one runtime payload must not acquire multiple hand-maintained definitions.
@@ -104,7 +147,7 @@ The default `UserPromptSubmit` hook performs no orchestration. After workspace a
 
 The `OrchestrationRequest.workspace` is the authoritative primary target and the only repository any worker may modify through its isolated copy. Other repositories named in the task are read-only references. If the requested edit target conflicts with that workspace, the controller keeps it upstream or submits an assessment that deterministic policy rejects; AgentKnot does not reinterpret either repository. For `repository-analysis`, the controller-authored subtask must name the primary target, referenced repositories (or none), exact file/component scope, and non-goals. The generated worker execution prompt repeats a route-neutral boundary: at most five decision-relevant findings and 4,000 characters, concise path/line evidence plus impact, no repository inventory, no source restatement, and no silent scope expansion.
 
-One exact `127.0.0.1` `agentknot serve` process owns both file stores, startup reconciliation, active-request cancellation handles, and the shared process-local orchestration semaphore, and publishes its product-owned per-user record only after listening. Multiple controller sessions are ordinary concurrent HTTP clients and do not multiply `maxConcurrency`. Non-127 binds remain explicit. The native service adapter only supervises this foreground process; it is not a detached-child daemon, second scheduler, durable restart-aware queue, distributed lock, remote worker fleet, or multi-tenant service. The loopback API remains trusted-local with no authentication or TLS ([incident/decisions 0038](../postmortems/0038-shared-local-controller-runtime.md), [0040](../postmortems/0040-product-owned-local-service-discovery.md), and [0054](../postmortems/0054-portable-service-lifecycle.md)).
+One exact `127.0.0.1` `agentknot serve` process currently owns startup reconciliation and the shared process-local orchestration semaphore, and publishes its product-owned per-user record only after listening. Multiple controller sessions are ordinary concurrent HTTP clients and do not multiply `maxConcurrency`. Wait and cancellation authority has moved into the kernel/store: HTTP no longer keeps active Job/Orchestration Promise maps, nonterminal wait refreshes the same durable identity, and cancellation intent is persisted before an available local handle is accelerated. Non-127 binds remain explicit. The optional native service adapter only supervises the foreground process and is not required for correctness. The loopback API remains trusted-local with no authentication or TLS ([incident/decisions 0038](../postmortems/0038-shared-local-controller-runtime.md), [0040](../postmortems/0040-product-owned-local-service-discovery.md), [0054](../postmortems/0054-portable-service-lifecycle.md), and [0055](../postmortems/0055-durable-middleware-kernel.md)).
 
 Codex `agents/openai.yaml` permits implicit Skill invocation so an eligible task can follow the hook obligation without a per-prompt user reminder. The controller must still make the semantic decision and author the assessment in its normal model turn; neither the hook nor AgentKnot synthesizes it. The packages add no bundled CLI, MCP server, daemon, controller branch in `src`, local semantic classifier, or special `/goal` API.
 
@@ -120,6 +163,7 @@ Deterministic evidence verifies exact Codex/Claude hook parity, explicit-Skill b
 | `source` | no | Opaque controller identity; never a policy branch |
 | `metadata` | no | Controller-owned metadata copied to child provenance |
 | `delegation` | no | `inherit`, `never`, `suggest`, or `force` |
+| `idempotencyKey` | no | Bounded opaque key; exact canonical handoff reuse returns the original orchestration identity and conflicting reuse fails |
 
 `assessment` contains exactly `schemaVersion: 1`, `recommendation: "delegate" | "do-not-delegate"`, `complexity: "low" | "medium" | "high"`, `parallelizable: boolean`, at most 20 non-empty `taskKinds`, bounded non-empty `reasoning`, and at most 20 subtasks. Each subtask contains exactly bounded non-empty `title`, `kind`, `prompt`, and 1–20 bounded non-empty `acceptanceCriteria`. A delegate recommendation requires at least one subtask; do-not-delegate requires none. Unknown/missing fields, oversized values, and inconsistent recommendations fail before an Orchestration record is admitted. Route, worker, provider, model, and effort are not assessment fields. CLI JSON is capped at 64 KiB and HTTP/TypeScript use the same validator and defensive copy.
 
@@ -326,27 +370,28 @@ Ignored dependencies and build output are not present in a detached worktree. Di
 
 `MemoryJobStore` provides process-local snapshots.
 
-`FileJobStore` writes a complete JSON snapshot to a unique temporary file with mode `0600` and atomically renames it over the job path. The exact temporary file is removed in `finally` when write or rename fails. The orchestrator serializes append/save mutations per job so concurrent adapter event sources retain gap-free sequence numbers. It provides persistent audit snapshots under one execution owner and a local filesystem with normal rename semantics.
+Production `createRuntime()` uses `SqliteJobStore` and `SqliteOrchestrationStore`. Each wraps one `agentknot.sqlite` authority in its configured record directory. A transition atomically saves the bounded materialized record and appends only its new event suffix; every record has an internal CAS revision, and a stale revision fails instead of overwriting a concurrent change. `eventsAfter(id, sequence)` reads the append-only cursor. Scoped idempotency maps one bounded opaque key plus canonical-request SHA-256 to one record identity; exact reuse returns that record and different-payload reuse fails. Execution lease and cancellation tables are part of the same database.
+
+At first writable open, the SQLite stores import valid legacy `*.json` snapshots that do not already exist in the database. The basename without `.json` must equal the validated record ID; a mismatch fails closed instead of importing one identity through another filename. Import does not rewrite or delete the source evidence and is restart-safe per identity. Read-only runtime construction opens an existing SQLite database without schema writes; when no database exists yet, it retains byte-stable legacy file reads. `FileJobStore` and `FileOrchestrationStore` remain explicit legacy/test adapters during migration and are not a second production write path.
+
+The orchestrator serializes append/save mutations per record so concurrent adapter event sources retain gap-free sequence numbers before the store applies CAS and append-only validation. New durable admission commits the queued projection, sequence-one event, optional idempotency mapping, and first execution lease in one transaction; failure leaves none of them. A lease-owning execution passes its current fence on every normal event, artifact, terminal, and callback-bookkeeping save. Another store instance can persist idempotent cancellation intent; the live owner polls it while renewing its lease and aborts cooperatively. The store rejects a success transition after cancellation was accepted, closing the terminal race even before the next heartbeat. Lease release leaves a non-active fence tombstone, so every later reclaim increments the generation; an old owner cannot renew, release, or save execution state even when the same owner ID is reused.
 
 Execution-owning `createRuntime()` opens `.agentknot-runtime-lock.sqlite` through Node's built-in SQLite implementation in each real canonical Job and Orchestration storage directory, sets an in-memory journal, and holds one non-blocking `BEGIN EXCLUSIVE` transaction for the runtime lifetime. Directories must resolve to distinct locations and are acquired in deterministic path order. Locks are acquired before store construction, reconciliation, or admission; partial acquisition is closed if either directory is already owned. Read-only construction takes no lock and disables runtime execution/reconciliation methods. One-shot CLI execution closes ownership after completion, failed server listen closes it, process death releases the database locks through operating-system cleanup, and TypeScript callers use `AgentKnotRuntime.close()`, which refuses while tracked work is active. `RuntimeOwnershipError` reports contention, preparation/acquisition failure, invalid shared storage, release failure, or premature close. Node.js 22.13 or newer is required; no external `flock` helper or native add-on is used.
 
-These locks coordinate conforming file-backed runtimes sharing the same filesystem, including separate PID namespaces. They are advisory rather than a hostile-process security boundary: direct `FileJobStore`/`FileOrchestrationStore` writers and manually constructed runtimes remain responsible for not violating single-writer operation. The hidden SQLite file is ownership metadata only; it is not a Job/Orchestration store, durable journal, lease, heartbeat, compare-and-swap protocol, restart queue, or distributed lock.
+These transitional locks coordinate scheduler startup while restart reclaim is unfinished. They are separate from `agentknot.sqlite`, which is now the record/event/idempotency/lease authority. The lifetime lock is still advisory rather than a hostile-process security boundary and is scheduled for deletion after recovery, durable capacity, and multi-process scheduler gates pass.
 
-Leaf admission uses one `create` containing status `queued` and sequence-one `job.queued`; a create failure starts no worker. After admission, a failed event save rejects completion with `JobPersistenceError` classified as `event`, `artifact`, or `terminal`. It is a control-plane failure: it is never eligible for worker retry, never creates a substitute terminal event, and prevents callback delivery. The last successful store snapshot is authoritative and remains eligible for ordinary fail-without-resume startup reconciliation. If the failed save was the first record of a newly captured patch, AgentKnot removes that exact unrecorded patch and its managed worktree; an artifact already saved before later observer-evidence failure remains recorded.
+Leaf admission uses one atomic store operation containing status `queued`, sequence-one `job.queued`, optional idempotency identity, and the first execution lease; an admission failure starts no worker and retains no partial identity. After admission, a failed event save rejects completion with `JobPersistenceError` classified as `event`, `artifact`, or `terminal`. It is a control-plane failure: it is never eligible for worker retry, never creates a substitute terminal event, and prevents callback delivery. The cancellation/success conflict is the deliberate exception: the rejected success projection is converted to one fenced `cancelled` terminal transition with no retained success result. The last successful store snapshot is authoritative and remains eligible for ordinary fail-without-resume startup reconciliation. If the failed save was the first record of a newly captured patch, AgentKnot removes that exact unrecorded patch and its managed worktree; an artifact already saved before later observer-evidence failure remains recorded.
 
 Every newly created leaf `JobRecord` has top-level `schemaVersion: 1`. When reading a file, `FileJobStore` treats an absent `schemaVersion` as legacy v1 and materializes `schemaVersion: 1` on the in-memory record returned by `get` or `list`; read-only access does not rewrite the snapshot. An explicit `schemaVersion` other than `1` fails with an unsupported-version error rather than defaulting to v1.
 
-Both Job stores enforce the same 16 MiB ceiling on the exact pretty-printed UTF-8 JSON snapshot they would retain. A rejected create leaves no record; a rejected save leaves the last successful snapshot authoritative. Legacy files remain readable above the current ceiling, but a later mutation must fit. This is a write bound, not compaction or retention.
+Memory, legacy file, and SQLite Job store adapters enforce the same 16 MiB ceiling on the exact pretty-printed UTF-8 JSON projection they would retain. A rejected admission leaves no record; a rejected save leaves the last successful projection authoritative. Legacy files remain readable above the current ceiling, but a later mutation must fit. This is a write bound, not compaction or retention.
 
-Local Job and Orchestration snapshots and captured patch artifacts have no automatic expiry. They remain until an operator stops the execution owner, confirms no active work, and deletes only the exact intended record or per-Job artifact directory. AgentKnot supplies no garbage collector, storage-quota eviction, cascade deletion, or purge API in Stage 1; parent, child, and artifact evidence must be resolved explicitly before manual deletion.
+Local Job/Orchestration database records, imported legacy snapshots, and captured patch artifacts have no automatic expiry. AgentKnot supplies no garbage collector, storage-quota eviction, cascade deletion, or per-record purge API. An operator may remove an entire inactive configured record database or exact legacy/artifact path only after stopping execution and resolving parent, child, lease, and artifact evidence; deleting arbitrary SQLite rows or live database files is outside the contract.
 
 AgentKnot does not redact content in prompts, model output, events, result metadata, retained stderr, callback bodies, or patches. Credentials remain external to route records and Pi session statistics are allowlisted, but field minimization, omission, replacement, and byte truncation are not proof of redaction. Snapshot and artifact files use mode `0600`; directory and backup protection remains the local operator's responsibility.
 
-Current persistence does not provide:
+Current persistence still does not provide:
 
-- `fsync` durability guarantees;
-- a journal or event log independent of snapshots;
-- distributed locking, compare-and-swap updates, or protection from writers that ignore the runtime's advisory locks;
 - schema migration;
 - restartable or resumable execution;
 - retention or compaction.
@@ -355,15 +400,15 @@ At execution-owning runtime startup, both storage locks are acquired before reco
 
 ### Orchestration store
 
-`MemoryOrchestrationStore` and `FileOrchestrationStore` are separate from leaf job storage. The file store uses the same mode-`0600` unique-temporary-write-and-rename snapshot model and exact temporary-file cleanup on normal failure. Every parent record captures the normalized request including the validated controller assessment, immutable effective delegation policy, executor identity, plan hash, exact child prompts and routes, route-selection evidence when configured, child Job IDs, ordered orchestration events, child outcomes, optional quality-review/artifact-validation evidence, and terminal result or error. Every child record, child-start event, and child Job provenance carries the admitting plan hash and policy version.
+`SqliteOrchestrationStore` is the production parent authority and uses the same transaction, CAS, event-cursor, idempotency, lease, cancellation, migration, and byte-bound contracts as `SqliteJobStore`. `MemoryOrchestrationStore` and `FileOrchestrationStore` remain process-local test and explicit legacy adapters. Every parent record captures the normalized request including the validated controller assessment, immutable effective delegation policy, executor identity, plan hash, exact child prompts and routes, route-selection evidence when configured, child Job IDs, ordered orchestration events, child outcomes, optional quality-review/artifact-validation evidence, and terminal result or error. Every child record, child-start event, and child Job provenance carries the admitting plan hash and policy version.
 
 Every newly created parent `OrchestrationRecord` has top-level `schemaVersion: 1`. `FileOrchestrationStore` applies the same legacy-v1 materialization and read-only byte-stability rule, and explicitly unsupported schema versions fail clearly rather than being treated as v1.
 
-Memory and file Orchestration stores enforce the same 16 MiB exact-snapshot ceiling as the Job stores. Child output duplicated into parent provenance is therefore bounded by both the leaf output limit and the final parent snapshot limit.
+All Orchestration store adapters enforce the same 16 MiB exact-projection ceiling as the Job stores. Child output duplicated into parent provenance is therefore bounded by both the leaf output limit and the final parent projection limit.
 
-Parent admission atomically creates status `queued` with sequence-one `orchestration.queued`. Later event persistence appends in memory only for the duration of the save and rolls back the event and timestamp if the save fails, leaving the last successful store snapshot authoritative. A child `JobPersistenceError` remains a control-plane failure: the parent cancels other active children and propagates the rejection without fabricating a worker-style child outcome. A cancellation-evidence save failure is reported but cannot prevent abort propagation to active children or review/validation work. Parent and child files are not transactionally rolled back; restart reconciliation remains responsible for authoritative nonterminal snapshots after the owner exits.
+Parent durable admission atomically creates status `queued`, sequence-one `orchestration.queued`, optional idempotency identity, and the first execution lease. Later event persistence appends in memory only for the duration of the save and rolls back the event and timestamp if the save fails, leaving the last successful store projection authoritative. A child `JobPersistenceError` remains a control-plane failure: the parent cancels other active children and propagates the rejection without fabricating a worker-style child outcome. A cancellation-evidence save failure is reported but cannot prevent abort propagation to active children or review/validation work. Accepted durable cancellation prevents a simultaneous parent success and is materialized as cancellation-request plus terminal-cancelled evidence.
 
-The stores assume one execution owner, enforced for conforming file runtimes at `createRuntime()` rather than inside each store call. Concurrent controllers share that owner through the HTTP server and never open the stores themselves. The stores provide no compare-and-swap, journal, schema migration, resume, distributed concurrency, or parent/child transaction spanning multiple snapshot files.
+Production stores permit independent readers and enforce per-record CAS, idempotency, cancellation, and fenced execution writes. They do not yet provide restart reclaim, durable capacity admission, distributed consensus, schema migration, or one transaction spanning the separate Job and Orchestration databases. `createRuntime()` therefore still takes the transitional scheduler-lifetime locks before execution/reconciliation; this is a migration limit, not record authority.
 
 ## Job lifecycle
 
@@ -375,7 +420,7 @@ queued -> running -> succeeded
                   -> cancelled
 ```
 
-`queued` currently means the request has been admitted and persisted. Execution starts immediately; there is no capacity scheduler, dispatch queue, lease, or backpressure mechanism.
+`queued` currently means the request has been admitted and persisted. Execution starts immediately and takes a fenced renewable lease; there is still no capacity scheduler, dispatch queue, or backpressure mechanism. Lease expiry is fenced storage evidence, but automatic restart reclaim is not yet implemented.
 
 Retries remain inside one `running` job:
 
@@ -548,9 +593,9 @@ GET  /health                    compatibility alias
 
 `GET /v1/jobs`, local/remote `agentknot jobs --json`, and `AgentKnotHttpClient.listJobs()` return one canonical `JobList` summary page capped at 1 MiB including its trailing newline. Each item includes only schema version, ID, status, logical route name, timestamps, and attempt. The page includes total, truncation, and `maxBytes`; exact `show`/`GET /v1/jobs/:id` remains the full-record surface. A single oversized summary may be omitted rather than violating the page bound.
 
-Cancellation uses process-local active-job and active-orchestration maps. After a server restart, a persisted nonterminal record is reconciled as failed and is not an active cancellable execution.
+Cancellation first persists an idempotent request by durable record ID. The current lease owner observes it while renewing, and an accepted request atomically prevents a later success transition; local abort handles only accelerate cooperative cleanup. Wait and status re-read durable records and do not require the admitting HTTP process's completion map. Restart reclaim remains unavailable, so a new execution-owning runtime still reconciles a prior nonterminal record as failed after taking the transitional scheduler lock.
 
-After `run` or `orchestrate` admission, the CLI installs catchable `SIGINT` and `SIGTERM` handlers that cancel that exact execution, await cleanup, then release ownership. HTTP `close()` atomically closes admission, waits for in-flight admissions, cancels and drains tracked Jobs/orchestrations while the listener still serves liveness/read requests, returns 503 for new execution POSTs, then closes the listener. The CLI releases runtime ownership only after HTTP close settles. Response-stream errors remain connection-local. A hard kill receives only the fail-without-replay guarantees available to the next owner ([incident/decision 0046](../postmortems/0046-clutch-review-listing-and-shutdown-gaps.md)).
+After `run` or `orchestrate` admission, the CLI installs catchable `SIGINT` and `SIGTERM` handlers that cancel that exact execution, await cleanup, then release ownership. HTTP `close()` atomically closes admission, waits for in-flight admissions, asks the kernel to cancel and drain its active Jobs/orchestrations while the listener still serves liveness/read requests, returns 503 for new execution POSTs, then closes the listener. HTTP keeps no authoritative completion/cancellation map. The CLI releases runtime ownership only after HTTP close settles. Response-stream errors remain connection-local. A hard kill currently receives only the fail-without-replay guarantees available to the next owner ([incident/decisions 0046](../postmortems/0046-clutch-review-listing-and-shutdown-gaps.md) and [0055](../postmortems/0055-durable-middleware-kernel.md)).
 
 `createRuntime()` accepts `reconcileOnStartup`, which defaults to `true`. The default constructs an execution owner, acquires both storage locks, and performs fail-without-resume recovery. Passing `false` constructs an enforced read-only runtime: it opens configured stores without ownership or recovery and refuses execution/reconciliation calls. CLI `run`, `orchestrate`, and a parameter-valid `serve` use the owning path; read-oriented and invalid CLI commands use the read-only path, and invalid `serve` arguments are rejected before runtime construction. Therefore `show`, lists, usage reporting, artifact inspection, routes, delegation inspection, and both doctor modes cannot mutate Job or Orchestration records. See resolved [incident 0010](../postmortems/0010-read-only-cli-runtime-reconciliation.md) and [decision 0022](../postmortems/0022-file-runtime-single-writer-ownership.md).
 
@@ -629,8 +674,8 @@ At minimum, the conformance suite must eventually prove:
 
 - controller source neutrality and independent route resolution;
 - Codex/Claude hook parity for cwd Git roots, one explicit absolute or `~/...` repository path from a non-Git cwd, same-session continuation and exit/resume reuse, Git-root revalidation, shared-endpoint discovery, explicit local-config opt-in, server/config conflict, and bounded pre-admission failure without target-repository fallback;
-- built-in SQLite ownership contention and release across processes, deterministic canonical acquisition order, duplicate-directory rejection, partial-acquisition cleanup, and repeated close;
-- identical service-host contract evidence for safe definition replacement and install/start/stop/restart/status/uninstall, with systemd-user and launchd exact rendering/command sequences, non-secret absolute-entry `PATH`, native manager error propagation, and explicit unsupported-platform behavior;
+- atomic durable admission, canonical-request idempotency, append-only cursor resume, stale-CAS rejection, monotonic lease fences across expiry and release, cancellation/success races, late stale completion, and cross-process wait/cancel by record ID;
+- transitional SQLite scheduler-ownership contention/release and optional service-host rendering remain covered while present, but correctness tests must also prove foreground use without shell-profile, systemd, launchd, Unix-socket, or controller-lifecycle requirements;
 - route snapshot immutability;
 - valid and invalid request/configuration handling;
 - gap-free persisted event order and persist-before-live delivery;

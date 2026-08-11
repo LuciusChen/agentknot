@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -12,7 +12,10 @@ import type {
   RouteSelectionConfig,
 } from '../src/config.js';
 import { OrchestrationService } from '../src/orchestration.js';
-import { MemoryOrchestrationStore } from '../src/orchestration-store.js';
+import {
+  MemoryOrchestrationStore,
+  SqliteOrchestrationStore,
+} from '../src/orchestration-store.js';
 import type {
   DelegationPlan,
   OrchestrationRecord,
@@ -561,6 +564,82 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
     const provenance = child.request.metadata?.agentknotDelegation as Record<string, unknown>;
     assert.equal(provenance.planHash, record.plan?.planHash);
     assert.equal(provenance.policyVersion, 1);
+  }
+});
+
+test('OrchestrationService idempotency reuses one parent and one child set', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-idempotent-');
+  const adapter = new PlannerAndWorkerAdapter(assessment, 25);
+  const { orchestrations, orchestrationStore, jobStore } = createServices(adapter, 2);
+  const request: OrchestrationRequest = {
+    prompt: 'Review the tests and update the documentation once.',
+    workspace,
+    assessment,
+    source: 'codex',
+    idempotencyKey: 'controller-session:goal-1',
+  };
+
+  const first = await orchestrations.start(request);
+  const duplicate = await orchestrations.start(request);
+  assert.equal(duplicate.orchestration.id, first.orchestration.id);
+  await assert.rejects(
+    orchestrations.start({ ...request, prompt: 'Different goal under the same key.' }),
+    /Idempotency key conflict/
+  );
+  const [firstTerminal, duplicateTerminal] = await Promise.all([
+    first.completion,
+    duplicate.completion,
+  ]);
+
+  assert.equal(duplicateTerminal.id, firstTerminal.id);
+  assert.equal(firstTerminal.status, 'succeeded');
+  assert.equal((await orchestrationStore.list()).length, 1);
+  assert.equal((await jobStore.list()).length, 2);
+  assert.equal(adapter.workerRuns, 2);
+});
+
+test('independent durable Orchestration services reuse one atomic parent admission', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-durable-idempotent-');
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-orchestration-durable-store-'));
+  const firstStore = await SqliteOrchestrationStore.open(directory);
+  const secondStore = await SqliteOrchestrationStore.open(directory, { importLegacy: false });
+  const adapter = new PlannerAndWorkerAdapter(assessment, 25);
+  const config = testConfig(2);
+  const jobs = new Orchestrator({
+    config,
+    store: new MemoryJobStore(),
+    adapters: new Map([[adapter.name, adapter]]),
+  });
+  const first = new OrchestrationService({ config: config.delegation!, jobs, store: firstStore });
+  const second = new OrchestrationService({ config: config.delegation!, jobs, store: secondStore });
+  const request: OrchestrationRequest = {
+    prompt: 'Review tests and documentation exactly once through durable admission.',
+    workspace,
+    assessment,
+    source: 'codex',
+    idempotencyKey: 'controller-session:durable-goal-1',
+  };
+
+  try {
+    const started = await first.start(request);
+    const duplicate = await second.start(request);
+    const [terminal, duplicateTerminal] = await Promise.all([
+      started.completion,
+      duplicate.completion,
+    ]);
+
+    assert.equal(duplicate.orchestration.id, started.orchestration.id);
+    assert.equal(terminal.status, 'succeeded');
+    assert.equal(duplicateTerminal.id, terminal.id);
+    assert.equal(adapter.workerRuns, 2);
+    assert.equal((await secondStore.list()).length, 1);
+    assert.equal(await secondStore.getLease(terminal.id), undefined);
+  } finally {
+    await Promise.all([firstStore.close(), secondStore.close()]);
+    await Promise.all([
+      rm(workspace, { recursive: true, force: true }),
+      rm(directory, { recursive: true, force: true }),
+    ]);
   }
 });
 

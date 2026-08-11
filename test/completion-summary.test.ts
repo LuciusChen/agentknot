@@ -286,7 +286,7 @@ test('failed and cancelled jobs summarize the terminal attempt and do not retain
   });
   const running = await cancellation.start({ prompt: 'cancel', workspace: paths.root });
   await runStarted;
-  running.cancel();
+  await running.cancel();
   const cancelled = await running.completion;
   assert.equal(cancelled.status, 'cancelled');
   assert.deepEqual(cancelled.completionSummary, {

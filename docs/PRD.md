@@ -53,8 +53,8 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 8. Submit one controller-authored assessment and have the same policy decide whether to keep it upstream, suggest the validated split, or dispatch bounded child jobs regardless of controller vendor.
 9. Optionally ask a separately configured route to review one bounded patch before the controller makes the final acceptance decision.
 10. Optionally obtain controller-owned test evidence for one bounded patch without first applying it to the supplied source workspace.
-11. Use one local AgentKnot execution owner concurrently from multiple upstream controller sessions without sharing file-store write authority with those clients.
-12. Explicitly install or start one exact `127.0.0.1` AgentKnot server once, then let later CLI, Codex, and Claude sessions discover it without shell-profile edits or repeated server flags while retaining deliberate local/server overrides. Linux and macOS use thin native user-service adapters around the same foreground server; unsupported platforms fail explicitly.
+11. Use durable AgentKnot identities concurrently from multiple upstream controller sessions without depending on the admitting process's Promise or transport connection.
+12. Run the same middleware kernel in a foreground process, application-managed process, container, or optional native host without shell-profile edits or making systemd, launchd, Unix sockets, or one controller lifecycle a correctness prerequisite.
 13. Wait for delegated work with visible compact phase/activity evidence, distinguish an active worker from a lost middleware connection, and never resubmit the task merely because a client reconnects.
 
 ## Product principles
@@ -70,6 +70,8 @@ A route resolves worker, provider, model, thinking level, timeout, and retry set
 ### Records first, live signals second
 
 The durable job record and its ordered events are the authority. Streaming, callbacks, dashboards, or notifications are delivery conveniences and must not become the only copy of state.
+
+Stage 3 makes that principle literal across controller sessions and process lifetimes: the target is one transactional local middleware kernel with compare-and-swap state, append-only sequenced events, idempotent admission, renewable fenced execution leases, restart recovery, and resumable event cursors. A transport disconnect is not an execution failure, and an in-memory Promise or operating-system service definition is never durable state authority. This target is accepted but remains partially implemented until the gates in [decision 0055](../postmortems/0055-durable-middleware-kernel.md) and the SPEC pass.
 
 Each orchestration has one authoritative primary target workspace and workers may modify only its isolated copy; every other repository is a read-only reference. A requested edit target that conflicts with the admitted workspace must remain upstream as a visible mismatch. Repository analysis must also remain bounded at admission: unless exhaustive coverage is explicitly requested, the controller-authored subtask and worker contract name the primary target, references, exact scope, and non-goals, then return only a small decision-relevant evidence set rather than an inventory or source restatement.
 
@@ -93,6 +95,8 @@ An optional trusted local validation policy may apply exactly one bounded verifi
 
 Worker-specific process and protocol behavior belongs in worker adapters. Orchestration policy belongs in the core. Features that do not strengthen the execution handoff should remain outside the core.
 
+Controller integrations and transports are replaceable edges over the same kernel. The controller owns semantic planning and the versioned handoff; AgentKnot owns reliable execution after admission. Prompt hooks may inject a bounded obligation, but deterministic automatic submission requires a controller-native lifecycle capability and must not be simulated by moving planning into the middleware. Foreground, container, application-managed, and optional native-service hosting all run the same kernel; shell profiles and operating-system service managers are not product prerequisites.
+
 ### Bounded automation
 
 Automatic delegation must be explicit at the API boundary, carry a strict controller-authored assessment, remain depth-limited, concurrency-limited and isolated, and be recorded before execution. Its process-local semaphore covers child and reviewer execution, not independent callers issuing concurrent leaf Job requests; caller-side admission control remains required for direct bursts in v1. Automatic delegation must never imply automatic artifact integration, product decisions, commits, or pushes.
@@ -111,8 +115,8 @@ Version 0.0.1 currently implements:
 - the built-in structured advisory-review prompt reserves the transport-owned completion suffix as the only permitted content outside its role JSON, avoiding contradictory output requirements without weakening either parser;
 - a reusable route-neutral adapter unit contract for healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and already-aborted runs; Pi and OpenCode are the two real protocol implementations while Mock remains deterministic-only evidence;
 - OpenCode Go/Luna and OpenCode Go/DeepSeek V4 Flash routes through Pi configuration;
-- file-backed or in-memory job snapshots and ordered events;
-- atomic leaf admission containing the queued snapshot and first event, with later persistence failures isolated from worker retry and terminal-result fabrication;
+- transactional SQLite-backed production Job/Orchestration projections with append-only ordered event cursors, CAS revisions, scoped idempotent admission, monotonically fenced execution leases, durable cancellation intent, and byte-stable identity-validated legacy JSON import; in-memory and explicit legacy file stores remain test/migration adapters;
+- atomic durable admission containing the queued snapshot, first event, optional idempotency identity, and first execution lease, with later persistence failures isolated from worker retry and terminal-result fabrication and an accepted cancellation unable to become success;
 - top-level `schemaVersion: 1` on new leaf Job and Orchestration records, with schema-less legacy-v1 file reads materialized in memory without rewriting and unsupported explicit versions rejected;
 - immediate execution with cooperative timeouts, retries, and cancellation, plus bounded exact-child and output-drain supervision in the bundled Pi adapter even when an external event sink does not settle;
 - reproducible Pi execution that disables ambient extension, skill, prompt-template, and theme discovery while preserving repository instructions and explicitly configured resources;
@@ -129,16 +133,16 @@ Version 0.0.1 currently implements:
 - additive schemaVersion 1 terminal Job completion summaries with terminal outcome/attempt, controller-captured artifact path provenance, and explicit unavailable states; custom adapters may supply a strict worker completion report, while normal Pi and OpenCode Jobs require one and fail when it is missing or malformed so process settlement and an empty valid artifact cannot masquerade as task completion;
 - configuration validation and explicit configuration-only and opt-in live route diagnostics;
 - canonical HTTP process liveness that explicitly reports storage, routes, and inference as not checked, without claiming route readiness;
-- one exact `127.0.0.1` `serve` process publishing a product-owned per-user record after listen, with `agentknot client --json` reporting `unconfigured`, `available`, or `unavailable`; later CLI and Codex/Claude hooks discover the record without shell-profile edits or repeated server flags, while stale or malformed records fail without local or model fallback;
-- an explicit reversible `agentknot service` lifecycle that installs only that foreground process under systemd-user on Linux or launchd on macOS, persists validated absolute execution/configuration data plus a non-secret `PATH`, rejects unsafe existing definitions and unsupported platforms, and never runs from a prompt hook;
-- cross-platform single-writer ownership through one hidden Node built-in SQLite lifetime lock per canonical storage directory, without an external helper, lease, restart queue, or distributed-lock claim;
+- one exact `127.0.0.1` `serve` process publishing a product-owned per-user record after listen, with `agentknot client --json` reporting `unconfigured`, `available`, or `unavailable`; later CLI and Codex/Claude hooks discover the record without shell-profile edits or repeated server flags, while stale or malformed records fail without local or model fallback; discovery is convenience, not state authority;
+- optional reversible `agentknot service` host adapters for systemd-user or launchd during migration; normal correctness and documented foreground use do not require native-service installation, and hooks never invoke it;
+- transitional cross-platform scheduler ownership through one hidden Node built-in SQLite lifetime lock per canonical storage directory while restart reclaim is implemented; production record/event/idempotency/lease authority is the separate transactional `agentknot.sqlite`, and the lifetime lock is scheduled for deletion after Stage 3 recovery gates;
 - controller-neutral orchestration through CLI, HTTP, and TypeScript;
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
 - strict controller-authored assessments followed by deterministic task-kind policy;
 - immutable effective policy, plan hash, exact child prompts, routes, parent/child provenance, and ordered orchestration events;
 - bounded depth-one delegation with product defaults of `maxChildren: 2` and `maxConcurrency: 2` when those values are omitted, an explicit repository dogfood pool of six tasks with six active slots backed by current six-child Pi/OpenCode Go/Luna/max orchestration evidence, and a configuration ceiling of six for each with concurrency never exceeding the child count;
 - fail-without-resume startup reconciliation for stale jobs and orchestration records;
-- one execution-owning file runtime per canonical Job/Orchestration storage directory, with a second conforming writer refused before reconciliation or admission and read-only runtimes prevented from executing work;
+- one transitional execution scheduler per canonical Job/Orchestration storage pair while restart reclaim and durable capacity accounting are unfinished; durable records already reject stale CAS/fence writes and read-only runtimes remain unable to execute work;
 - catchable CLI and HTTP shutdown that closes admission, keeps the listener reachable during cancellation/drain, closes the listener, and only then releases runtime ownership, plus a bounded process-attributed Stage 1 soak;
 - optional vendor-neutral route-selection policy under `delegation.dispatch`, disabled by omission and limited to 1–20 ordered rules whose route or pool targets validate at config load, with `shadow` evidence-only and `active` human-authored execution modes ([decisions 0016](../postmortems/0016-shadow-route-selection.md), [0020](../postmortems/0020-human-authored-active-route-selection.md), and [0042](../postmortems/0042-complete-route-pool-balancing.md));
 
@@ -146,7 +150,7 @@ Rules may match non-empty unique `taskKinds` and/or non-empty unique parent `com
 
 Route diagnostics have two explicit modes. The default `doctor` command is a fast configuration, credential, and runtime check and must say that live inference was not checked. The opt-in `doctor --live` path performs one bounded real inference through the exact selected worker, provider, model, and thinking level; its 30-second control-plane timer triggers cooperative abort, and a supported adapter must settle after abort and clean up its resources. It reports provider errors with failure status and unsupported adapters honestly, does not fall back or select another route, does not create Job or artifact records, and does not add a probe before normal jobs or orchestrations.
 
-The current file stores provide persistent audit snapshots. After acquiring exclusive storage ownership, an execution-owning runtime deterministically marks every prior nonterminal Job or Orchestration failed once without replay; recorded PID liveness is audit evidence, not takeover authority. Read-oriented runtimes do not perform recovery. The stores do not provide resumable execution, a restartable queue, journaling, distributed coordination, or automatic cleanup of arbitrary descendants and worktrees left by an uncatchable hard process crash.
+The current production stores provide transactional projections, append-only event cursors, CAS revisions, idempotent admission, durable cancellation intent, and fenced leases. After acquiring the still-transitional scheduler lock, an execution-owning runtime nevertheless marks prior nonterminal Job or Orchestration records failed once without replay; restart reclaim is the next Stage 3 slice and is not claimed yet. Read-oriented runtimes do not perform recovery. The system does not yet provide a restartable capacity queue, distributed coordination, or automatic cleanup of arbitrary descendants and worktrees left by an uncatchable hard process crash.
 
 Provider and model independence are currently routing properties implemented by the selected worker. AgentKnot does not yet expose an independent provider-runtime interface.
 
@@ -194,7 +198,7 @@ If event, artifact-recording, or terminal persistence fails after admission, the
 
 The current `queued` state is an admission event immediately followed by execution; it does not imply a capacity-aware scheduler.
 
-The supported file-backed runtime is single-writer. Execution-owning construction first claims both canonical storage directories; it never uses a recorded PID to override a live or ambiguous owner. A new owner can reconcile prior nonterminal records only after the previous kernel-held ownership has ended. Read-only controllers may inspect the same snapshots concurrently but cannot execute or reconcile through that runtime. This is local ownership, not a lease, distributed lock, resumable queue, or hostile-process sandbox.
+The current scheduler is still single-owner while Stage 3 recovery is in progress. Execution-owning construction first claims both canonical storage directories; read-only controllers can inspect the transactional store concurrently but cannot execute or reconcile through that runtime. Admitted executions additionally hold renewable fenced record leases and persist cancellation intent, so stale storage writes and cross-session cancellation no longer depend on the HTTP process map. The lifetime scheduler lock is not a distributed lock or hostile-process sandbox and will be removed only after restart reclaim and durable capacity accounting pass.
 
 ## Product acceptance criteria
 
@@ -203,9 +207,9 @@ The product remains on course when all of the following are true:
 - changing `source` from Codex to Claude changes audit metadata, not execution behavior;
 - changing provider or model is a route change unless a genuinely new worker runtime is required;
 - configuration-only `doctor` explicitly says live inference was not checked, while `doctor --live` performs only the bounded exact selected-route probe and leaves no Job or artifact record;
-- one exact `127.0.0.1` server publishes its product-owned per-user record only after listen; `agentknot client --json` reports `unconfigured`, `available`, or `unavailable`; later CLI and Codex/Claude hook calls discover it without shell-profile edits or repeated flags, packaged automatic delegation requires an available shared endpoint unless `AGENTKNOT_CONFIG` explicitly opts into local execution, target repositories are never scanned for fallback configuration, stale/malformed records fail before admission without local or model fallback, `doctor` and `usage` stay local, and non-127 binds require explicit selection;
-- `agentknot service` installs, starts, stops, restarts, reports, and uninstalls one AgentKnot-owned user definition through systemd-user or launchd; installation is explicit, replacement is atomic, service-manager failures remain visible, unsupported platforms fail explicitly, and hooks never install or mutate service state;
-- execution-owning file runtimes contend through built-in SQLite lifetime locks on distinct canonical storage directories and release them on close or process death without an external ownership process;
+- every hosting mode runs the same kernel operations and durable records; foreground use requires no shell-profile/native-service mutation, while local HTTP discovery and optional native host adapters remain transport/hosting conveniences rather than state authority;
+- controller hooks never install, start, or mutate service state, scan target repositories for fallback configuration, or silently switch to local execution or another model after an unavailable selected transport;
+- durable admission atomically binds the queued record, first event, optional idempotency identity, and first fenced lease; stale revisions or fences cannot overwrite current work, accepted cancellation cannot commit as success, and released leases never reuse an old fence generation;
 - the same Job API works through CLI, HTTP, and TypeScript entry points;
 - the same orchestration policy and record shape work through CLI, HTTP, and TypeScript without controller-name branches;
 - every automatically dispatched child is admitted through the ordinary Job API only after its plan is persisted;
@@ -258,8 +262,8 @@ These are evidence requirements, not claims that the current MVP has already met
 - Callback delivery is currently unauthenticated, untrusted-network unsafe, non-retrying, and capable of sending the complete bounded job record when its serialized body is no more than 8 MiB.
 - A controller may be model-driven and can author a mistaken or repository-influenced assessment; strict validation and deterministic policy reduce but do not eliminate prompt-injection or task-classification risk. Shadow suggestions and active configured routing both inherit the limits of the parent complexity and task-kind classification; active mode therefore keeps a conservative Luna default and never adds fallback.
 - Shadow route evidence is not a measured model ranking; separate scorecards must compare routes on the same bounded workloads before any automatic selection is proposed.
-- Process-local task concurrency and file-runtime advisory ownership are not a distributed scheduler, lease, or hostile-writer security boundary.
-- A conforming second execution owner is refused before whole-snapshot mutation, including across PID namespaces that share the locked filesystem. A custom process can ignore advisory locks or mutate files directly; compare-and-set storage and distributed coordination remain absent ([decision 0022](../postmortems/0022-file-runtime-single-writer-ownership.md)).
+- Transactional CAS and fenced record leases prevent conforming stale writers, but the current child/reviewer capacity counters and restart scheduler are still process-local. Until Stage 3 recovery and durable capacity gates pass, the transitional lifetime scheduler lock remains and multi-host or hostile-writer safety is not claimed ([decision 0055](../postmortems/0055-durable-middleware-kernel.md)).
+- A custom process with direct filesystem access can ignore application contracts or alter the database/artifacts; mode-0600 files and middleware fencing are not an operating-system sandbox or distributed-consensus boundary.
 - Depth one constrains AgentKnot's own parent/child engine; the unauthenticated local API cannot prevent a host-capable worker from independently submitting another top-level orchestration.
 - Adding integrations before an adapter conformance contract exists can move provider-specific policy into the core.
 - Copying collaboration or fleet features from adjacent projects would dilute the local execution-handoff problem AgentKnot exists to solve.

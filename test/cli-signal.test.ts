@@ -8,7 +8,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import type { JobRecord } from '../src/types.js';
+import { SqliteJobStore } from '../src/store.js';
 
 const execFileAsync = promisify(execFile);
 const cli = path.resolve('dist/src/cli.js');
@@ -120,12 +120,17 @@ test('CLI SIGTERM cancels and awaits its exact Pi child before releasing storage
       (await execFileAsync('git', ['status', '--porcelain=v1'], { cwd: workspace })).stdout,
       ''
     );
-    const names = (await readdir(storage)).filter((name) => name.endsWith('.json'));
-    assert.equal(names.length, 1);
-    const job = JSON.parse(await readFile(path.join(storage, names[0]!), 'utf8')) as JobRecord;
-    assert.equal(job.status, 'cancelled');
-    assert.equal(job.events.at(-1)?.type, 'job.cancelled');
-    assert.equal(job.artifacts?.length, 1);
+    const jobs = await SqliteJobStore.open(storage, { readOnly: true, importLegacy: false });
+    try {
+      const records = await jobs.list();
+      assert.equal(records.length, 1);
+      const job = records[0]!;
+      assert.equal(job.status, 'cancelled');
+      assert.equal(job.events.at(-1)?.type, 'job.cancelled');
+      assert.equal(job.artifacts?.length, 1);
+    } finally {
+      await jobs.close();
+    }
     assert.equal((await readdir(storage)).some((name) => name.endsWith('.tmp')), false);
     assert.equal((await readdir(orchestrations)).some((name) => name.endsWith('.tmp')), false);
   } finally {

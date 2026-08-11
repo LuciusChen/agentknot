@@ -1,6 +1,7 @@
 export * from './adapters/index.js';
 export * from './config.js';
 export * from './delegation-policy.js';
+export * from './durable-record-store.js';
 export * from './execution.js';
 export * from './http-server.js';
 export * from './job-list.js';

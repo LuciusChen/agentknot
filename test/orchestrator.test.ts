@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -7,7 +7,7 @@ import test from 'node:test';
 import { createAdapters } from '../src/adapters/index.js';
 import type { AgentKnotConfig } from '../src/config.js';
 import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
-import { FileJobStore, MemoryJobStore } from '../src/store.js';
+import { FileJobStore, MemoryJobStore, SqliteJobStore } from '../src/store.js';
 import type { JobStore, WorkerAdapter, WorkerEventSink } from '../src/types.js';
 
 const config: AgentKnotConfig = {
@@ -395,4 +395,137 @@ test('worker event sinks stop accepting events after their attempt settles', asy
   );
   assert.deepEqual((await store.get(job.id))?.events, terminalEvents);
   assert.equal(job.events.at(-1)?.type, 'job.succeeded');
+});
+
+test('independent durable runtime observes cancellation and terminal state by Job identity', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-durable-cancel-workspace-'));
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-durable-cancel-store-'));
+  const firstStore = await SqliteJobStore.open(directory);
+  const secondStore = await SqliteJobStore.open(directory, { importLegacy: false });
+  let runs = 0;
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'waiting adapter ready' };
+    },
+    async run(input) {
+      runs += 1;
+      await new Promise<void>((_resolve, reject) => {
+        const rejectAbort = () =>
+          reject(input.signal.reason instanceof Error ? input.signal.reason : new Error('aborted'));
+        if (input.signal.aborted) rejectAbort();
+        else input.signal.addEventListener('abort', rejectAbort, { once: true });
+      });
+      return { output: 'unreachable' };
+    },
+  };
+  const first = new Orchestrator({
+    config,
+    store: firstStore,
+    adapters: new Map([['mock', adapter]]),
+    leaseTtlMs: 200,
+    leaseHeartbeatMs: 25,
+  });
+  const second = new Orchestrator({
+    config,
+    store: secondStore,
+    adapters: new Map([['mock', adapter]]),
+    leaseTtlMs: 200,
+    leaseHeartbeatMs: 25,
+  });
+
+  try {
+    const request = {
+      prompt: 'wait for durable cancellation',
+      workspace,
+      idempotencyKey: 'controller-session:turn-1',
+    };
+    const started = await first.start(request);
+    const duplicate = await second.start(request);
+    assert.equal(duplicate.job.id, started.job.id);
+    await assert.rejects(
+      second.start({ ...request, prompt: 'different request' }),
+      (error: unknown) => assertPersistenceError(error, 'admission')
+    );
+    await started.cancel();
+    const [terminal, duplicateTerminal] = await Promise.all([
+      started.completion,
+      duplicate.completion,
+    ]);
+    assert.equal(terminal.status, 'cancelled');
+    assert.equal(duplicateTerminal.id, terminal.id);
+    assert.equal(duplicateTerminal.status, 'cancelled');
+    assert.equal(runs, 1);
+    assert.equal(terminal.events.at(-1)?.type, 'job.cancelled');
+    assert.equal((await second.wait(started.job.id, 500))?.status, 'cancelled');
+    assert.equal((await secondStore.getCancellation(started.job.id))?.source, 'start-handle');
+    assert.equal(await secondStore.getLease(started.job.id), undefined);
+  } finally {
+    await Promise.all([firstStore.close(), secondStore.close()]);
+    await Promise.all([
+      rm(workspace, { recursive: true, force: true }),
+      rm(directory, { recursive: true, force: true }),
+    ]);
+  }
+});
+
+test('durable cancellation accepted while a worker settles wins the terminal success race', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-durable-cancel-race-workspace-'));
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-durable-cancel-race-store-'));
+  const firstStore = await SqliteJobStore.open(directory);
+  const secondStore = await SqliteJobStore.open(directory, { importLegacy: false });
+  let workerStarted!: () => void;
+  let settleWorker!: () => void;
+  const startedWorker = new Promise<void>((resolve) => {
+    workerStarted = resolve;
+  });
+  const workerMaySettle = new Promise<void>((resolve) => {
+    settleWorker = resolve;
+  });
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'race adapter ready' };
+    },
+    async run() {
+      workerStarted();
+      await workerMaySettle;
+      return { output: 'late success' };
+    },
+  };
+  const first = new Orchestrator({
+    config,
+    store: firstStore,
+    adapters: new Map([['mock', adapter]]),
+    leaseTtlMs: 3_000,
+    leaseHeartbeatMs: 1_000,
+  });
+  const second = new Orchestrator({
+    config,
+    store: secondStore,
+    adapters: new Map([['mock', adapter]]),
+    leaseTtlMs: 3_000,
+    leaseHeartbeatMs: 1_000,
+  });
+
+  try {
+    const started = await first.start({ prompt: 'settle during cancellation', workspace });
+    await startedWorker;
+    assert.equal(await second.cancel(started.job.id, 'racing-controller'), true);
+    settleWorker();
+    const terminal = await started.completion;
+
+    assert.equal(terminal.status, 'cancelled');
+    assert.equal(terminal.result, undefined);
+    assert.equal(terminal.error?.name, 'CancellationRequestedError');
+    assert.equal(terminal.events.at(-1)?.type, 'job.cancelled');
+    assert.equal((await secondStore.get(terminal.id))?.status, 'cancelled');
+  } finally {
+    settleWorker();
+    await Promise.all([firstStore.close(), secondStore.close()]);
+    await Promise.all([
+      rm(workspace, { recursive: true, force: true }),
+      rm(directory, { recursive: true, force: true }),
+    ]);
+  }
 });

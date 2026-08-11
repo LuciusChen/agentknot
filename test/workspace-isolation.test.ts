@@ -811,7 +811,7 @@ test('failure and cancellation capture patches and clean their worktrees', async
   });
   const started = await cancelledOrchestrator.start({ prompt: 'cancel', workspace: paths.root });
   await cancellationRun;
-  started.cancel();
+  await started.cancel();
   const cancelled = await started.completion;
   assert.equal(cancelled.status, 'cancelled');
   assert.equal(cancelled.artifacts?.length, 1);

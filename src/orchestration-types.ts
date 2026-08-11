@@ -32,6 +32,8 @@ export interface OrchestrationRequest {
   metadata?: Record<string, unknown>;
   /** May narrow automatic behavior. `force` never bypasses global off mode or keep-upstream policy. */
   delegation?: OrchestrationDelegationOverride;
+  /** Opaque caller key for exactly-once admission of one canonical handoff. */
+  idempotencyKey?: string;
 }
 
 export type TaskComplexity = 'low' | 'medium' | 'high';
@@ -373,6 +375,12 @@ export interface OrchestrationStore {
   save(record: OrchestrationRecord): Promise<void>;
   get(id: string): Promise<OrchestrationRecord | undefined>;
   list(): Promise<OrchestrationRecord[]>;
+  createIdempotent?(
+    scope: string,
+    key: string,
+    requestHash: string,
+    record: OrchestrationRecord
+  ): Promise<{ created: boolean; record: OrchestrationRecord }>;
 }
 
 export interface StartOrchestrationResult {

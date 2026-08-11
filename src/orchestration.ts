@@ -3,6 +3,11 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { DelegationConfig } from './config.js';
+import { canonicalJsonSha256 } from './canonical-json.js';
+import {
+  CancellationRequestedError,
+} from './durable-record-store.js';
+import { DurableExecutionCoordinator } from './durable-execution.js';
 import { MAX_ARTIFACT_VALIDATION_PATCH_BYTES } from './artifact-validation.js';
 import { isExecutorProcessAlive } from './execution.js';
 import { assertJsonMetadata } from './metadata.js';
@@ -43,12 +48,19 @@ export interface OrchestrationServiceOptions {
   jobs: Orchestrator;
   store: OrchestrationStore;
   now?: () => Date;
+  leaseTtlMs?: number;
+  leaseHeartbeatMs?: number;
 }
 
 interface ActiveChild {
   child: OrchestrationChild;
-  cancel: () => void;
+  cancel: () => Promise<void>;
   completion: Promise<{ job?: JobRecord; error?: unknown }>;
+}
+
+interface ActiveOrchestration {
+  completion: Promise<OrchestrationRecord>;
+  cancel: (source: string) => Promise<void>;
 }
 
 interface SemaphoreWaiter {
@@ -116,6 +128,14 @@ function throwIfAborted(signal: AbortSignal): void {
   throw signal.reason instanceof Error ? signal.reason : new Error('Orchestration cancelled');
 }
 
+function terminal(status: string): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
   if (typeof request.prompt !== 'string' || request.prompt.trim() === '') {
     throw new Error('Orchestration prompt must be a non-empty string');
@@ -135,6 +155,12 @@ function normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
     throw new Error('Orchestration delegation must be "inherit", "never", "suggest", or "force"');
   }
   if (request.metadata !== undefined) assertJsonMetadata(request.metadata);
+  if (request.idempotencyKey !== undefined) {
+    if (typeof request.idempotencyKey !== 'string' || request.idempotencyKey.trim() === '') {
+      throw new Error('Orchestration idempotencyKey must be a non-empty string');
+    }
+    assertTextLimit('Orchestration idempotencyKey', request.idempotencyKey, 256);
+  }
   return {
     prompt: request.prompt,
     workspace: path.resolve(request.workspace),
@@ -142,6 +168,9 @@ function normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
     ...(request.source === undefined ? {} : { source: request.source }),
     ...(request.metadata === undefined ? {} : { metadata: structuredClone(request.metadata) }),
     ...(request.delegation === undefined ? {} : { delegation: request.delegation }),
+    ...(request.idempotencyKey === undefined
+      ? {}
+      : { idempotencyKey: request.idempotencyKey }),
   };
 }
 
@@ -154,6 +183,8 @@ export class OrchestrationService {
   readonly #dispatchSlots: Semaphore;
   readonly #artifactValidationSlots = new Semaphore(1);
   readonly #recordMutations = new Map<string, Promise<void>>();
+  readonly #activeOrchestrations = new Map<string, ActiveOrchestration>();
+  readonly #durability: DurableExecutionCoordinator<OrchestrationRecord>;
 
   constructor(options: OrchestrationServiceOptions) {
     if (options.config.mode !== 'off' && options.jobs.workspaceIsolationMode() !== 'git-worktree') {
@@ -163,6 +194,13 @@ export class OrchestrationService {
     this.#jobs = options.jobs;
     this.#store = options.store;
     this.#now = options.now ?? (() => new Date());
+    this.#durability = new DurableExecutionCoordinator(this.#store, {
+      now: this.#now,
+      ...(options.leaseTtlMs === undefined ? {} : { leaseTtlMs: options.leaseTtlMs }),
+      ...(options.leaseHeartbeatMs === undefined
+        ? {}
+        : { leaseHeartbeatMs: options.leaseHeartbeatMs }),
+    });
     this.#dispatchSlots = new Semaphore(this.#config.dispatch.maxConcurrency);
   }
 
@@ -176,6 +214,63 @@ export class OrchestrationService {
 
   async list(): Promise<OrchestrationRecord[]> {
     return this.#store.list();
+  }
+
+  async wait(id: string, timeoutMs = 5_000): Promise<OrchestrationRecord | undefined> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) {
+      throw new Error('Orchestration wait timeout must be an integer between 0 and 60000');
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const current = await this.#store.get(id);
+      if (current === undefined || terminal(current.status) || Date.now() >= deadline) return current;
+      await delay(Math.min(100, Math.max(1, deadline - Date.now())));
+    }
+  }
+
+  async cancel(id: string, source = 'controller'): Promise<boolean> {
+    const current = await this.#store.get(id);
+    if (current === undefined || terminal(current.status)) return false;
+    const active = this.#activeOrchestrations.get(id);
+    if (active !== undefined) {
+      await active.cancel(source);
+      return true;
+    }
+    if (this.#durability.enabled) {
+      const accepted = await this.#durability.requestCancellation(id, source);
+      if (accepted === undefined) return false;
+      return true;
+    }
+    return false;
+  }
+
+  async shutdown(): Promise<void> {
+    const active = [...this.#activeOrchestrations.values()];
+    await Promise.allSettled(active.map((item) => item.cancel('kernel-shutdown')));
+    await Promise.allSettled(active.map((item) => item.completion));
+  }
+
+  async #waitUntilTerminal(id: string): Promise<OrchestrationRecord> {
+    while (true) {
+      const record = await this.#store.get(id);
+      if (record === undefined) throw new Error(`Orchestration ${id} disappeared while waiting`);
+      if (terminal(record.status)) return record;
+      await delay(100);
+    }
+  }
+
+  #save(record: OrchestrationRecord): Promise<void> {
+    return this.#durability.save(record);
+  }
+
+  #startLeaseMonitor(
+    record: OrchestrationRecord,
+    controller: AbortController,
+    cancel: (source: string, requestedAt: string, persist: boolean) => Promise<void>
+  ): () => Promise<void> {
+    return this.#durability.monitor(record.id, controller, (cancellation) =>
+      cancel(cancellation.source, cancellation.requestedAt, false)
+    );
   }
 
   async reconcileInterruptedOrchestrations(
@@ -284,38 +379,77 @@ export class OrchestrationService {
       children: [],
     };
     const controller = new AbortController();
-    await this.#store.create(record);
-
-    const completion = this.#execute(record, controller.signal).catch(async (error: unknown) => {
-      if (error instanceof JobPersistenceError || error instanceof RecordSizeLimitError) throw error;
-      if (record.status !== 'failed' && record.status !== 'cancelled') {
-        const details = limitErrorDetails(error);
-        record.status = controller.signal.aborted ? 'cancelled' : 'failed';
-        record.completedAt = this.#now().toISOString();
-        record.error = details;
-        await this.#appendEvent(
-          record,
-          controller.signal.aborted ? 'orchestration.cancelled' : 'orchestration.failed',
-          details,
-          record.completedAt
-        );
+    let admitted = true;
+    let admittedRecord = record;
+    if (this.#durability.enabled) {
+      const result = await this.#durability.admit(record, {
+        ownerId: this.#runtimeId,
+        ...(normalized.idempotencyKey === undefined
+          ? {}
+          : {
+              idempotency: {
+                scope: 'orchestration-admission-v1',
+                key: normalized.idempotencyKey,
+                requestHash: canonicalJsonSha256(normalized),
+              },
+            }),
+      });
+      if (result === undefined) throw new Error('Durable Orchestration admission is unavailable');
+      admitted = result.created;
+      admittedRecord = result.record;
+    } else if (normalized.idempotencyKey !== undefined) {
+      if (this.#store.createIdempotent === undefined) {
+        throw new Error('The selected Orchestration store does not support idempotent admission');
       }
-      return structuredClone(record);
-    });
-
-    return {
-      orchestration: structuredClone(record),
-      completion,
-      cancel: async () => {
-        if (controller.signal.aborted || ['succeeded', 'failed', 'cancelled'].includes(record.status)) return;
-        const requestedAt = this.#now().toISOString();
+      const result = await this.#store.createIdempotent(
+        'orchestration-admission-v1',
+        normalized.idempotencyKey,
+        canonicalJsonSha256(normalized),
+        record
+      );
+      admitted = result.created;
+      admittedRecord = result.record;
+    } else {
+      await this.#store.create(record);
+    }
+    if (!admitted) {
+      const active = this.#activeOrchestrations.get(admittedRecord.id);
+      if (active !== undefined) {
+        return {
+          orchestration: structuredClone(admittedRecord),
+          completion: active.completion,
+          cancel: async () => active.cancel('idempotent-controller'),
+        };
+      }
+      return {
+        orchestration: structuredClone(admittedRecord),
+        completion: terminal(admittedRecord.status)
+          ? Promise.resolve(structuredClone(admittedRecord))
+          : this.#waitUntilTerminal(admittedRecord.id),
+        cancel: async () => {
+          await this.cancel(admittedRecord.id, 'idempotent-controller');
+        },
+      };
+    }
+    let cancellation: Promise<void> | undefined;
+    const cancelWithEvidence = (
+      source: string,
+      requestedAt: string,
+      persist: boolean
+    ): Promise<void> => {
+      cancellation ??= (async () => {
+        if (controller.signal.aborted || terminal(record.status)) return;
         const previousCancelRequestedAt = record.cancelRequestedAt;
-        record.cancelRequestedAt = requestedAt;
         try {
+          if (persist) {
+            await this.#durability.requestCancellation(record.id, source, new Date(requestedAt));
+          }
+          const previousCancelRequestedAt = record.cancelRequestedAt;
+          record.cancelRequestedAt = requestedAt;
           await this.#appendEvent(
             record,
             'orchestration.cancel.requested',
-            { source: 'controller' },
+            { source },
             requestedAt
           );
         } catch (error) {
@@ -325,7 +459,59 @@ export class OrchestrationService {
         } finally {
           controller.abort(new Error('Orchestration cancelled by controller'));
         }
-      },
+      })();
+      return cancellation;
+    };
+    const cancelForSource = (source: string) =>
+      cancelWithEvidence(source, this.#now().toISOString(), true);
+    const cancel = () => cancelForSource('controller');
+    const stopLeaseMonitor = this.#startLeaseMonitor(
+      record,
+      controller,
+      cancelWithEvidence
+    );
+
+    const completion = this.#execute(record, controller.signal)
+      .catch(async (error: unknown) => {
+        if (error instanceof CancellationRequestedError) {
+          record.status = record.plan?.willDispatch ? 'dispatching' : 'queued';
+          delete record.completedAt;
+          delete record.result;
+          await cancelWithEvidence(
+            error.request.source,
+            error.request.requestedAt,
+            false
+          );
+        }
+        if (error instanceof JobPersistenceError || error instanceof RecordSizeLimitError) throw error;
+        if (record.status !== 'failed' && record.status !== 'cancelled') {
+          const details = limitErrorDetails(error);
+          record.status = controller.signal.aborted ? 'cancelled' : 'failed';
+          record.completedAt = this.#now().toISOString();
+          record.error = details;
+          await this.#appendEvent(
+            record,
+            controller.signal.aborted ? 'orchestration.cancelled' : 'orchestration.failed',
+            details,
+            record.completedAt
+          );
+        }
+        return structuredClone(record);
+      })
+      .finally(async () => {
+        await stopLeaseMonitor();
+        await this.#durability.release(record.id);
+      });
+    this.#activeOrchestrations.set(id, { completion, cancel: cancelForSource });
+    void completion.then(
+      () => this.#activeOrchestrations.delete(id),
+      () => this.#activeOrchestrations.delete(id)
+    );
+
+    return {
+      orchestration: structuredClone(record),
+      completion,
+      cancel,
     };
   }
 
@@ -798,6 +984,7 @@ export class OrchestrationService {
         prompt,
         workspace: record.request.workspace,
         route: config.route,
+        idempotencyKey: `${record.id}:reviewer:${child.jobId}:${plan.planHash}`,
         ...(record.request.source === undefined ? {} : { source: record.request.source }),
         metadata: {
           ...(record.request.metadata ?? {}),
@@ -841,8 +1028,7 @@ export class OrchestrationService {
         }
       );
     } catch (error) {
-      started.cancel();
-      await started.completion;
+      await Promise.allSettled([started.cancel(), started.completion]);
       releaseSlot();
       throw error;
     }
@@ -921,11 +1107,17 @@ export class OrchestrationService {
     started: Awaited<ReturnType<Orchestrator['start']>>,
     signal: AbortSignal
   ): Promise<JobRecord> {
-    const onAbort = () => started.cancel();
-    if (signal.aborted) started.cancel();
+    let cancellation: Promise<void> | undefined;
+    const cancel = () => (cancellation ??= started.cancel());
+    const onAbort = () => {
+      void cancel().catch(() => undefined);
+    };
+    if (signal.aborted) onAbort();
     else signal.addEventListener('abort', onAbort, { once: true });
     try {
-      return await started.completion;
+      const job = await started.completion;
+      if (cancellation !== undefined) await cancellation;
+      return job;
     } finally {
       signal.removeEventListener('abort', onAbort);
     }
@@ -962,6 +1154,7 @@ export class OrchestrationService {
           prompt: subtask.executionPrompt,
           workspace: record.request.workspace,
           route: subtask.route,
+          idempotencyKey: `${record.id}:worker:${subtask.id}:${plan.planHash}`,
           ...(record.request.source === undefined ? {} : { source: record.request.source }),
           metadata: {
             ...(record.request.metadata ?? {}),
@@ -989,21 +1182,32 @@ export class OrchestrationService {
             policyVersion: plan.policyVersion,
           });
         } catch (error) {
-          started.cancel();
-          const job = await started.completion;
+          const [, completed] = await Promise.allSettled([
+            started.cancel(),
+            started.completion,
+          ]);
+          if (completed.status === 'rejected') throw completed.reason;
+          const job = completed.value;
           child.status = job.status;
           if (job.result) child.output = job.result.output;
           if (job.error) child.error = structuredClone(job.error);
           throw error;
         }
-        const onAbort = () => started.cancel();
-        if (signal.aborted) started.cancel();
+        let cancellation: Promise<void> | undefined;
+        const cancel = () => (cancellation ??= started.cancel());
+        const onAbort = () => {
+          void cancel().catch(() => undefined);
+        };
+        if (signal.aborted) onAbort();
         else signal.addEventListener('abort', onAbort, { once: true });
         return {
           child,
-          cancel: started.cancel,
+          cancel,
           completion: started.completion
-            .then((job) => ({ job }))
+            .then(async (job) => {
+              if (cancellation !== undefined) await cancellation;
+              return { job };
+            })
             .catch((error: unknown) => ({ error }))
             .finally(() => {
               signal.removeEventListener('abort', onAbort);
@@ -1052,7 +1256,7 @@ export class OrchestrationService {
         await settleNext();
       }
     } catch (error) {
-      for (const item of active) item.cancel();
+      await Promise.allSettled(active.map((item) => item.cancel()));
       while (active.length > 0) await settleNext();
       throw error;
     }
@@ -1081,7 +1285,7 @@ export class OrchestrationService {
       record.events.push(event);
       record.updatedAt = at;
       try {
-        await this.#store.save(record);
+        await this.#save(record);
       } catch (error) {
         if (record.events.at(-1) === event) record.events.pop();
         mutation?.rollback();

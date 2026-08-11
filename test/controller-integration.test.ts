@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -178,6 +178,11 @@ test('Codex and Claude packages preserve parity and expose the controller-author
     await readFile(path.join(repositoryRoot, 'package.json'), 'utf8')
   ) as Record<string, unknown>;
   assert.deepEqual(packageManifest.bin, { agentknot: './dist/src/cli.js' });
+  assert.notEqual(
+    (await stat(path.join(repositoryRoot, 'dist/src/cli.js'))).mode & 0o111,
+    0,
+    'the packaged CLI target must be executable'
+  );
 
   const skills: Array<{ description: string; body: string }> = [];
   const hooks: string[] = [];

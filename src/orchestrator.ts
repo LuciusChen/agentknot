@@ -3,9 +3,14 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { AgentKnotConfig, ArtifactValidationConfig } from './config.js';
+import { canonicalJsonSha256 } from './canonical-json.js';
 import { resolveRoute } from './config.js';
 import { isExecutorProcessAlive } from './execution.js';
 import type { ArtifactValidationExecution } from './artifact-validation.js';
+import {
+  CancellationRequestedError,
+} from './durable-record-store.js';
+import { DurableExecutionCoordinator } from './durable-execution.js';
 import {
   capturedChangedFilesSummary,
   workerReportedSummary,
@@ -88,6 +93,19 @@ interface RouteReservation {
   release: () => void;
 }
 
+interface ActiveJob {
+  completion: Promise<JobRecord>;
+  cancel: () => void;
+}
+
+function isTerminalStatus(status: string): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'cancelled';
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 export interface OrchestratorOptions {
   config: AgentKnotConfig;
   /** Base for relative config paths when constructed by the runtime. */
@@ -99,6 +117,10 @@ export interface OrchestratorOptions {
   fetch?: typeof globalThis.fetch;
   /** The production default is the fixed 30-second control-plane probe timeout. */
   diagnosticTimeoutMs?: number;
+  /** Stage 3 execution lease duration. Production defaults to 15 seconds. */
+  leaseTtlMs?: number;
+  /** Durable cancellation/lease observation interval. Production defaults to 2 seconds. */
+  leaseHeartbeatMs?: number;
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -122,6 +144,12 @@ function normalizeRequest(request: JobRequest): JobRequest {
     }
   }
   if (request.metadata !== undefined) assertJsonMetadata(request.metadata);
+  if (request.idempotencyKey !== undefined) {
+    if (typeof request.idempotencyKey !== 'string' || request.idempotencyKey.trim() === '') {
+      throw new Error('Job idempotencyKey must be a non-empty string');
+    }
+    assertTextLimit('Job idempotencyKey', request.idempotencyKey, 256);
+  }
   return {
     prompt: request.prompt,
     workspace: path.resolve(request.workspace),
@@ -129,6 +157,9 @@ function normalizeRequest(request: JobRequest): JobRequest {
     ...(request.source === undefined ? {} : { source: request.source }),
     ...(request.callbackUrl === undefined ? {} : { callbackUrl: request.callbackUrl }),
     ...(request.metadata === undefined ? {} : { metadata: structuredClone(request.metadata) }),
+    ...(request.idempotencyKey === undefined
+      ? {}
+      : { idempotencyKey: request.idempotencyKey }),
   };
 }
 
@@ -145,6 +176,8 @@ export class Orchestrator {
   readonly #recordMutations = new Map<string, Promise<void>>();
   readonly #routeActivity = new Map<string, number>();
   readonly #routePoolCursor = new Map<string, number>();
+  readonly #activeJobs = new Map<string, ActiveJob>();
+  readonly #durability: DurableExecutionCoordinator<JobRecord>;
 
   constructor(options: OrchestratorOptions) {
     this.#config = options.config;
@@ -164,6 +197,13 @@ export class Orchestrator {
         `diagnosticTimeoutMs must be an integer between 1 and ${ROUTE_DIAGNOSTIC_TIMEOUT_MS}`
       );
     }
+    this.#durability = new DurableExecutionCoordinator(this.#store, {
+      now: this.#now,
+      ...(options.leaseTtlMs === undefined ? {} : { leaseTtlMs: options.leaseTtlMs }),
+      ...(options.leaseHeartbeatMs === undefined
+        ? {}
+        : { leaseHeartbeatMs: options.leaseHeartbeatMs }),
+    });
     this.#execution = {
       runtimeId: randomUUID(),
       pid: process.pid,
@@ -344,6 +384,62 @@ export class Orchestrator {
 
   async list(): Promise<JobRecord[]> {
     return this.#store.list();
+  }
+
+  async wait(id: string, timeoutMs = 5_000): Promise<JobRecord | undefined> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) {
+      throw new Error('Job wait timeout must be an integer between 0 and 60000');
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const current = await this.#store.get(id);
+      if (current === undefined || isTerminalStatus(current.status) || Date.now() >= deadline) {
+        return current;
+      }
+      await delay(Math.min(100, Math.max(1, deadline - Date.now())));
+    }
+  }
+
+  async cancel(id: string, source = 'controller'): Promise<boolean> {
+    const current = await this.#store.get(id);
+    if (current === undefined || isTerminalStatus(current.status)) return false;
+    const active = this.#activeJobs.get(id);
+    try {
+      if (this.#durability.enabled) {
+        const accepted = await this.#durability.requestCancellation(id, source);
+        if (accepted === undefined) return false;
+      } else if (active === undefined) {
+        return false;
+      }
+    } catch (error) {
+      active?.cancel();
+      throw error;
+    }
+    active?.cancel();
+    return true;
+  }
+
+  async shutdown(): Promise<void> {
+    const active = [...this.#activeJobs.entries()];
+    await Promise.allSettled(active.map(([id]) => this.cancel(id, 'kernel-shutdown')));
+    await Promise.allSettled(active.map(([, item]) => item.completion));
+  }
+
+  async #waitUntilTerminal(id: string): Promise<JobRecord> {
+    while (true) {
+      const record = await this.#store.get(id);
+      if (record === undefined) throw new Error(`Job ${id} disappeared while waiting`);
+      if (isTerminalStatus(record.status)) return record;
+      await delay(100);
+    }
+  }
+
+  #save(job: JobRecord): Promise<void> {
+    return this.#durability.save(job);
+  }
+
+  #startLeaseMonitor(job: JobRecord, controller: AbortController): () => Promise<void> {
+    return this.#durability.monitor(job.id, controller);
   }
 
   async listArtifacts(id: string): Promise<JobArtifactList | undefined> {
@@ -549,21 +645,101 @@ export class Orchestrator {
       execution: structuredClone(this.#execution),
     };
     const controller = new AbortController();
+    let admitted = true;
+    let admittedRecord = job;
     try {
-      await this.#store.create(job);
+      if (this.#durability.enabled) {
+        const result = await this.#durability.admit(job, {
+          ownerId: this.#execution.runtimeId,
+          ...(normalized.idempotencyKey === undefined
+            ? {}
+            : {
+                idempotency: {
+                  scope: 'job-admission-v1',
+                  key: normalized.idempotencyKey,
+                  requestHash: canonicalJsonSha256(normalized),
+                },
+              }),
+        });
+        if (result === undefined) throw new Error('Durable Job admission is unavailable');
+        admitted = result.created;
+        admittedRecord = result.record;
+      } else if (normalized.idempotencyKey !== undefined) {
+        if (this.#store.createIdempotent === undefined) {
+          throw new Error('The selected Job store does not support idempotent admission');
+        }
+        const result = await this.#store.createIdempotent(
+          'job-admission-v1',
+          normalized.idempotencyKey,
+          canonicalJsonSha256(normalized),
+          job
+        );
+        admitted = result.created;
+        admittedRecord = result.record;
+      } else {
+        await this.#store.create(job);
+      }
     } catch (error) {
       reservation.release();
       throw new JobPersistenceError('admission', undefined, error);
     }
+    if (!admitted) {
+      reservation.release();
+      const active = this.#activeJobs.get(admittedRecord.id);
+      if (active !== undefined) {
+        return {
+          job: structuredClone(admittedRecord),
+          completion: active.completion,
+          cancel: async () => {
+            await this.cancel(admittedRecord.id, 'idempotent-controller');
+          },
+        };
+      }
+      return {
+        job: structuredClone(admittedRecord),
+        completion: isTerminalStatus(admittedRecord.status)
+          ? Promise.resolve(structuredClone(admittedRecord))
+          : this.#waitUntilTerminal(admittedRecord.id),
+        cancel: async () => {
+          await this.cancel(admittedRecord.id, 'idempotent-controller');
+        },
+      };
+    }
     try {
       await this.#notifyObserver(job, job.events[0]!);
     } catch (error) {
+      await this.#durability.release(job.id);
       reservation.release();
       throw error;
     }
 
+    const stopLeaseMonitor = this.#startLeaseMonitor(job, controller);
+
     const execution = this.#execute(job, adapter, controller.signal, inspection).catch(
       async (error: unknown) => {
+        const cancellation =
+          error instanceof JobPersistenceError &&
+          error.cause instanceof CancellationRequestedError
+            ? error.cause.request
+            : undefined;
+        if (cancellation !== undefined) {
+          controller.abort(error);
+          job.status = 'cancelled';
+          job.completedAt = this.#now().toISOString();
+          delete job.result;
+          job.error = {
+            name: 'CancellationRequestedError',
+            message: `Job cancellation was requested by ${cancellation.source}`,
+            attempt: job.attempt,
+            retryable: false,
+          };
+          job.completionSummary = this.#completionSummary(job, 'cancelled', false, undefined);
+          await this.#emit(job, 'job.cancelled', {
+            source: cancellation.source,
+            requestedAt: cancellation.requestedAt,
+          });
+          return;
+        }
         if (error instanceof JobPersistenceError) throw error;
         if (job.status !== 'failed' && job.status !== 'cancelled') {
           const details = limitErrorDetails(error);
@@ -580,15 +756,31 @@ export class Orchestrator {
         }
       }
     );
-    const completion = execution.finally(reservation.release).then(async () => {
-      await this.#deliverCallback(job);
-      return structuredClone(job);
-    });
+    const completion = execution
+      .then(async () => {
+        await this.#deliverCallback(job);
+        return structuredClone(job);
+      })
+      .finally(async () => {
+        await stopLeaseMonitor();
+        await this.#durability.release(job.id);
+        reservation.release();
+      });
+
+    const localCancel = () => controller.abort(new Error('Job cancelled by controller'));
+    const cancel = async () => {
+      await this.cancel(id, 'start-handle');
+    };
+    this.#activeJobs.set(id, { completion, cancel: localCancel });
+    void completion.then(
+      () => this.#activeJobs.delete(id),
+      () => this.#activeJobs.delete(id)
+    );
 
     return {
       job: structuredClone(job),
       completion,
-      cancel: () => controller.abort(new Error('Job cancelled by controller')),
+      cancel,
     };
   }
 
@@ -784,7 +976,7 @@ export class Orchestrator {
       job.events.push(event);
       job.updatedAt = at;
       try {
-        await this.#store.save(job);
+        await this.#save(job);
       } catch (error) {
         if (job.events.at(-1) === event) job.events.pop();
         job.updatedAt = previousUpdatedAt;
@@ -816,7 +1008,7 @@ export class Orchestrator {
         error: `Callback payload is ${bodyBytes} bytes; maximum is ${MAX_CALLBACK_BODY_BYTES} bytes`,
       };
       job.updatedAt = this.#now().toISOString();
-      await this.#store.save(job);
+      await this.#save(job);
       return;
     }
     try {
@@ -831,6 +1023,6 @@ export class Orchestrator {
       job.callback = { delivered: false, error: limitErrorDetails(error).message };
     }
     job.updatedAt = this.#now().toISOString();
-    await this.#store.save(job);
+    await this.#save(job);
   }
 }

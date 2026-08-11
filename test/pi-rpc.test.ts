@@ -1057,7 +1057,7 @@ test('Orchestrator bounds timeout cleanup when the owned Pi child ignores SIGTER
     assert.ok(Date.now() - startedAt < 5_000);
     assertProcessGone(pid);
   } finally {
-    started.cancel();
+    await started.cancel();
     await started.completion.catch(() => undefined);
     if (pid !== undefined) {
       try {
@@ -1086,7 +1086,7 @@ test('Orchestrator bounds cancellation cleanup when the owned Pi child ignores S
   let pid: number | undefined;
   try {
     pid = await waitForPid(pidFile);
-    started.cancel();
+    await started.cancel();
     const job = await started.completion;
 
     assert.equal(job.status, 'cancelled');
@@ -1094,7 +1094,7 @@ test('Orchestrator bounds cancellation cleanup when the owned Pi child ignores S
     assert.match(await readFile(sigtermFile, 'utf8'), /ignored/);
     assertProcessGone(pid);
   } finally {
-    started.cancel();
+    await started.cancel();
     await started.completion.catch(() => undefined);
     if (pid !== undefined) {
       try {

@@ -45,18 +45,18 @@ function terminal(status: string): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'cancelled';
 }
 
-async function completionOrHeartbeat<T>(completion: Promise<T>): Promise<T | undefined> {
-  let timer: number | undefined;
-  try {
-    return await Promise.race([
-      completion,
-      new Promise<undefined>((resolve) => {
-        timer = setTimeout(resolve, WAIT_HEARTBEAT_MS);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
+async function pollUntilHeartbeat<T>(load: () => Promise<T | undefined>): Promise<T | undefined> {
+  const deadline = Date.now() + WAIT_HEARTBEAT_MS;
+  let current = await load();
+  while (
+    current !== undefined &&
+    !terminal((current as { status: string }).status) &&
+    Date.now() < deadline
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    current = await load();
   }
+  return current;
 }
 
 function compactJobProgress(job: JobRecord): object {
@@ -156,6 +156,9 @@ function asJobRequest(value: unknown): JobRequest {
   if (body.callbackUrl !== undefined && typeof body.callbackUrl !== 'string') {
     throw new Error('callbackUrl must be a string');
   }
+  if (body.idempotencyKey !== undefined && typeof body.idempotencyKey !== 'string') {
+    throw new Error('idempotencyKey must be a string');
+  }
   const metadata = body.metadata;
   if (metadata !== undefined) assertJsonMetadata(metadata);
   return {
@@ -165,6 +168,9 @@ function asJobRequest(value: unknown): JobRequest {
     ...(body.source === undefined ? {} : { source: body.source as string }),
     ...(body.callbackUrl === undefined ? {} : { callbackUrl: body.callbackUrl as string }),
     ...(metadata === undefined ? {} : { metadata }),
+    ...(body.idempotencyKey === undefined
+      ? {}
+      : { idempotencyKey: body.idempotencyKey as string }),
   };
 }
 
@@ -178,6 +184,9 @@ function asOrchestrationRequest(value: unknown): OrchestrationRequest {
   if (body.assessment === undefined) throw new Error('assessment is required');
   const assessment = validateTaskAssessment(body.assessment);
   if (body.source !== undefined && typeof body.source !== 'string') throw new Error('source must be a string');
+  if (body.idempotencyKey !== undefined && typeof body.idempotencyKey !== 'string') {
+    throw new Error('idempotencyKey must be a string');
+  }
   if (
     body.delegation !== undefined &&
     !['inherit', 'never', 'suggest', 'force'].includes(String(body.delegation))
@@ -200,6 +209,9 @@ function asOrchestrationRequest(value: unknown): OrchestrationRequest {
           >,
         }),
     ...(metadata === undefined ? {} : { metadata }),
+    ...(body.idempotencyKey === undefined
+      ? {}
+      : { idempotencyKey: body.idempotencyKey as string }),
   };
 }
 
@@ -211,10 +223,15 @@ export interface AgentKnotHttpRuntime {
   verifyArtifacts(id: string): Promise<JobArtifactVerificationReport | undefined>;
   previewArtifact(id: string, attempt: number): Promise<JobArtifactPreview | undefined>;
   start(request: JobRequest): Promise<StartJobResult>;
+  waitForJob?(id: string, timeoutMs?: number): Promise<JobRecord | undefined>;
+  cancelJob?(id: string, source?: string): Promise<boolean>;
   delegationPolicy?(): DelegationConfig;
   getOrchestration?(id: string): Promise<OrchestrationRecord | undefined>;
   listOrchestrations?(): Promise<OrchestrationRecord[]>;
   startOrchestration?(request: OrchestrationRequest): Promise<StartOrchestrationResult>;
+  waitForOrchestration?(id: string, timeoutMs?: number): Promise<OrchestrationRecord | undefined>;
+  cancelOrchestration?(id: string, source?: string): Promise<boolean>;
+  shutdown?(): Promise<void>;
 }
 
 export interface AgentKnotHttpServer {
@@ -224,12 +241,11 @@ export interface AgentKnotHttpServer {
 }
 
 export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentKnotHttpServer {
-  const activeJobs = new Map<string, StartJobResult>();
-  const activeOrchestrations = new Map<string, StartOrchestrationResult>();
   let closing = false;
   let admissionsInFlight = 0;
   let admissionsDrained: (() => void) | undefined;
   let closePromise: Promise<void> | undefined;
+  let admittedWork = false;
 
   const beginAdmission = (response: ServerResponse): (() => void) | undefined => {
     if (closing) {
@@ -276,11 +292,7 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
         if (finishAdmission === undefined) return;
         try {
           const started = await runtime.start(asJobRequest(await readJson(request)));
-          activeJobs.set(started.job.id, started);
-          void started.completion.then(
-            () => activeJobs.delete(started.job.id),
-            () => activeJobs.delete(started.job.id)
-          );
+          admittedWork = true;
           sendJson(response, 202, { job: started.job });
         } finally {
           finishAdmission();
@@ -351,11 +363,7 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
             return;
           }
           const started = await runtime.startOrchestration(asOrchestrationRequest(await readJson(request)));
-          activeOrchestrations.set(started.orchestration.id, started);
-          void started.completion.then(
-            () => activeOrchestrations.delete(started.orchestration.id),
-            () => activeOrchestrations.delete(started.orchestration.id)
-          );
+          admittedWork = true;
           sendJson(response, 202, { orchestration: started.orchestration });
         } finally {
           finishAdmission();
@@ -396,17 +404,9 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
             sendJson(response, 200, { job });
             return;
           }
-          const active = activeJobs.get(id);
-          if (!active) {
-            sendJson(response, 409, { error: 'Job is not active on this server' });
-            return;
-          }
-          const completed = await completionOrHeartbeat(active.completion);
-          if (completed !== undefined) {
-            sendJson(response, 200, { job: completed });
-            return;
-          }
-          const current = await runtime.get(id);
+          const current = runtime.waitForJob
+            ? await runtime.waitForJob(id, WAIT_HEARTBEAT_MS)
+            : await pollUntilHeartbeat(() => runtime.get(id));
           if (!current) {
             sendJson(response, 404, { error: 'Job not found' });
             return;
@@ -417,12 +417,14 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
           return;
         }
         if (method === 'POST' && action === 'cancel') {
-          const active = activeJobs.get(id);
-          if (!active) {
-            sendJson(response, 409, { error: 'Job is not active on this server' });
+          if (!runtime.cancelJob) {
+            sendJson(response, 501, { error: 'Durable job cancellation is not available on this runtime' });
             return;
           }
-          active.cancel();
+          if (!(await runtime.cancelJob(id, 'http-controller'))) {
+            sendJson(response, 409, { error: 'Job is not cancellable' });
+            return;
+          }
           sendJson(response, 202, { accepted: true, jobId: id });
           return;
         }
@@ -466,17 +468,9 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
             sendJson(response, 200, { orchestration });
             return;
           }
-          const active = activeOrchestrations.get(id);
-          if (!active) {
-            sendJson(response, 409, { error: 'Orchestration is not active on this server' });
-            return;
-          }
-          const completed = await completionOrHeartbeat(active.completion);
-          if (completed !== undefined) {
-            sendJson(response, 200, { orchestration: completed });
-            return;
-          }
-          const current = await runtime.getOrchestration(id);
+          const current = runtime.waitForOrchestration
+            ? await runtime.waitForOrchestration(id, WAIT_HEARTBEAT_MS)
+            : await pollUntilHeartbeat(() => runtime.getOrchestration!(id));
           if (!current) {
             sendJson(response, 404, { error: 'Orchestration not found' });
             return;
@@ -487,12 +481,16 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
           return;
         }
         if (method === 'POST' && action === 'cancel') {
-          const active = activeOrchestrations.get(id);
-          if (!active) {
-            sendJson(response, 409, { error: 'Orchestration is not active on this server' });
+          if (!runtime.cancelOrchestration) {
+            sendJson(response, 501, {
+              error: 'Durable orchestration cancellation is not available on this runtime',
+            });
             return;
           }
-          await active.cancel();
+          if (!(await runtime.cancelOrchestration(id, 'http-controller'))) {
+            sendJson(response, 409, { error: 'Orchestration is not cancellable' });
+            return;
+          }
           sendJson(response, 202, { accepted: true, orchestrationId: id });
           return;
         }
@@ -529,15 +527,7 @@ export function createAgentKnotHttpServer(runtime: AgentKnotHttpRuntime): AgentK
       closePromise ??= (async () => {
         closing = true;
         await waitForAdmissions();
-        const active = [
-          ...[...activeOrchestrations.values()].map((item) => item.completion),
-          ...[...activeJobs.values()].map((item) => item.completion),
-        ];
-        await Promise.allSettled([
-          ...[...activeOrchestrations.values()].map((item) => item.cancel()),
-          ...[...activeJobs.values()].map(async (item) => item.cancel()),
-        ]);
-        await Promise.allSettled(active);
+        if (admittedWork) await runtime.shutdown?.();
         await new Promise<void>((resolve, reject) => {
           server.close((error) => (error ? reject(error) : resolve()));
         });

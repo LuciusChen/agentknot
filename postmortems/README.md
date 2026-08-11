@@ -166,3 +166,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0052](./0052-bounded-analysis-and-observable-waiting.md) | Incident / Decision | Resolved / Accepted | Bound repository analysis and make waiting observable |
 | [0053](./0053-controller-owned-planning-handoff.md) | Incident / Decision | Resolved / Accepted | Restore controller-owned planning and use a strict handoff |
 | [0054](./0054-portable-service-lifecycle.md) | Incident / Decision | Resolved / Accepted | Make controller service lifecycle portable and explicit |
+| [0055](./0055-durable-middleware-kernel.md) | Incident / Architecture Decision | Accepted / In progress | Replace process ownership with a durable middleware kernel |

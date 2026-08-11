@@ -87,8 +87,8 @@ function help(): string {
   return `AgentKnot — vendor-neutral coding-agent orchestration
 
 Usage:
-  agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME]
-  agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE]
+  agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME] [--idempotency-key KEY]
+  agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE] [--idempotency-key KEY]
   agentknot serve [--host HOST] [--port PORT]
   agentknot service install [--host HOST] [--port PORT] [--path PATH]
   agentknot service start|stop|restart|status|uninstall
@@ -612,6 +612,7 @@ async function main(argv: string[]): Promise<void> {
     const workspace = takeOption(args, '--workspace') ?? process.cwd();
     const source = takeOption(args, '--source') ?? 'cli';
     const callbackUrl = takeOption(args, '--callback');
+    const idempotencyKey = takeOption(args, '--idempotency-key');
     const promptOption = takeOption(args, '--prompt');
     const json = takeFlag(args, '--json');
     const events = takeFlag(args, '--events');
@@ -624,6 +625,7 @@ async function main(argv: string[]): Promise<void> {
       source,
       ...(route === undefined ? {} : { route }),
       ...(callbackUrl === undefined ? {} : { callbackUrl }),
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
     };
     if (remote !== undefined) {
       if (events) throw new Error('--events is not available with a selected server; inspect persisted events');
@@ -665,6 +667,7 @@ async function main(argv: string[]): Promise<void> {
     const promptOption = takeOption(args, '--prompt');
     const assessmentJson = takeOption(args, '--assessment-json');
     const delegationOption = takeOption(args, '--delegation');
+    const idempotencyKey = takeOption(args, '--idempotency-key');
     const suggest = takeFlag(args, '--suggest');
     const json = takeFlag(args, '--json');
     const handoffJson = takeFlag(args, '--handoff-json');
@@ -686,6 +689,7 @@ async function main(argv: string[]): Promise<void> {
       workspace,
       source,
       assessment,
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
       ...(delegation === undefined
         ? {}
         : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),

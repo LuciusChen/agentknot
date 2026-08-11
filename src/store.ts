@@ -4,6 +4,13 @@ import path from 'node:path';
 
 import { serializeBoundedRecord } from './record-limits.js';
 import { materializePersistedRecord } from './record-version.js';
+import {
+  SqliteDurableRecordStore,
+  SqliteDurableStoreAdapter,
+  IdempotencyConflictError,
+  type IdempotentCreateResult,
+  type OpenDurableStoreOptions,
+} from './durable-record-store.js';
 import type { JobRecord, JobStore } from './types.js';
 
 interface StoredRecord {
@@ -107,13 +114,61 @@ export default class RecordStoreBackend<T extends StoredRecord> {
 }
 
 export class MemoryJobStore extends RecordStoreBackend<JobRecord> implements JobStore {
+  readonly #idempotency = new Map<string, { requestHash: string; recordId: string }>();
+
   constructor() {
     super('Job');
+  }
+
+  async createIdempotent(
+    scope: string,
+    key: string,
+    requestHash: string,
+    job: JobRecord
+  ): Promise<IdempotentCreateResult<JobRecord>> {
+    const identity = `${scope}\u0000${key}`;
+    const existing = this.#idempotency.get(identity);
+    if (existing !== undefined) {
+      if (existing.requestHash !== requestHash) throw new IdempotencyConflictError('Idempotency key conflict');
+      const record = await this.get(existing.recordId);
+      if (record === undefined) throw new Error(`Idempotency key references missing Job ${existing.recordId}`);
+      return { created: false, record };
+    }
+    this.#idempotency.set(identity, { requestHash, recordId: job.id });
+    try {
+      await this.create(job);
+      return { created: true, record: structuredClone(job) };
+    } catch (error) {
+      this.#idempotency.delete(identity);
+      throw error;
+    }
   }
 }
 
 export class FileJobStore extends RecordStoreBackend<JobRecord> implements JobStore {
   constructor(readonly directory: string) {
     super('Job', directory);
+  }
+}
+
+/** Transactional Stage 3 store; `open` imports existing JSON snapshots without deleting them. */
+export class SqliteJobStore
+  extends SqliteDurableStoreAdapter<JobRecord>
+  implements JobStore
+{
+  static async open(
+    directory: string,
+    options: OpenDurableStoreOptions & { importLegacy?: boolean } = {}
+  ): Promise<SqliteJobStore> {
+    const backend = await SqliteDurableRecordStore.open<JobRecord>('Job', directory, options);
+    try {
+      if (options.importLegacy !== false && options.readOnly !== true) {
+        await backend.importLegacySnapshots();
+      }
+      return new SqliteJobStore(backend);
+    } catch (error) {
+      await backend.close();
+      throw error;
+    }
   }
 }

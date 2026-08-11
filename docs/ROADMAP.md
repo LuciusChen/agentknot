@@ -22,8 +22,8 @@ The source of product truth is [PRD.md](./PRD.md). Stable technical behavior is 
 | --- | --- | --- |
 | 0 | Prove the vendor-neutral execution slice | Complete |
 | 1 | Make local execution and its bounded delegation slice dependable and honestly specified | Complete |
-| 2 | Prove controller and worker portability through contracts | In progress |
-| 3 | Add bounded local automation and security policy | Not started |
+| 2 | Prove controller and worker portability through contracts | Complete |
+| 3 | Make the local middleware kernel durable and recoverable | In progress |
 | 4 | Evaluate remote/team operation only from demonstrated demand | Conditional |
 
 ## Stage 0: Vendor-neutral execution slice
@@ -202,7 +202,7 @@ Still outside this slice:
 
 ## Stage 2: Portable controller and worker contracts
 
-**Status: in progress (2026-08-09).** Stage 2 begins at the controller boundary: the already-neutral CLI, HTTP, and TypeScript orchestration paths need thin native Codex and Claude integrations before a second worker adapter is promoted.
+**Status: complete (2026-08-11).** Codex and Claude integrations now share the controller-authored handoff contract, while Pi RPC and native OpenCode JSON pass the same core Job lifecycle without privileged controller, provider, or model branches.
 
 ### Outcome
 
@@ -325,29 +325,35 @@ The following measurements are historical pre-cutover evidence. They remain usef
 
 Do not add a native provider or harness adapter merely because a provider exists. Add it only if Pi cannot supply a required capability or the new path materially improves correctness, lifecycle control, observability, isolation, or maintenance. Record that evidence in a decision postmortem.
 
-## Stage 3: Bounded local automation and policy
+## Stage 3: Durable local middleware kernel
 
 ### Outcome
 
-Allow unattended local workflows without turning AgentKnot into an unbounded remote execution service.
+Make the controller-neutral execution handoff durable across controller sessions and process restarts without turning AgentKnot into a planner, agent-chat product, operating-system service manager, or unbounded remote execution service.
 
-### Candidate work
+### Foundation delivered
 
-- authenticated local API access and explicit authorization scopes;
-- signed, idempotent callbacks with URL policy and bounded retries;
-- Server-Sent Events or another resumable live-event delivery path backed by persisted sequence numbers;
-- admission limits, concurrency, backpressure, and a restart-aware local queue;
-- explicit retry/fallback policies with recorded reasons and budgets;
-- human approval gates for artifact promotion and sensitive operations;
-- per-route path, command, network, time, token/cost, and credential policies;
-- a pluggable OS-sandbox backend with accurate guarantees;
-- CI/webhook/scheduled triggers that submit ordinary jobs rather than bypassing the Job API.
+- [x] Record the controller/kernel/adapter boundary and keep semantic planning upstream in the existing strict controller-authored handoff ([decision 0055](../postmortems/0055-durable-middleware-kernel.md)).
+- [x] Make production Job and Orchestration persistence transactional: bounded projections, append-only sequenced events, CAS revisions, scoped canonical-request idempotency, atomically admitted first leases, renewable fenced execution leases, and durable cancellation intent.
+- [x] Make same-ID wait, status, and cancellation derive authority from durable stores. HTTP no longer owns separate active-execution maps, and independent store/runtime instances prove duplicate identity, stale-write/fence rejection, event-cursor resume, and cross-session cancellation.
+- [x] Fence cancellation against a simultaneous success transition, retain monotonically increasing fence generations after release, validate legacy filename/record identity, and keep record plus idempotency plus first lease in one admission transaction.
+
+### Next slices
+
+1. Reclaim queued work and expire/recover running work from durable boundaries; replace unconditional `runtime_restart` failure with explicit lost/recovery attempts and prevent late completion from a fenced owner.
+2. Move child/reviewer capacity and admission accounting from process-local semaphores/counters to durable state before allowing multiple execution hosts.
+3. Converge CLI, HTTP, TypeScript, MCP, callbacks, streams, and controller notifications on persisted event cursors and the same kernel operations; transports remain replaceable notification adapters.
+4. Prove non-invasive multi-session/restart parity, then remove lifetime directory ownership, required native-service setup, and superseded discovery/hook/service paths instead of retaining parallel implementations.
+5. Add authenticated local automation, callback URL/signing/retry policy, admission/backpressure, approval, route policy, and sandbox backends only as separate evidence-gated hardening slices after recovery correctness.
 
 ### Exit gates
 
 - Authentication and callback threat models are documented and adversarially tested.
-- Queue admission, leases/recovery, ordering, concurrency, and cancellation have deterministic semantics across restart.
+- Duplicate admission, queue ordering, leases/fencing/recovery, concurrency, cancellation, stale owners, and late completion have deterministic semantics across restart.
 - Live streams can resume from persisted sequence state and never become state authority.
+- Two independent controller sessions can submit, observe, wait for, and resume the same durable execution contract without sharing a process-local Promise or requiring shell-profile/native-service mutation.
+- Controller adapters never submit raw prompts for middleware planning; every admitted orchestration contains a strict controller-authored assessment.
+- One authoritative production store and scheduler remain after migration; stale file-runtime, service-manager, hook, discovery, and compiled-test paths are deleted rather than kept as parallel compatibility systems.
 - Every fallback or retry records the attempted route, reason, budget, and resulting evidence.
 - An approval cannot be bypassed by controller identity or worker output.
 - Any sandbox claim is backed by tests for filesystem, process, credential, and network boundaries it actually enforces.

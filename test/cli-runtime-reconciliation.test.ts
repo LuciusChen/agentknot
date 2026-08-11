@@ -8,10 +8,13 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { FileOrchestrationStore } from '../src/orchestration-store.js';
+import {
+  FileOrchestrationStore,
+  SqliteOrchestrationStore,
+} from '../src/orchestration-store.js';
 import type { OrchestrationRecord, OrchestrationStatus } from '../src/orchestration-types.js';
 import type { TaskAssessment } from '../src/orchestration-types.js';
-import { FileJobStore } from '../src/store.js';
+import { FileJobStore, SqliteJobStore } from '../src/store.js';
 import type { JobRecord, ThinkingLevel } from '../src/types.js';
 
 const execFileAsync = promisify(execFile);
@@ -390,10 +393,20 @@ test('execution-owning CLI commands keep startup reconciliation enabled', async 
       );
       assert.equal(result.code, 0, `${command.name}: ${result.stderr}`);
 
-      const jobs = new FileJobStore(fixture.jobsDirectory);
-      const orchestrations = new FileOrchestrationStore(fixture.orchestrationDirectory);
-      assert.equal((await jobs.get(ids.jobId))?.status, 'failed');
-      assert.equal((await orchestrations.get(ids.orchestrationId))?.status, 'failed');
+      const jobs = await SqliteJobStore.open(fixture.jobsDirectory, {
+        readOnly: true,
+        importLegacy: false,
+      });
+      const orchestrations = await SqliteOrchestrationStore.open(
+        fixture.orchestrationDirectory,
+        { readOnly: true, importLegacy: false }
+      );
+      try {
+        assert.equal((await jobs.get(ids.jobId))?.status, 'failed');
+        assert.equal((await orchestrations.get(ids.orchestrationId))?.status, 'failed');
+      } finally {
+        await Promise.all([jobs.close(), orchestrations.close()]);
+      }
     } finally {
       await rm(fixture.directory, { recursive: true, force: true });
     }
@@ -405,10 +418,20 @@ test('execution-owning CLI commands keep startup reconciliation enabled', async 
     const route = { name: 'mock', worker: 'mock', provider: 'mock', model: 'mock' } satisfies RouteFixture;
     const ids = await seedStaleRecords(fixture, route);
     server = await startServer(fixture.configPath);
-    const jobs = new FileJobStore(fixture.jobsDirectory);
-    const orchestrations = new FileOrchestrationStore(fixture.orchestrationDirectory);
-    assert.equal((await jobs.get(ids.jobId))?.status, 'failed');
-    assert.equal((await orchestrations.get(ids.orchestrationId))?.status, 'failed');
+    const jobs = await SqliteJobStore.open(fixture.jobsDirectory, {
+      readOnly: true,
+      importLegacy: false,
+    });
+    const orchestrations = await SqliteOrchestrationStore.open(
+      fixture.orchestrationDirectory,
+      { readOnly: true, importLegacy: false }
+    );
+    try {
+      assert.equal((await jobs.get(ids.jobId))?.status, 'failed');
+      assert.equal((await orchestrations.get(ids.orchestrationId))?.status, 'failed');
+    } finally {
+      await Promise.all([jobs.close(), orchestrations.close()]);
+    }
   } finally {
     if (server !== undefined) await stopServer(server);
     await rm(fixture.directory, { recursive: true, force: true });

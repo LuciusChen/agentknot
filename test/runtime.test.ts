@@ -343,6 +343,13 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
   });
 
   const queuedAfterFirstRecovery = await runtime.get('job_stale_queued');
+  const parentAfterFirstRecovery = new Map(
+    await Promise.all(
+      [staleParentRecord.id, staleQueuedParent.id, stalePlanningParent.id].map(
+        async (id) => [id, await runtime.getOrchestration(id)] as const
+      )
+    )
+  );
   await assert.rejects(
     createRuntime({ configPath }),
     /Another execution-owning AgentKnot runtime already owns storage directory/
@@ -360,7 +367,7 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
     for (const id of [staleQueuedParent.id, stalePlanningParent.id]) {
       assert.deepEqual(
         await secondRuntime.getOrchestration(id),
-        await runtime.getOrchestration(id)
+        parentAfterFirstRecovery.get(id)
       );
     }
   } finally {

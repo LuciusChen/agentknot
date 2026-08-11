@@ -113,6 +113,8 @@ export interface JobRequest {
   source?: string;
   callbackUrl?: string;
   metadata?: Record<string, unknown>;
+  /** Opaque caller key for exactly-once admission of one canonical request. */
+  idempotencyKey?: string;
 }
 
 export interface ResolvedRoute {
@@ -358,10 +360,16 @@ export interface JobStore {
   save(job: JobRecord): Promise<void>;
   get(id: string): Promise<JobRecord | undefined>;
   list(): Promise<JobRecord[]>;
+  createIdempotent?(
+    scope: string,
+    key: string,
+    requestHash: string,
+    job: JobRecord
+  ): Promise<{ created: boolean; record: JobRecord }>;
 }
 
 export interface StartJobResult {
   job: JobRecord;
   completion: Promise<JobRecord>;
-  cancel: () => void;
+  cancel: () => Promise<void>;
 }
