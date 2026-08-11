@@ -1,8 +1,9 @@
 # AgentKnot roadmap
 
 - Status: Living execution plan
-- Last updated: 2026-08-11
+- Last updated: 2026-08-12
 - Planning model: evidence-gated stages, not date promises
+- Current default focus: Stage 2 contract completion; Stage 3 foundation is delivered but its next slices are queued
 
 ## How to use this roadmap
 
@@ -22,8 +23,8 @@ The source of product truth is [PRD.md](./PRD.md). Stable technical behavior is 
 | --- | --- | --- |
 | 0 | Prove the vendor-neutral execution slice | Complete |
 | 1 | Make local execution and its bounded delegation slice dependable and honestly specified | Complete |
-| 2 | Prove controller and worker portability through contracts | In progress |
-| 3 | Make the local middleware kernel durable and recoverable | In progress |
+| 2 | Prove controller and worker portability through contracts | Current default focus |
+| 3 | Make the local middleware kernel durable and recoverable | Foundation delivered; next slices queued |
 | 4 | Evaluate remote/team operation only from demonstrated demand | Conditional |
 
 ## Stage 0: Vendor-neutral execution slice
@@ -202,7 +203,7 @@ Still outside this slice:
 
 ## Stage 2: Portable controller and worker contracts
 
-**Status: in progress (2026-08-11).** Experimental Codex and Claude packages expose the same controller-authored handoff contract; deterministic checks cover their manifests, Skills, MCP entry, and absence of prompt hooks. A real package-driven repository task remains a promotion gate. The generic worker boundary remains controller/provider neutral. The native secondary CLI adapter was retired; Pi RPC is the sole built-in real worker implementation while a future second adapter remains subject to a fresh evidence gate ([decision 0059](../postmortems/0059-retire-native-opencode-worker.md)).
+**Status: current default focus (2026-08-12).** Experimental Codex and Claude packages expose the same controller-authored handoff contract; deterministic checks cover their manifests, Skills, MCP entry, and absence of prompt hooks. A fresh-session package-driven repository task remains a promotion gate. The generic worker boundary remains controller/provider neutral. The native secondary CLI adapter was retired; Pi RPC is the sole built-in real worker implementation while a future second adapter remains subject to a fresh evidence gate ([decision 0059](../postmortems/0059-retire-native-opencode-worker.md)).
 
 ### Outcome
 
@@ -219,7 +220,6 @@ Prove that controllers can change independently and keep worker runtimes replace
 - [x] Add one optional controller-authored shared navigation context to `TaskAssessment`: summary, repository-relative initial paths, and hard constraints already present in the controller conversation, capped at 2 KiB and projected as one identical prefix before every child delta. Include it in admission and the plan hash, but add no transcript capture, repository scan, fixed worker session, memory service, provider/model branch, or cache correctness dependency ([incident/decision 0068](../postmortems/0068-bounded-shared-task-context.md)).
 - [x] Remove contradictory generic check guidance and run six post-correction real scope trials across prompt construction, broker lifecycle, retry analysis, workspace isolation, HTTP cursor following, and usage reporting. Two Luna/max runs used 6 and 8 tool calls; four DeepSeek Flash/max runs used 3, 5, 3, and 2. Every run completed on attempt one without forbidden commands or path expansion. Preserve this as behavioral evidence only: the pre-correction Luna run accidentally expanded a targeted npm command to 259 tests, and prompt constraints remain distinct from tool enforcement ([experiment 0069](../postmortems/0069-repeated-shared-context-scope-trials.md)).
 - [x] Make a valid `taskOutcome: blocked` report one route-neutral terminal failure. Adapters return the report through `WorkerRunResult`; the orchestrator validates it, records `failed`, `retryable: false`, retains the report and artifact evidence, and never emits `job.retrying`. Missing/malformed envelopes and transient adapter/transport/process failures keep their prior behavior. No model-specific handling or second completion schema is added ([incident/decision 0069](../postmortems/0069-repeated-shared-context-scope-trials.md)).
-- [ ] Expose the existing optional `TaskAssessment.context` through the common MCP `agentknot_orchestration_start` input schema. CLI, HTTP, TypeScript, persistence, and worker prompt projection already support the field, but the installed MCP tool currently rejects it as an unrecognized assessment key; fix and test that transport projection without adding a controller-specific path ([decision 0068](../postmortems/0068-bounded-shared-task-context.md)).
 - [x] Preserve context-dependent continuation without transcript parsing. The upstream controller already holding the conversation reconstructs one bounded self-contained task and assessment before eligible repository execution; no hook retains workspace focus. Paths remain workspace evidence only and normal keep-upstream policy is re-applied ([decisions 0050](../postmortems/0050-context-dependent-continuation-handoff.md) and [0053](../postmortems/0053-controller-owned-planning-handoff.md)).
 - [x] Delegate bounded evidence-producing repository analysis even when read-only and low-complexity. Keep the free-form `repository-analysis` allowlist value in the controller-assessment/worker contract; preserve direct single-fact lookups upstream, existing exclusions, human-authored route policy, and all artifact authority. Add no prompt classifier, controller branch, route fallback, ranking, or repair loop ([incident/decisions 0051](../postmortems/0051-evidence-producing-repository-analysis.md) and [0053](../postmortems/0053-controller-owned-planning-handoff.md)).
 - [x] Bound delegated repository analysis after real workers expanded narrow comparisons into long inventories. Treat the admitted workspace as the one authoritative writable target, keep every other repository read-only, and require explicit references, exact scope, non-goals, at most five decision-relevant findings and 4,000 characters, concise evidence, and no source restatement. Keep semantic scope in the controller-authored task and worker prompt; add only an optional route-neutral per-attempt tool-execution circuit after persisted jobs proved timeout alone permitted up to 146 successful tool calls and more than 16 minutes. Do not add a middleware classifier, result schema, model-specific branch, or claim that the observed successful work was invalid ([incident/decisions 0052](../postmortems/0052-bounded-analysis-and-observable-waiting.md) and [0067](../postmortems/0067-route-tool-execution-budget.md)).
@@ -327,6 +327,8 @@ Do not add a native provider or harness adapter merely because a provider exists
 
 ## Stage 3: Durable local middleware kernel
 
+**Status: foundation delivered early; next slices queued behind the current Stage 2 contract focus.** Stage 3 work was pulled forward only where multi-session and restart defects made the old process-local behavior unusable. This does not make Stage 2 complete or authorize simultaneous expansion of both stages.
+
 ### Outcome
 
 Make the controller-neutral execution handoff durable across controller sessions and process restarts without turning AgentKnot into a planner, agent-chat product, operating-system service manager, or unbounded remote execution service.
@@ -344,11 +346,11 @@ Make the controller-neutral execution handoff durable across controller sessions
 - [x] Let common clients explicitly restore a stopped or identity-matching crash-stale broker from one protected product launch profile. Keep process activation out of controller packages and keep configuration selection out of target-repository inference ([decision 0058](../postmortems/0058-controller-neutral-broker-activation.md)).
 - [x] Bind production `least-active` route-pool selection to atomic durable Job admission: count unexpired exact-route leases, persist rotation across broker replacement, include explicit member Jobs, and commit the selected record/idempotency/first lease/cursor together without adding fallback or provider-specific routing ([decision 0061](../postmortems/0061-atomic-durable-route-pool-admission.md)).
 
-### Next slices
+### Queued next slices
 
 1. Move the remaining orchestration-wide child/reviewer slot limit and waiting admission from the process-local semaphore to a durable queue/lease boundary shared with direct leaf Jobs. Route-pool activity and selection are now durable, but they do not impose capacity or backpressure; until the remaining gate passes, one broker lifetime lock intentionally prevents competing schedulers.
 2. Converge callbacks, resumable streams, and optional controller notifications on persisted event cursors. Transports remain replaceable delivery adapters; no chat network or transcript parser is added.
-3. Run a freshly installed Codex package through one real eligible repository task over MCP, validate the resulting artifact upstream, and compare upstream/downstream token evidence against the existing controller-owned baseline before changing automatic-entry claims. Run Claude parity only after a Claude plan is available.
+3. Start a fresh Codex session after installing the current package, confirm the advertised MCP input schema includes optional `TaskAssessment.context`, run one real eligible repository task over that boundary, validate the resulting artifact upstream, and compare upstream/downstream token evidence against the existing controller-owned baseline before changing automatic-entry claims. Run Claude parity only after a Claude plan is available.
 4. Add authenticated local automation, callback URL/signing/retry policy, admission/backpressure, approval, route policy, and sandbox backends only as separate evidence-gated hardening slices.
 
 ### Exit gates
