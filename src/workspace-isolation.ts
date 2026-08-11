@@ -738,7 +738,12 @@ export class WorkspaceIsolationManager {
             environment
           );
         }
-        await git(['add', '--intent-to-add', '--', '.'], isolated.managedPath, false, environment);
+        await git(
+          ['add', '--intent-to-add', '--ignore-removal', '--', '.'],
+          isolated.managedPath,
+          false,
+          environment
+        );
         const changedFiles = nulDelimitedPaths(
           (
             await git(

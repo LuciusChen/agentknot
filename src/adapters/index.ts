@@ -1,7 +1,6 @@
 import type { AgentKnotConfig } from '../config.js';
 import type { WorkerAdapter } from '../types.js';
 import { MockWorkerAdapter } from './mock.js';
-import { OpenCodeJsonWorkerAdapter } from './opencode-json.js';
 import { PiRpcWorkerAdapter } from './pi-rpc.js';
 
 export function createAdapters(config: AgentKnotConfig): Map<string, WorkerAdapter> {
@@ -14,14 +13,10 @@ export function createAdapters(config: AgentKnotConfig): Map<string, WorkerAdapt
       case 'pi-rpc':
         adapters.set(name, new PiRpcWorkerAdapter(name, worker));
         break;
-      case 'opencode-json':
-        adapters.set(name, new OpenCodeJsonWorkerAdapter(name, worker));
-        break;
     }
   }
   return adapters;
 }
 
 export { MockWorkerAdapter } from './mock.js';
-export { OpenCodeJsonWorkerAdapter } from './opencode-json.js';
 export { PiRpcWorkerAdapter } from './pi-rpc.js';

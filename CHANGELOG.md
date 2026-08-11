@@ -4,6 +4,8 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 
 ## [Unreleased]
 
+Entries in this unreleased history retain earlier implementation evidence; the `Removed` section below records the current built-in surface.
+
 ### Added
 
 - Independent broker lifecycle and controller-neutral MCP client. `agentknot broker run` hosts the foreground kernel; `broker up|status|down` explicitly manages the same compiled process with cross-platform Node primitives, readiness polling, exact random-instance/PID checks, and identity-safe stale-record cleanup. `agentknot mcp` exposes policy, routes, orchestration admission/status/cancellation, and read-only artifact preview as a pure stdio broker client that re-resolves discovery after broker restart and never calls `createRuntime` ([decision 0057](postmortems/0057-independent-broker-and-thin-controller-clients.md)).
@@ -101,11 +103,13 @@ All release-relevant changes to AgentKnot are recorded here. The project follows
 
 ### Removed
 
+- Retired the native `opencode-json` CLI worker and its adapter-only configuration, routes, registry export, tests, and fixture. The built-in set is now Mock plus Pi RPC; Pi can still use configured downstream provider/model routes, and historical native-worker evidence remains in its decision records ([decision 0059](postmortems/0059-retire-native-opencode-worker.md)).
 - The unpublished systemd-user/launchd service host, platform renderers, `agentknot service` command, and their tests. AgentKnot installs no operating-system service or shell configuration; `broker run` may be hosted by an external supervisor, while explicit `broker up` uses only application process primitives ([decision 0057](postmortems/0057-independent-broker-and-thin-controller-clients.md)).
 - Stateful controller-hook workspace/session records, repository inference, discovery/policy subprocesses, worker waiting, `PostToolUse`, and `SessionEnd` handlers. Optional controller packages now contain only common MCP configuration, a controller-owned handoff Skill, and one stateless prompt obligation ([decision 0057](postmortems/0057-independent-broker-and-thin-controller-clients.md)).
 
 ### Fixed
 
+- Git worktree artifact capture now preserves tracked-file deletions. Intent-to-add discovery ignores removals before the worker-delta diff, so deleted paths remain in both the patch and controller-derived `changedFiles`; a mixed tracked/untracked/binary regression applies the captured deletion cleanly ([incident 0060](postmortems/0060-artifact-capture-omitted-deletions.md)).
 - Native OpenCode Jobs no longer fail solely because an otherwise valid `step_finish` carries missing, malformed, or overflowing provider token/cost statistics. Lifecycle settlement and the required completion envelope remain strict; unusable accounting is retained as advisory `sessionStats.unavailableReason: "invalid"` evidence instead of a terminal worker error ([incident 0056](postmortems/0056-opencode-statistics-advisory-boundary.md)).
 - Accepted durable cancellation can no longer be overwritten by a simultaneous success transition. Explicit lease release retains an inactive fence tombstone so the next claim cannot reuse an old generation, failed first-lease admission cannot leave a queued/idempotent orphan, and legacy JSON import rejects filename/payload identity mismatches ([decision 0055](postmortems/0055-durable-middleware-kernel.md)).
 - Graceful HTTP shutdown no longer drops the listener while storage locks and active work are still owned. It rejects new Job/orchestration admissions with 503, keeps liveness/read access available while admitted work cancels and drains, then closes the listener before runtime ownership is released; response-stream failures are connection-local ([incident/decision 0046](postmortems/0046-clutch-review-listing-and-shutdown-gaps.md)).

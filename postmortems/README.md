@@ -170,3 +170,5 @@ Incident records should also include severity, user/controller impact, immediate
 | [0056](./0056-opencode-statistics-advisory-boundary.md) | Incident / Boundary correction | Accepted | Keep OpenCode accounting evidence advisory |
 | [0057](./0057-independent-broker-and-thin-controller-clients.md) | Incident / Architecture Decision | Resolved / Accepted | Make the broker independent and controller clients thin |
 | [0058](./0058-controller-neutral-broker-activation.md) | Incident / Architecture Decision | Resolved / Accepted | Let common clients explicitly activate a non-running broker |
+| [0059](./0059-retire-native-opencode-worker.md) | Decision | Accepted | Retire the native secondary CLI worker and keep Pi as the sole built-in real worker |
+| [0060](./0060-artifact-capture-omitted-deletions.md) | Incident | Resolved | Preserve tracked-file deletions in worker patch artifacts |

@@ -39,6 +39,7 @@ async function repository(): Promise<{ root: string; worktreeDirectory: string; 
   await writeFile(path.join(root, 'README.md'), 'base\n');
   await mkdir(path.join(root, 'nested'));
   await writeFile(path.join(root, 'nested', 'nested.txt'), 'nested\n');
+  await writeFile(path.join(root, 'nested', 'removed.txt'), 'remove me\n');
   await git(root, 'add', '--', '.');
   await git(root, 'commit', '-qm', 'base');
   return {
@@ -83,6 +84,7 @@ test('worktree jobs leave the source unchanged and capture tracked/untracked/bin
     async run(input: WorkerRunInput): Promise<WorkerRunResult> {
       assert.notEqual(input.workspace, paths.root);
       await writeFile(path.join(input.workspace, 'nested.txt'), 'changed\n');
+      await rm(path.join(input.workspace, 'removed.txt'));
       await writeFile(path.join(input.workspace, 'worker-created.txt'), 'created\n');
       await writeFile(path.join(input.workspace, 'worker.bin'), Buffer.from([0, 1, 2, 255]));
       return { output: 'ok' };
@@ -101,11 +103,13 @@ test('worktree jobs leave the source unchanged and capture tracked/untracked/bin
   assert.equal(job.artifacts?.length, 1);
   assert.deepEqual(job.artifacts?.[0]?.changedFiles, [
     'nested/nested.txt',
+    'nested/removed.txt',
     'nested/worker-created.txt',
     'nested/worker.bin',
   ]);
   const artifactPath = job.artifacts?.[0]?.path ?? '';
   const patch = await readFile(artifactPath);
+  assert.match(patch.toString('utf8'), /deleted file mode.*removed\.txt/s);
   assert.match(patch.toString('utf8'), /worker-created\.txt/);
   assert.match(patch.toString('utf8'), /GIT binary patch/);
   await git(paths.root, 'apply', '--check', artifactPath);

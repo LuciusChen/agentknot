@@ -31,30 +31,6 @@
         "read,grep,find,ls"
       ],
       "noSession": true
-    },
-    "opencode": {
-      "adapter": "opencode-json",
-      "command": "/home/lucius/.local/lib/agentknot/workers/opencode/1.18.15/opencode",
-      "environment": {
-        "OPENCODE_CONFIG_CONTENT": "{\"experimental\":{\"continue_loop_on_deny\":true}}"
-      },
-      "unsetEnvironment": [
-        "OPENCODE_API_KEY"
-      ]
-    },
-    "opencode-readonly": {
-      "adapter": "opencode-json",
-      "command": "/home/lucius/.local/lib/agentknot/workers/opencode/1.18.15/opencode",
-      "commandArgs": [
-        "--agent",
-        "plan"
-      ],
-      "environment": {
-        "OPENCODE_CONFIG_CONTENT": "{\"experimental\":{\"continue_loop_on_deny\":true}}"
-      },
-      "unsetEnvironment": [
-        "OPENCODE_API_KEY"
-      ]
     }
   },
   "routes": {
@@ -97,61 +73,12 @@
       ],
       "maxAttempts": 2,
       "timeoutMs": 3600000
-    },
-    "opencode-luna": {
-      "worker": "opencode",
-      "provider": "opencode-go",
-      "model": "gpt-5.6-luna",
-      "thinkingLevel": "max",
-      "maxAttempts": 1,
-      "timeoutMs": 3600000
-    },
-    "opencode-deepseek-flash": {
-      "worker": "opencode",
-      "provider": "opencode-go",
-      "model": "deepseek-v4-flash",
-      "thinkingLevel": "max",
-      "maxAttempts": 1,
-      "timeoutMs": 3600000
-    },
-    "opencode-quality-review": {
-      "worker": "opencode-readonly",
-      "provider": "opencode-go",
-      "model": "gpt-5.6-luna",
-      "thinkingLevel": "max",
-      "maxAttempts": 1,
-      "timeoutMs": 3600000
-    }
-  },
-  "routePools": {
-    "advanced-workers": {
-      "strategy": "least-active",
-      "routes": [
-        "luna",
-        "opencode-luna"
-      ]
-    },
-    "routine-workers": {
-      "strategy": "least-active",
-      "routes": [
-        "deepseek-flash",
-        "opencode-deepseek-flash",
-        "luna",
-        "opencode-luna"
-      ]
-    },
-    "review-workers": {
-      "strategy": "least-active",
-      "routes": [
-        "quality-review",
-        "opencode-quality-review"
-      ]
     }
   },
   "delegation": {
     "mode": "auto",
     "dispatch": {
-      "defaultRoute": "advanced-workers",
+      "defaultRoute": "luna",
       "maxChildren": 6,
       "maxDepth": 1,
       "maxConcurrency": 6,
@@ -159,7 +86,7 @@
         "mode": "active",
         "rules": [
           {
-            "route": "routine-workers",
+            "route": "deepseek-flash",
             "complexities": [
               "low"
             ]
@@ -184,7 +111,7 @@
       ]
     },
     "qualityReview": {
-      "route": "review-workers",
+      "route": "quality-review",
       "complexities": [
         "low"
       ]

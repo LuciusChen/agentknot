@@ -266,25 +266,26 @@ test('usage report keeps valid zero stats distinct from missing evidence', () =>
 test('usage report exposes exact persisted route-pool distribution', () => {
   const first = job('job_pool_a', stats(1, 1, 0, 0, 2, 0));
   const second = job('job_pool_b', stats(1, 1, 0, 0, 2, 0));
-  first.request.route = 'luna-workers';
+  first.request.route = 'worker-pool';
+  first.route = { ...first.route, name: 'worker-a', worker: 'pi' };
   first.routePoolSelection = {
-    pool: 'luna-workers',
+    pool: 'worker-pool',
     strategy: 'least-active',
-    candidates: ['luna', 'opencode-luna'],
-    selectedRoute: 'luna',
-    activeBefore: { luna: 0, 'opencode-luna': 0 },
+    candidates: ['worker-a', 'worker-b'],
+    selectedRoute: 'worker-a',
+    activeBefore: { 'worker-a': 0, 'worker-b': 0 },
     cursorBefore: 0,
     selectedMemberIndex: 0,
     tieBreak: 'rotating-order',
   };
-  second.request.route = 'luna-workers';
-  second.route = { ...second.route, name: 'opencode-luna', worker: 'opencode' };
+  second.request.route = 'worker-pool';
+  second.route = { ...second.route, name: 'worker-b', worker: 'pi' };
   second.routePoolSelection = {
-    pool: 'luna-workers',
+    pool: 'worker-pool',
     strategy: 'least-active',
-    candidates: ['luna', 'opencode-luna'],
-    selectedRoute: 'opencode-luna',
-    activeBefore: { luna: 1, 'opencode-luna': 0 },
+    candidates: ['worker-a', 'worker-b'],
+    selectedRoute: 'worker-b',
+    activeBefore: { 'worker-a': 1, 'worker-b': 0 },
     cursorBefore: 1,
     selectedMemberIndex: 1,
     tieBreak: 'rotating-order',
@@ -298,8 +299,8 @@ test('usage report exposes exact persisted route-pool distribution', () => {
     classifiedJobs: 2,
     unavailableJobs: 0,
     selections: [
-      { pool: 'luna-workers', route: 'luna', count: 1 },
-      { pool: 'luna-workers', route: 'opencode-luna', count: 1 },
+      { pool: 'worker-pool', route: 'worker-a', count: 1 },
+      { pool: 'worker-pool', route: 'worker-b', count: 1 },
     ],
   });
 });

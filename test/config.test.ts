@@ -40,49 +40,6 @@ test('parseConfig keeps worker and provider as independent routing dimensions', 
   });
 });
 
-test('parseConfig registers OpenCode JSON as an independent worker runtime', () => {
-  const config = parseConfig({
-    version: 1,
-    defaultRoute: 'native-luna',
-    storage: { directory: '.agentknot/jobs' },
-    workers: {
-      native: {
-        adapter: 'opencode-json',
-        command: '/opt/opencode',
-        commandArgs: ['--log-level', 'ERROR'],
-        environment: { XDG_CACHE_HOME: '/tmp/opencode-cache' },
-        unsetEnvironment: ['OPENCODE_API_KEY', 'OPENCODE_API_KEY'],
-      },
-    },
-    routes: {
-      'native-luna': {
-        worker: 'native',
-        provider: 'opencode-go',
-        model: 'gpt-5.6-luna',
-        thinkingLevel: 'max',
-      },
-    },
-  });
-
-  assert.deepEqual(config.workers.native, {
-    adapter: 'opencode-json',
-    command: '/opt/opencode',
-    commandArgs: ['--log-level', 'ERROR'],
-    environment: { XDG_CACHE_HOME: '/tmp/opencode-cache' },
-    unsetEnvironment: ['OPENCODE_API_KEY'],
-  });
-  assert.deepEqual(resolveRoute(config), {
-    name: 'native-luna',
-    worker: 'native',
-    provider: 'opencode-go',
-    model: 'gpt-5.6-luna',
-    thinkingLevel: 'max',
-    requiredEnv: [],
-    maxAttempts: 1,
-    timeoutMs: 1_800_000,
-  });
-});
-
 test('parseConfig keeps route pools above complete exact routes', () => {
   const base = {
     version: 1,

@@ -42,7 +42,7 @@ controller plan/assessment → AgentKnot policy → persisted plan → bounded c
 
 An optional orchestration route-selection policy can either record vendor-neutral shadow suggestions or apply explicit human-authored rules. The upstream controller assesses task complexity but cannot name a route in the assessment; configured policy remains the execution authority.
 
-The reference real worker adapter uses [Pi RPC](https://pi.dev/docs/latest/rpc), a strict JSONL protocol. A second promoted real adapter invokes OpenCode CLI's JSON run surface directly, proving that Pi is replaceable without changing Job semantics. Neither path fixes provider, model, or effort in core.
+The reference and sole built-in real worker adapter uses [Pi RPC](https://pi.dev/docs/latest/rpc), a strict JSONL protocol. Provider, model, and effort remain route data, and custom TypeScript adapters can be supplied without changing Job semantics.
 
 Use `agentknot run` for an already bounded leaf task or `agentknot orchestrate` with a controller-authored assessment when deterministic policy should decide whether and how to dispatch it.
 
@@ -55,21 +55,20 @@ The labels below are availability claims, not maturity ratings. **Current** mean
 | **Current** | Controller-neutral leaf jobs and bounded depth-one orchestration through CLI, HTTP, and TypeScript, with `off`, `suggest`, and `auto` delegation modes. | Implemented and covered by deterministic API, policy, lifecycle, and persistence tests; callers must invoke the Job or orchestration API rather than relying on native-chat interception. |
 | **Current** | Transactional local Job/Orchestration persistence with append-only event cursors, CAS revisions, idempotent admission, fenced execution leases, durable cancellation intent, and isolated leaf/parent restart recovery. | Production `createRuntime()` imports identity-matching legacy JSON evidence without rewriting it and writes one SQLite authority per configured record directory. Record, optional idempotency identity, and first lease admit atomically; independent instances reject stale writes, retain monotonic fences after release, reuse one canonical request identity, observe cancellation by durable ID, and prevent accepted cancellation from becoming success. After lease expiry, git-worktree Jobs replay only from integrity-checked admitted workspace snapshots; recoverable parents reuse the admitted controller plan and deterministic child/reviewer identities without replanning or route replacement. Durable capacity remains in progress, so lifetime scheduler ownership has not yet been removed ([decision 0055](postmortems/0055-durable-middleware-kernel.md)). |
 | **Experimental** | Thin installable Codex and Claude controller clients with explicit or implicit controller-authored handoff. | Each package launches the common `agentknot mcp` stdio client and has one stateless prompt hook that only injects the controller responsibility boundary. The hook performs no repository scan, session binding, CLI/network call, policy lookup, runtime creation, or worker wait. The controller owns planning and submits a strict assessment through common MCP tools or the transport-equivalent CLI fallback. Deterministic tests cover package parity, malformed input, resume/path independence, broker restart, and the absence of runtime ownership; real Claude parity remains a promotion gate ([decisions 0053](postmortems/0053-controller-owned-planning-handoff.md) and [0057](postmortems/0057-independent-broker-and-thin-controller-clients.md)). |
-| **Current** | Independent worker/provider/model routing with built-in Mock, Pi RPC, and OpenCode JSON adapters. | Routing and core Job semantics are adapter-neutral. Worker and reviewer targets may be complete-route pools; the repository's logical advanced, routine, and review pools each contain multiple replaceable Pi/native-OpenCode candidates. |
-| **Current** | Reusable route-neutral `WorkerAdapter` conformance tests for Mock, Pi RPC, and OpenCode JSON. | The shared unit kit covers healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and pre-aborted runs. Protocol-specific lifecycle and artifact tests remain at each adapter boundary. |
-| **Current** | Optional human-authored route selection and complete-route pools for eligible work. | Active/shadow rules choose configured logical targets. A `least-active` pool selects one complete exact route before Job creation, counts explicit member Jobs, rotates equal-load ties, and persists the pool plus exact selection. Repository low work targets a routine pool that is not fixed to one runtime or model; medium/high/default work targets an advanced pool. Retries never switch routes; there is no learned ranking, health scoring, quota inference, or fallback ([decisions 0020](postmortems/0020-human-authored-active-route-selection.md), [0042](postmortems/0042-complete-route-pool-balancing.md), and [0047](postmortems/0047-resumable-controller-binding-and-replaceable-role-pools.md)). |
+| **Current** | Independent worker/provider/model routing with built-in Mock and Pi RPC adapters. | Routing and core Job semantics are adapter-neutral. Worker and reviewer targets may name complete-route pools; pool membership remains configuration rather than a core runtime choice. |
+| **Current** | Reusable route-neutral `WorkerAdapter` conformance tests for Mock and Pi RPC. | The shared unit kit covers healthy diagnostics, normalized start/text events and output, event-sink failure propagation, and pre-aborted runs. Protocol-specific lifecycle and artifact tests remain at each adapter boundary. |
+| **Current** | Optional human-authored route selection and complete-route pools for eligible work. | Active/shadow rules choose configured logical targets. A `least-active` pool selects one complete exact route before Job creation, counts explicit member Jobs, rotates equal-load ties, and persists the pool plus exact selection. Repository low work targets the configured `deepseek-flash` route while medium/high/default work targets `luna`; pool membership remains configuration rather than a runtime preference. Retries never switch routes; there is no learned ranking, health scoring, quota inference, or fallback ([decisions 0020](postmortems/0020-human-authored-active-route-selection.md), [0042](postmortems/0042-complete-route-pool-balancing.md), and [0047](postmortems/0047-resumable-controller-binding-and-replaceable-role-pools.md)). |
 | **Current** | Optional independent advisory review for one bounded delegated patch. | `delegation.qualityReview` names any configured single-attempt exact route or all-single-attempt pool. One separately persisted depth-one reviewer Job receives bounded verified patch evidence and may inspect task-relevant repository context through a configured read-only profile; it cannot edit, execute repository commands, repair, apply/promote, or override the controller. Historical no-tool A/B evidence remains documented but is not the current profile ([decision/experiment 0036](postmortems/0036-bounded-advisory-quality-review.md) and [incident/decision 0046](postmortems/0046-clutch-review-listing-and-shutdown-gaps.md)). |
-| **Current** | Read-only persisted-evidence usage report through CLI and TypeScript. | `agentknot usage` and `runtime.usage()` aggregate exact available downstream adapter-reported token totals and provider cost, report cache-read and active/shadow route-rule hit rates, and keep partial or missing evidence explicit. Pi RPC and OpenCode JSON both normalize exact provider evidence into this shape. Upstream controller usage, cross-boundary proportions, and shared-account remaining quota are unavailable rather than inferred ([decision 0034](postmortems/0034-persisted-usage-observability-boundary.md)). |
+| **Current** | Read-only persisted-evidence usage report through CLI and TypeScript. | `agentknot usage` and `runtime.usage()` aggregate exact available downstream adapter-reported token totals and provider cost, report cache-read and active/shadow route-rule hit rates, and keep partial or missing evidence explicit. Pi RPC normalizes exact provider evidence into this shape. Upstream controller usage, cross-boundary proportions, and shared-account remaining quota are unavailable rather than inferred ([decision 0034](postmortems/0034-persisted-usage-observability-boundary.md)). |
 | **Current** | Ordered job/orchestration state and normalized events with retries, timeouts, cancellation, one-shot callbacks, and bounded exact-child Pi supervision. | Snapshot projection and event suffix commit atomically; stale revisions and stale lease fences cannot publish over current work. Catchable server shutdown rejects new admissions but remains reachable while kernel-owned work cancels and drains. Late attempt events are ignored, and the bounded Stage 1 soak verifies exact process-group cleanup. |
 | **Current** | Fixed UTF-8 budgets for prompts, metadata, worker events, result output, completion reports, errors, record projections, callbacks, and patch artifacts. | Oversized admission fails early, bounded evidence carries explicit replacement/truncation state, record projections and patch artifacts each have a 16 MiB ceiling, and callbacks above 8 MiB are not sent; retained database/legacy/artifact content is not automatically redacted and no per-record purge API exists ([decisions 0023](postmortems/0023-fixed-durable-record-budgets.md) and [0025](postmortems/0025-local-retention-and-redaction-boundary.md)). |
 | **Current** | Versioned persisted Job and Orchestration records. | New records carry top-level `schemaVersion: 1`; file reads materialize missing versions as legacy v1 in memory without rewriting bytes and reject explicit unsupported versions. |
-| **Current** | Additive terminal Job completion summaries and required real-worker completion reports. | Newly terminal success, failure, and cancellation records include terminal outcome/attempt, controller-captured terminal-artifact path evidence or a stable unavailable reason, and an explicit worker-reported reported/unavailable branch. Normal Pi and OpenCode Jobs must end with one valid strict completion envelope; missing or malformed envelopes fail the attempt even when the worker process exits cleanly and the captured patch is empty and valid. Custom TypeScript adapters may still omit the optional report, while every accepted report remains an unverified worker claim ([incident/decision 0044](postmortems/0044-required-worker-completion-and-canonical-worktree-id.md)). |
+| **Current** | Additive terminal Job completion summaries and required real-worker completion reports. | Newly terminal success, failure, and cancellation records include terminal outcome/attempt, controller-captured terminal-artifact path evidence or a stable unavailable reason, and an explicit worker-reported reported/unavailable branch. Normal Pi Jobs must end with one valid strict completion envelope; missing or malformed envelopes fail the attempt even when the worker process exits cleanly and the captured patch is empty and valid. Custom TypeScript adapters may still omit the optional report, while every accepted report remains an unverified worker claim ([incident/decision 0044](postmortems/0044-required-worker-completion-and-canonical-worktree-id.md)). |
 | **Current** | Git worktree attempt isolation, dirty-source snapshots, patch artifacts, read-only inspection, and delegated-child path-overlap review. | Supported staged, unstaged, and non-ignored untracked content is snapshotted through temporary Git state; retries see that same content while artifacts contain only worker deltas and carry its exact tree identity. Newly captured artifacts include controller-derived repository-relative `changedFiles` (including `[]`); delegated parent results group exact paths owned by multiple children as potential conflicts and mark missing evidence incomplete. This is not semantic verification or acceptance, and artifacts are never applied, committed, merged, or pushed automatically ([decisions 0026](postmortems/0026-child-artifact-path-overlap-review.md) and [0049](postmortems/0049-dirty-workspace-snapshot-isolation.md)). |
 | **Current** | Configuration-only `doctor`, opt-in exact-route `doctor --live`, and HTTP process liveness. | Implemented and covered by diagnostic and HTTP contract tests; live probes are point-in-time evidence and are not run as normal-job preflights. |
 | **Current** | Product-owned discovery and explicit cross-platform lifecycle for one independent local broker. | `agentknot broker run` hosts the foreground kernel; `broker up|status|down` manages the same compiled entry with application process primitives, readiness polling, and exact instance/PID checks. A successful explicit `broker up` records one strict mode-0600 launch profile in the platform application-config directory; the controller-neutral MCP `broker_start` tool can explicitly restore a stopped or crash-stale broker without target-repository scanning or OS service installation. The loopback broker publishes one per-user record, clients rediscover it across restart, and stale cleanup cannot remove a newer identity. Discovery and launch preference are conveniences, not durable execution authority ([decisions 0057](postmortems/0057-independent-broker-and-thin-controller-clients.md) and [0058](postmortems/0058-controller-neutral-broker-activation.md)). |
 | **Experimental** | Reviewed Pi worker profiles/extensions; none is promoted. | Evaluation only: use an exact version or immutable path without global or repository installation, then run repeated same-task Luna/max A/B trials against the minimal profile; completion, artifact verification, and target tests must not regress and session-statistics, elapsed-time, retry, or upstream-intervention evidence must show a repeatable net benefit before promotion. `pi-readseek@0.9.10` regressed its first pair. `pi-lean-ctx@3.9.18` produced two selected, passing artifacts and saved 39.0% total Pi tokens on the larger task, but on an independent smaller task it used 36.2% more tokens and took 45.7% longer; the inconsistent profile is not promoted. See [experiments 0013](postmortems/0013-pi-readseek-profile-ab.md) and [0014](postmortems/0014-pi-lean-ctx-profile-ab.md). |
 | **Experimental** | Pi/OpenCode Go/DeepSeek V4 Flash at `thinkingLevel=max` for configured low-complexity dogfood work. | The route passed live probes and one isolated same-task comparison. It is now selected only by the repository's human-authored `low` rule; it is not a claimed intelligence ranking, fallback target, or replacement for Luna on medium/high work. Upstream artifact review remains required. See [experiment 0017](postmortems/0017-deepseek-flash-route-ab.md) and [decision 0020](postmortems/0020-human-authored-active-route-selection.md). |
-| **Current** | Native OpenCode JSON worker as a replaceable pool member. | The pinned `v1.18.15` adapter passes deterministic protocol/lifecycle coverage plus repeated real Luna/max success, error/nonzero, cancellation, timeout, cleanup, and non-empty artifact evidence. Native OpenCode may participate in routine, advanced, and review pools through configuration; no efficiency, capacity, ranking, quota, or fallback claim is made ([decisions 0041](postmortems/0041-native-opencode-worker-portability.md), [0042](postmortems/0042-complete-route-pool-balancing.md), [0043](postmortems/0043-native-opencode-lifecycle-soak.md), and [0047](postmortems/0047-resumable-controller-binding-and-replaceable-role-pools.md)). |
 | **Proposed** | Parent/reviewer restart recovery, durable backpressure, authenticated local automation, signed callbacks, approval/policy controls, and an OS-sandbox backend. | Transactional records/events, idempotency, leases, persistent cancellation, same-ID wait, and leaf recovery are implemented foundations; the remaining capabilities are unavailable until their Stage 3 gates pass. |
 | **Proposed** | An explicit artifact-promotion operation. | Not available; it may be considered only if dirty-target, base-mismatch, checksum, and explicit controller/human-approval checks are safe and tested. |
 | **Deferred** | Automatic patch application, commit, merge, push, deployment, or pull-request creation. | Not available by design; artifact inspection ends with an upstream controller or human decision. |
@@ -105,9 +104,9 @@ node dist/src/cli.js orchestrate \
 
 The `assessment` is required at the TypeScript, HTTP, and CLI boundaries. It is controller-authored but untrusted: AgentKnot strictly validates its exact schema, filters task kinds through configured keep/delegate policy, applies child/depth/concurrency caps, and selects configured logical routes. The resulting deterministic policy projection and, when it will dispatch, one immutable workspace snapshot are part of parent admission before any child starts. Every worker and reviewer Job derives from that same parent input; AgentKnot does not reclassify the goal or reread later controller-side source changes. The assessment cannot name a route, worker, provider, model, or effort.
 
-The repository dogfoods `mode: "auto"` with replaceable logical targets: `advanced-workers` for medium/high/default children, `routine-workers` for low children, and `review-workers` for advisory review. Pool membership—not core code—selects provider/model/effort candidates. Least-active admission snapshots one exact route per Job, and retries never become fallback. Product defaults are two children and two active slots; this repository uses six. The scheduler starts only useful independent tasks, refills free slots, and never treats the configured maximum as a target.
+The repository dogfoods `mode: "auto"` with route data owned by configuration: `luna` is the default worker route, `deepseek-flash` is selected for configured low-complexity work, and `quality-review` is the advisory reviewer route. Optional route pools remain generic and can name any complete exact routes; they use least-active admission, snapshot one exact route per Job, and never become retry fallback. Product defaults are two children and two active slots; this repository uses six. The scheduler starts only useful independent tasks, refills free slots, and never treats the configured maximum as a target.
 
-An optional `delegation.qualityReview` policy can run one fresh advisory reviewer Job after exactly one successful child produces exactly one integrity-valid, base-valid, non-empty, non-truncated patch within the review budgets. Eligibility is selected by the parent assessment complexity; the reviewer target may be an exact route or a pool whose candidates all use one attempt. Its strict result is persisted as `qualityReview`, but `changes-requested` does not rewrite child or parent success and `accept` does not promote the patch. The repository's Pi and native OpenCode reviewer profiles expose read-only repository inspection while the prompt forbids edits, repository commands, repair, recursion, and publication. The controller still owns acceptance, application, and integrated validation.
+An optional `delegation.qualityReview` policy can run one fresh advisory reviewer Job after exactly one successful child produces exactly one integrity-valid, base-valid, non-empty, non-truncated patch within the review budgets. Eligibility is selected by the parent assessment complexity; the reviewer target may be an exact route or a pool whose candidates all use one attempt. Its strict result is persisted as `qualityReview`, but `changes-requested` does not rewrite child or parent success and `accept` does not promote the patch. The repository's Pi reviewer profile exposes read-only repository inspection while the prompt forbids edits, repository commands, repair, recursion, and publication. The controller still owns acceptance, application, and integrated validation.
 
 An optional `delegation.artifactValidation` policy adds controller-owned test evidence without asking the worker or reviewer to validate its own claim. For exactly one successful child with exactly one integrity-valid, base-valid, non-empty patch no larger than 32 KiB, AgentKnot creates a second disposable worktree at the recorded base, applies only that recorded patch there, and runs exactly one configured argument vector without a shell. Validation and optional model review start concurrently after child completion. The persisted evidence records the exact arguments, pass/fail/timeout/cancellation/output-limit result, exit status, duration, bounded output, and cleanup outcome. It remains advisory: failure does not rewrite child or parent success, and neither pass nor review acceptance promotes the patch.
 
@@ -177,14 +176,14 @@ The repository dogfood policy is intentionally small:
 ```json
 {
   "dispatch": {
-    "defaultRoute": "advanced-workers",
+    "defaultRoute": "luna",
     "maxChildren": 6,
     "maxDepth": 1,
     "maxConcurrency": 6,
     "routeSelection": {
       "mode": "active",
       "rules": [
-        { "route": "routine-workers", "complexities": ["low"] }
+        { "route": "deepseek-flash", "complexities": ["low"] }
       ]
     }
   }
@@ -193,7 +192,7 @@ The repository dogfood policy is intentionally small:
 
 There must be 1–20 ordered rules, every `route` target must name an existing configured exact route or route pool and every candidate is validated at config load, and a present `taskKinds` or `complexities` array must be non-empty and unique. Complexity values are only `low`, `medium`, and `high`; when both predicates are present they must both match, and a rule with neither predicate is an explicit catch-all, so the first matching rule wins.
 
-For each eligible planned subtask, AgentKnot evaluates the subtask kind and parent assessment complexity. An active match persists evidence such as `{ "mode": "active", "selectedRoute": "routine-workers", "basis": "rule", "ruleIndex": 0 }`; with no match it persists `{ "mode": "active", "selectedRoute": "advanced-workers", "basis": "default" }`, with no `ruleIndex`. This legacy field name carries the configured logical target, not necessarily an exact model route. `ruleIndex` is zero-based and appears only for a rule match. Complexity is assessed once for the parent orchestration, so all children share that complexity; there is no second per-child model judgment.
+For each eligible planned subtask, AgentKnot evaluates the subtask kind and parent assessment complexity. An active match persists evidence such as `{ "mode": "active", "selectedRoute": "deepseek-flash", "basis": "rule", "ruleIndex": 0 }`; with no match it persists `{ "mode": "active", "selectedRoute": "luna", "basis": "default" }`, with no `ruleIndex`. This field carries the configured route or pool target. `ruleIndex` is zero-based and appears only for a rule match. Complexity is assessed once for the parent orchestration, so all children share that complexity; there is no second per-child model judgment.
 
 The suggestion is observable in the persisted plan and in the child `agentknotDelegation` metadata, alongside `taskKind` and `parentComplexity`, so future scorecards do not need to parse prompts; a child metadata fragment is:
 
@@ -205,7 +204,7 @@ The suggestion is observable in the persisted plan and in the child `agentknotDe
     "parentComplexity": "medium",
     "routeSelection": {
       "mode": "active",
-      "selectedRoute": "routine-workers",
+      "selectedRoute": "deepseek-flash",
       "basis": "rule",
       "ruleIndex": 0
     }
@@ -213,11 +212,11 @@ The suggestion is observable in the persisted plan and in the child `agentknotDe
 }
 ```
 
-`PlannedSubtask.route` and the child's `request.route` are `routine-workers` in this example. Pool admission then snapshots one configured exact member into `Job.route.name` and persists the choice in `routePoolSelection`. If no rule matches, the logical target is `advanced-workers`. The selected exact route fixes worker, provider, model, `thinkingLevel`, timeout, and retry policy before execution. A failure remains on that route and never causes silent worker or model fallback.
+`PlannedSubtask.route` and the child's `request.route` are `deepseek-flash` in this example. The selected exact route fixes worker, provider, model, `thinkingLevel`, timeout, and retry policy before execution. A failure remains on that route and never causes silent worker or model fallback. If a configured pool is selected instead, admission records the same exact member-selection evidence before execution.
 
 Use `agentknot orchestrate` with the configured file, then inspect the orchestration record and each child Job record through CLI JSON, `GET /v1/orchestrations/:id`, or `GET /v1/jobs/:id`. `shadow` remains available for measurement without execution changes. `active` is deterministic human policy, not a performance ranking: AgentKnot does not learn model intelligence, choose from prices, or silently optimize/fallback.
 
-## Pi + OpenCode Go + Luna
+## Pi + OpenCode Go provider + Luna
 
 Install Pi using its documented package:
 
@@ -225,7 +224,7 @@ Install Pi using its documented package:
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 ```
 
-Provide the OpenCode API key without committing it to configuration:
+Provide the OpenCode Go provider API key without committing it to configuration:
 
 ```bash
 export OPENCODE_API_KEY="..."
@@ -271,8 +270,6 @@ The adapter disables ambient extension, skill, prompt-template, and theme discov
 AgentKnot sends the prompt over stdin as JSONL and waits for Pi's `agent_settled` event, so retries and queued continuation events finish before the job is marked complete. After a successful normal run it requests `get_session_stats` and stores only sanitized counts, token totals, cost, and optional context usage under result metadata; unsupported, malformed, or timed-out statistics are advisory and do not turn successful work into failure. These statistics and other Pi activity remain evidence for diagnostics, not a completion report. For normal `run` jobs only, the adapter appends a provider/model-neutral instruction asking the final assistant message to end with one line beginning `AGENTKNOT_WORKER_COMPLETION_REPORT_V1: ` followed by the schemaVersion 1 `WorkerCompletionReport` JSON. The report contains worker-reported `changedFiles`, `checksRun`, `remainingRisks`, and `notes`; every value is a worker claim, not AgentKnot verification. A valid suffix is strictly validated and removed together with its separating newline from `result.output`; a missing, trailing, malformed, or unsupported suffix fails the attempt instead of converting intermediate progress into success. The instruction and parser are not used by `doctor` or `doctor --live`, and no text after the marked line is accepted. The adapter decodes streaming UTF-8 independently of process chunk boundaries, reports malformed frames and missing settlement explicitly, and uses bounded `SIGTERM` → `SIGKILL` supervision for the exact Pi child on timeout or cancellation. Output draining also has a fixed grace window: if an external event sink never settles, the adapter destroys only the owned streams and stops awaiting that task so abort cleanup can finish; the external promise itself cannot be cancelled. It does not perform process-wide cleanup or claim ownership of arbitrary descendants.
 
 Normal `PiRpcWorkerAdapter.run` executions have one bounded record-volume rule: exactly the Pi lifecycle envelopes `turn_start`, `turn_end`, `message_start`, and `message_end` are omitted from `worker.raw`; every received Pi frame still increments `metadata.rawEventCount`, including those four envelopes, and unknown event types remain `worker.raw`. Normalized text/tool/retry events, final output, completion reports, live-probe behavior, route/provider/model/thinking configuration, and global event types are unchanged. This is not a Pi-token-saving claim or general truncation and adds no schema migration, plugin installation, configuration/probe change, or global event-type change.
-
-`OpenCodeJsonWorkerAdapter` invokes `opencode run --pure --format json` and passes the exact resolved `provider/model`, optional thinking variant, and isolated worktree path. It shares the strict JSONL decoder, required completion-report parser, and bounded exact-child supervision with Pi. Because OpenCode exposes no `agent_settled`, normal Job success requires a `step_finish`, clean process exit, and the valid final completion envelope; intermediate text plus process success is insufficient. Completed text/tool parts have lower lifecycle fidelity than Pi and are not described as token streaming or tool-start/update events. Exact valid `step_finish` usage is retained in the same route-neutral usage shape; missing, malformed, or overflowing token/cost fields make only that accounting evidence unavailable and cannot fail otherwise completed work. The adapter uses OpenCode's own private auth store or explicit required environment; `unsetEnvironment` can remove an ambient key and never reads Pi auth. `--pure` disables plugins, but OpenCode's data directory still owns auth/session state, so this is not full data isolation or a sandbox ([decisions 0041](postmortems/0041-native-opencode-worker-portability.md) and [0044](postmortems/0044-required-worker-completion-and-canonical-worktree-id.md), and [incident 0056](postmortems/0056-opencode-statistics-advisory-boundary.md)).
 
 ## Switching controller or provider
 
@@ -353,7 +350,7 @@ After a CLI `run` or `orchestrate` request has been admitted, catchable `SIGINT`
 
 Persisted Job and Orchestration records carry top-level `schemaVersion: 1`. File stores accept a missing field as legacy v1 only while reading, materialize it on the returned in-memory record, leave read-only snapshot bytes unchanged, and fail clearly for an explicit unsupported version. This slice adds no migration command or automatic on-disk rewrite.
 
-A newly terminal JobRecord also carries an additive `completionSummary` in TypeScript values, CLI `--json`, HTTP full-record responses, and callback snapshots without a new endpoint or serializer. Its changed paths are copied only from the terminal attempt's controller-captured artifact and retain artifact attempt/SHA-256/base-commit identity; direct mode, missing artifacts, or missing artifact path data produce stable unavailable reasons. A strict custom-adapter report is placed under `workerReported` only after validation; custom adapters may omit it, but the built-in Pi and OpenCode normal-run boundaries require one valid envelope and fail the attempt when it is absent or malformed. AgentKnot never derives a report from prose, worker events, stderr, session statistics, or an empty verified patch. Human CLI rendering is unchanged, and every accepted report remains a claim rather than controller verification ([incident/decision 0044](postmortems/0044-required-worker-completion-and-canonical-worktree-id.md)).
+A newly terminal JobRecord also carries an additive `completionSummary` in TypeScript values, CLI `--json`, HTTP full-record responses, and callback snapshots without a new endpoint or serializer. Its changed paths are copied only from the terminal attempt's controller-captured artifact and retain artifact attempt/SHA-256/base-commit identity; direct mode, missing artifacts, or missing artifact path data produce stable unavailable reasons. A strict custom-adapter report is placed under `workerReported` only after validation; custom adapters may omit it, but the built-in Pi normal-run boundary requires one valid envelope and fails the attempt when it is absent or malformed. AgentKnot never derives a report from prose, worker events, stderr, session statistics, or an empty verified patch. Human CLI rendering is unchanged, and every accepted report remains a claim rather than controller verification ([incident/decision 0044](postmortems/0044-required-worker-completion-and-canonical-worktree-id.md)).
 
 ### Usage report
 
@@ -366,7 +363,7 @@ agentknot usage --json
 
 The default view groups coverage, downstream tokens, cache efficiency, routing outcomes, advisory-review outcomes, and controller-data gaps for human review; use `--json` for the stable machine-readable report.
 
-The same projection is available as `await runtime.usage()`. It counts every successful Job at most once from its terminal `result.metadata.sessionStats`, sums exact available input/output/cache-read/cache-write/total fields and provider-reported numeric cost, and reports coverage as complete or partial. A valid all-zero record stays valid; missing, timed-out, unsupported, malformed, unsafe, or aggregate-overflow data never becomes zero. The cache-read hit rate is calculated after aggregation as `cacheRead / (input + cacheRead)`, excluding output and cache-write tokens. Routing also reports classified persisted pool selections grouped by logical pool and exact member, so Pi/native-OpenCode distribution is visible without inferring it from provider text.
+The same projection is available as `await runtime.usage()`. It counts every successful Job at most once from its terminal `result.metadata.sessionStats`, sums exact available input/output/cache-read/cache-write/total fields and provider-reported numeric cost, and reports coverage as complete or partial. A valid all-zero record stays valid; missing, timed-out, unsupported, malformed, unsafe, or aggregate-overflow data never becomes zero. The cache-read hit rate is calculated after aggregation as `cacheRead / (input + cacheRead)`, excluding output and cache-write tokens. Routing also reports classified persisted pool selections grouped by logical pool and exact member, so configured route distribution is visible without inferring it from provider text.
 
 Route-selection hits come from terminal orchestration plans and their immutable policy snapshots, not the current configuration or a prompt reclassification. Active and shadow evidence remain separate; `basis: "rule"` is a hit even when a rule selects the default route, while `basis: "default"` is an explicit default selection. Missing, malformed, or policy-inconsistent evidence is unclassified and makes coverage partial.
 
@@ -416,23 +413,6 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "command": "pi",
       "commandArgs": ["--no-skills", "--tools", "read,grep,find,ls"],
       "noSession": true
-    },
-    "opencode": {
-      "adapter": "opencode-json",
-      "command": "/absolute/path/to/opencode",
-      "environment": {
-        "OPENCODE_CONFIG_CONTENT": "{\"experimental\":{\"continue_loop_on_deny\":true}}"
-      },
-      "unsetEnvironment": ["OPENCODE_API_KEY"]
-    },
-    "opencode-readonly": {
-      "adapter": "opencode-json",
-      "command": "/absolute/path/to/opencode",
-      "commandArgs": ["--agent", "plan"],
-      "environment": {
-        "OPENCODE_CONFIG_CONTENT": "{\"experimental\":{\"continue_loop_on_deny\":true}}"
-      },
-      "unsetEnvironment": ["OPENCODE_API_KEY"]
     }
   },
   "routes": {
@@ -462,57 +442,19 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "requiredEnv": ["OPENCODE_API_KEY"],
       "maxAttempts": 1,
       "timeoutMs": 3600000
-    },
-    "opencode-luna": {
-      "worker": "opencode",
-      "provider": "opencode-go",
-      "model": "gpt-5.6-luna",
-      "thinkingLevel": "max",
-      "maxAttempts": 1,
-      "timeoutMs": 3600000
-    },
-    "opencode-deepseek-flash": {
-      "worker": "opencode",
-      "provider": "opencode-go",
-      "model": "deepseek-v4-flash",
-      "thinkingLevel": "max",
-      "maxAttempts": 1,
-      "timeoutMs": 3600000
-    },
-    "opencode-quality-review": {
-      "worker": "opencode-readonly",
-      "provider": "opencode-go",
-      "model": "gpt-5.6-luna",
-      "thinkingLevel": "max",
-      "maxAttempts": 1,
-      "timeoutMs": 3600000
-    }
-  },
-  "routePools": {
-    "advanced-workers": {
-      "strategy": "least-active",
-      "routes": ["luna", "opencode-luna"]
-    },
-    "routine-workers": {
-      "strategy": "least-active",
-      "routes": ["deepseek-flash", "opencode-deepseek-flash", "luna", "opencode-luna"]
-    },
-    "review-workers": {
-      "strategy": "least-active",
-      "routes": ["quality-review", "opencode-quality-review"]
     }
   },
   "delegation": {
     "mode": "auto",
     "dispatch": {
-      "defaultRoute": "advanced-workers",
+      "defaultRoute": "luna",
       "maxChildren": 6,
       "maxDepth": 1,
       "maxConcurrency": 6,
       "routeSelection": {
         "mode": "active",
         "rules": [
-          { "route": "routine-workers", "complexities": ["low"] }
+          { "route": "deepseek-flash", "complexities": ["low"] }
         ]
       }
     },
@@ -521,7 +463,7 @@ The separation between worker and provider is deliberate. Workspace isolation is
       "keepUpstream": ["requirements-decision", "product-decision", "artifact-integration", "commit", "push"]
     },
     "qualityReview": {
-      "route": "review-workers",
+      "route": "quality-review",
       "complexities": ["low"]
     },
     "artifactValidation": {
@@ -533,11 +475,9 @@ The separation between worker and provider is deliberate. Workspace isolation is
 }
 ```
 
-Use `--config PATH` or `AGENTKNOT_CONFIG` for another configuration file. Route and worker names above describe only this dogfood deployment: controller identity, worker, reviewer, adapter, provider, model, and effort are not fixed in core. A leaf request, dispatch default/rule, or quality-review target may name a pool; top-level default and `doctor` remain exact-route surfaces. Pools contain 2–20 unique exact routes, use process-local `least-active` with rotating equal-load ties, and never switch a selected Job during retry. Every candidate in a quality-review pool must have `maxAttempts: 1`; omission disables review. `artifactValidation` is also optional and remains bounded/shell-free as configured. JSON configuration selects the built-in `mock`, `pi-rpc`, and `opencode-json` adapters; custom TypeScript adapters remain available through direct construction.
+Use `--config PATH` or `AGENTKNOT_CONFIG` for another configuration file. Route and worker names above describe only this dogfood deployment: controller identity, worker, reviewer, adapter, provider, model, and effort are not fixed in core. A leaf request, dispatch default/rule, or quality-review target may name a pool; top-level default and `doctor` remain exact-route surfaces. Pools contain 2–20 unique exact routes, use process-local `least-active` with rotating equal-load ties, and never switch a selected Job during retry. Every candidate in a quality-review pool must have `maxAttempts: 1`; omission disables review. `artifactValidation` is also optional and remains bounded/shell-free as configured. JSON configuration selects the built-in `mock` and `pi-rpc` adapters; custom TypeScript adapters remain available through direct construction.
 
-The OpenCode inline setting shown above keeps its agent loop alive after a denied tool request so the model can inspect the rejection, correct a bad path, and still emit the required completion envelope. It does not approve the denied operation or weaken AgentKnot's worktree boundary. If a deployment already supplies `OPENCODE_CONFIG_CONTENT`, merge `experimental.continue_loop_on_deny: true` into that JSON instead of replacing the existing content.
-
-When `workspaceIsolation.mode` is `git-worktree`, AgentKnot requires a valid `HEAD` and snapshots supported top-level staged, unstaged, and non-ignored untracked content, capped by the existing 16 MiB binary-patch budget. Before durable leaf Job admission, and before admission of a parent that will dispatch, a non-empty input patch is atomically retained under that exact execution identity with mode 0600; the record keeps its SHA-256, size, commit, tree, repository, workspace, and subdirectory. Parent children and reviewers derive their Job snapshots from that one admitted parent input, while restart recovery can verify and replay each retained boundary instead of mutable source state. Each attempt is a detached worktree at that base with the snapshot replayed only inside it; the worker receives the matching repository subdirectory. After every attempt, a binary worker-delta patch up to 16 MiB is written under storage, including worker untracked files and commits, and metadata records `baseTree` plus Git-derived repository-relative `changedFiles`, including `[]` for an empty delta. The exact managed worktree is then removed. A larger snapshot fails before admission; a larger worker patch fails without retry or partial artifact. These paths are controller-captured evidence, not a worker claim, completion proof, or semantic verification; the terminal summary keeps worker claims separate and includes the same optional `baseTree` identity. Patches are artifacts only and are never applied automatically. Legacy artifacts and summaries may omit `baseTree` or `changedFiles`. Ignored dependencies/build outputs remain absent and dirty submodule contents are rejected. Compatibility mode `none` passes the caller's directory directly and provides no isolation.
+When `workspaceIsolation.mode` is `git-worktree`, AgentKnot requires a valid `HEAD` and snapshots supported top-level staged, unstaged, and non-ignored untracked content, capped by the existing 16 MiB binary-patch budget. Before durable leaf Job admission, and before admission of a parent that will dispatch, a non-empty input patch is atomically retained under that exact execution identity with mode 0600; the record keeps its SHA-256, size, commit, tree, repository, workspace, and subdirectory. Parent children and reviewers derive their Job snapshots from that one admitted parent input, while restart recovery can verify and replay each retained boundary instead of mutable source state. Each attempt is a detached worktree at that base with the snapshot replayed only inside it; the worker receives the matching repository subdirectory. After every attempt, a binary worker-delta patch up to 16 MiB is written under storage, including tracked-file deletions, worker untracked files, and commits, and metadata records `baseTree` plus Git-derived repository-relative `changedFiles`, including `[]` for an empty delta. The exact managed worktree is then removed. A larger snapshot fails before admission; a larger worker patch fails without retry or partial artifact. These paths are controller-captured evidence, not a worker claim, completion proof, or semantic verification; the terminal summary keeps worker claims separate and includes the same optional `baseTree` identity. Patches are artifacts only and are never applied automatically. Legacy artifacts and summaries may omit `baseTree` or `changedFiles`. Ignored dependencies/build outputs remain absent and dirty submodule contents are rejected. Compatibility mode `none` passes the caller's directory directly and provides no isolation.
 
 ## API surface
 
@@ -575,6 +515,6 @@ Local Job/Orchestration database records, imported legacy snapshots, admitted wo
 
 ## Roadmap
 
-Stages 1 and 2 are complete. Stage 3 now has transactional durability, cross-session same-ID wait/cancel, and fenced leaf Job recovery. Parent/reviewer/validation recovery and child/reviewer capacity remain unfinished and process-local. Current limits include one transitional execution scheduler, depth one, no automatic artifact integration, no semantic verification of captured paths, and no authentication for the local HTTP service.
+Stage 1 is complete and Stage 2 remains in progress after the native secondary CLI worker retirement. Stage 3 now has transactional durability, cross-session same-ID wait/cancel, and fenced leaf Job recovery. Parent/reviewer/validation recovery and child/reviewer capacity remain unfinished and process-local. Current limits include one transitional execution scheduler, depth one, no automatic artifact integration, no semantic verification of captured paths, and no authentication for the local HTTP service.
 
 See [the roadmap](docs/ROADMAP.md) for scope, non-goals, and exit gates. Provider fallback, streaming, sandbox backends, OhMyPi compatibility, remote/fleet features, and automatic model/provider selection are proposals or deferred rather than current capabilities; any future ranking requires separate measured scorecards.
