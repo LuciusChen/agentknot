@@ -47,6 +47,8 @@ export class AgentKnotRuntime {
   readonly #ownership: RuntimeOwnership | undefined;
   readonly #executionEnabled: boolean;
   readonly #active = new Set<Promise<unknown>>();
+  readonly #recoveries = new Set<Promise<unknown>>();
+  readonly #recoveryControllers = new Set<AbortController>();
   readonly #resources: Array<{ close(): Promise<void> }>;
 
   constructor(
@@ -128,14 +130,23 @@ export class AgentKnotRuntime {
     );
   }
 
-  reconcileInterruptedJobs(): ReturnType<Orchestrator['reconcileInterruptedJobs']> {
+  recoverInterruptedJobs(): ReturnType<Orchestrator['recoverInterruptedJobs']> {
     this.#assertExecutionOwner();
-    return this.jobs.reconcileInterruptedJobs();
+    const controller = new AbortController();
+    this.#recoveryControllers.add(controller);
+    const recovery = this.jobs
+      .recoverInterruptedJobs({ signal: controller.signal })
+      .finally(() => {
+        this.#recoveryControllers.delete(controller);
+        this.#recoveries.delete(recovery);
+      });
+    this.#recoveries.add(recovery);
+    return recovery;
   }
 
   reconcileInterruptedOrchestrations(): Promise<OrchestrationRecord[]> {
     this.#assertExecutionOwner();
-    return this.orchestrations.reconcileInterruptedOrchestrations();
+    return this.#track(this.orchestrations.reconcileInterruptedOrchestrations());
   }
 
   delegationPolicy(): DelegationConfig {
@@ -181,12 +192,19 @@ export class AgentKnotRuntime {
 
   async shutdown(): Promise<void> {
     this.#assertExecutionOwner();
+    for (const controller of this.#recoveryControllers) {
+      controller.abort(new Error('Runtime shutdown interrupted Job recovery'));
+    }
+    await Promise.allSettled([...this.#recoveries]);
     await this.orchestrations.shutdown();
     await this.jobs.shutdown();
   }
 
   async close(): Promise<void> {
-    if (this.#ownership !== undefined && this.#active.size > 0) {
+    if (
+      this.#ownership !== undefined &&
+      (this.#active.size > 0 || this.#recoveries.size > 0 || this.jobs.hasActiveJobs())
+    ) {
       throw new RuntimeOwnershipError('Cannot release runtime storage ownership while work is active');
     }
     const failures: unknown[] = [];
@@ -261,7 +279,7 @@ export async function createRuntime(options: CreateRuntimeOptions = {}): Promise
       ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
     });
     if (executionEnabled) {
-      await jobs.reconcileInterruptedJobs({ exclusiveOwner: true });
+      await jobs.recoverInterruptedJobs({ waitForLease: true });
     }
     const orchestrations = new OrchestrationService({
       config: resolveDelegationConfig(loaded.config),

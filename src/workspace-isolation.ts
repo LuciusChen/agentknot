@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, rename, rmdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, rename, rmdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -19,6 +19,7 @@ import type {
   JobArtifact,
   JobArtifactVerification,
   JobArtifactVerificationIssue,
+  JobWorkspaceSnapshot,
 } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -208,6 +209,121 @@ export class WorkspaceIsolationManager {
       baseCommit: snapshot.baseCommit,
       baseTree: snapshot.baseTree,
       snapshotPatch: snapshot.snapshotPatch,
+    };
+  }
+
+  /**
+   * Materializes the admitted dirty-tree delta before the Job record can reference it.
+   * A crash before record admission may leave one unreferenced exact-ID file, but can never leave
+   * a record pointing at partial bytes.
+   */
+  async persistAdmissionSnapshot(
+    inspection: WorkspaceInspection,
+    jobId: string
+  ): Promise<JobWorkspaceSnapshot> {
+    const bytes = inspection.snapshotPatch;
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    if (bytes.byteLength > 0) {
+      const target = this.#snapshotPath(jobId);
+      const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+      await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+      try {
+        await writeFile(temporary, bytes, { mode: 0o600, flag: 'wx' });
+        await chmod(temporary, 0o600);
+        await link(temporary, target);
+      } finally {
+        await rm(temporary, { force: true });
+      }
+    }
+    return {
+      format: 'git-binary-patch',
+      sourceWorkspace: inspection.sourceWorkspace,
+      repository: inspection.repository,
+      relativeSubdirectory: inspection.relativeSubdirectory,
+      baseCommit: inspection.baseCommit,
+      baseTree: inspection.baseTree,
+      size: bytes.byteLength,
+      sha256,
+    };
+  }
+
+  async discardAdmissionSnapshot(jobId: string): Promise<void> {
+    const target = this.#snapshotPath(jobId);
+    await rm(target, { force: true });
+    try {
+      await rmdir(path.dirname(target));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw error;
+    }
+  }
+
+  /** Reconstructs only the immutable admitted input; it never re-inspects mutable source state. */
+  async restoreAdmissionSnapshot(
+    jobId: string,
+    workspace: string,
+    snapshot: JobWorkspaceSnapshot
+  ): Promise<WorkspaceInspection> {
+    if (
+      snapshot.format !== 'git-binary-patch' ||
+      !Number.isSafeInteger(snapshot.size) ||
+      snapshot.size < 0 ||
+      snapshot.size > MAX_ARTIFACT_BYTES ||
+      !/^[a-f0-9]{64}$/.test(snapshot.sha256) ||
+      !/^[a-f0-9]{40,64}$/.test(snapshot.baseCommit) ||
+      !/^[a-f0-9]{40,64}$/.test(snapshot.baseTree)
+    ) {
+      throw new Error(`Job ${jobId} has invalid admitted workspace snapshot evidence`);
+    }
+    const expectedWorkspace = path.resolve(workspace);
+    if (path.resolve(snapshot.sourceWorkspace) !== expectedWorkspace) {
+      throw new Error(`Job ${jobId} admitted workspace does not match its request`);
+    }
+    const repository = await this.#repository(expectedWorkspace);
+    if (path.resolve(snapshot.repository) !== repository) {
+      throw new Error(`Job ${jobId} admitted repository is no longer available at its original path`);
+    }
+    if (path.resolve(repository, snapshot.relativeSubdirectory) !== expectedWorkspace) {
+      throw new Error(`Job ${jobId} admitted repository subdirectory evidence is inconsistent`);
+    }
+    const resolvedCommit = outputText(
+      (await git(['rev-parse', `${snapshot.baseCommit}^{commit}`], repository)).stdout
+    ).trim();
+    let bytes = Buffer.alloc(0);
+    if (snapshot.size > 0) {
+      const snapshotPath = this.#snapshotPath(jobId);
+      const snapshotStat = await lstat(snapshotPath);
+      if (!snapshotStat.isFile() || (snapshotStat.mode & 0o077) !== 0) {
+        throw new Error(`Job ${jobId} admitted workspace snapshot is not a private regular file`);
+      }
+      bytes = await readFile(snapshotPath);
+    }
+    if (
+      bytes.byteLength !== snapshot.size ||
+      createHash('sha256').update(bytes).digest('hex') !== snapshot.sha256
+    ) {
+      throw new Error(`Job ${jobId} admitted workspace snapshot failed integrity verification`);
+    }
+    const reconstructedTree = await this.#withTemporaryGitState(
+      repository,
+      async (environment) => {
+        await git(['read-tree', snapshot.baseCommit], repository, false, environment);
+        if (bytes.byteLength > 0) {
+          await gitWithInput(['apply', '--cached', '--binary', '-'], repository, bytes, environment);
+        }
+        return outputText((await git(['write-tree'], repository, false, environment)).stdout).trim();
+      }
+    );
+    if (resolvedCommit !== snapshot.baseCommit || reconstructedTree !== snapshot.baseTree) {
+      throw new Error(`Job ${jobId} admitted Git input no longer matches its tree identity`);
+    }
+    return {
+      sourceWorkspace: snapshot.sourceWorkspace,
+      repository,
+      relativeSubdirectory: snapshot.relativeSubdirectory,
+      baseCommit: snapshot.baseCommit,
+      baseTree: snapshot.baseTree,
+      snapshotPatch: bytes,
     };
   }
 
@@ -544,6 +660,13 @@ export class WorkspaceIsolationManager {
         snapshotPatch,
       };
     });
+  }
+
+  #snapshotPath(jobId: string): string {
+    if (!/^job_[A-Za-z0-9_-]+$/.test(jobId)) {
+      throw new Error('Invalid Job identity for an admitted workspace snapshot');
+    }
+    return path.resolve(this.#artifactDirectory, jobId, 'admitted-workspace.patch');
   }
 
   async create(

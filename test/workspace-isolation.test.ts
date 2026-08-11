@@ -498,6 +498,51 @@ test('git-worktree mode snapshots dirty source state without changing the source
   assert.deepEqual(drifted?.artifacts[0]?.issues, ['base-tree-mismatch']);
 });
 
+test('admitted workspace snapshots restore exact dirty input and reject changed bytes', async () => {
+  const paths = await repository();
+  await writeFile(path.join(paths.root, 'README.md'), 'admitted dirty content\n');
+  await writeFile(path.join(paths.root, 'admitted-untracked.txt'), 'admitted untracked\n');
+  const manager = new WorkspaceIsolationManager(
+    config(paths.storage, paths.worktreeDirectory),
+    paths.root
+  );
+  const jobId = 'job_snapshot_restore';
+  const inspection = await manager.inspect(paths.root);
+  const snapshot = await manager.persistAdmissionSnapshot(inspection, jobId);
+  assert.ok(snapshot.size > 0);
+  assert.match(snapshot.sha256, /^[a-f0-9]{64}$/);
+
+  await writeFile(path.join(paths.root, 'README.md'), 'later source state\n');
+  await rm(path.join(paths.root, 'admitted-untracked.txt'));
+  const restored = await manager.restoreAdmissionSnapshot(jobId, paths.root, snapshot);
+  const isolated = await manager.create(restored, jobId, 1);
+  try {
+    assert.equal(
+      await readFile(path.join(isolated.path, 'README.md'), 'utf8'),
+      'admitted dirty content\n'
+    );
+    assert.equal(
+      await readFile(path.join(isolated.path, 'admitted-untracked.txt'), 'utf8'),
+      'admitted untracked\n'
+    );
+  } finally {
+    await manager.cleanup(isolated);
+  }
+
+  const snapshotPath = path.join(
+    paths.storage,
+    'artifacts',
+    jobId,
+    'admitted-workspace.patch'
+  );
+  await writeFile(snapshotPath, 'changed snapshot bytes');
+  await assert.rejects(
+    manager.restoreAdmissionSnapshot(jobId, paths.root, snapshot),
+    /failed integrity verification/
+  );
+  await manager.discardAdmissionSnapshot(jobId);
+});
+
 test('workspace inspection does not refresh the caller index', async () => {
   const paths = await repository();
   const indexPath = path.resolve(paths.root, (await git(paths.root, 'rev-parse', '--git-path', 'index')).trim());

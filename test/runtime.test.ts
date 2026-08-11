@@ -6,7 +6,10 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
 
-import { createRuntime } from '../src/runtime.js';
+import type { OrchestrationService } from '../src/orchestration.js';
+import type { Orchestrator } from '../src/orchestrator.js';
+import { AgentKnotRuntime, createRuntime } from '../src/runtime.js';
+import type { RuntimeOwnership } from '../src/runtime-ownership.js';
 import { FileOrchestrationStore } from '../src/orchestration-store.js';
 import type { OrchestrationRecord, OrchestrationStatus } from '../src/orchestration-types.js';
 import type { TaskAssessment } from '../src/orchestration-types.js';
@@ -102,7 +105,46 @@ function staleOrchestration(
   };
 }
 
-test('exclusive createRuntime fails every prior nonterminal record once without replay', async () => {
+test('runtime close and shutdown track recovery before active Job registration', async () => {
+  let recoverySignal: AbortSignal | undefined;
+  let entered!: () => void;
+  const recoveryEntered = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const jobs = {
+    async recoverInterruptedJobs(options: { signal?: AbortSignal }) {
+      recoverySignal = options.signal;
+      entered();
+      await new Promise<void>((_resolve, reject) => {
+        const onAbort = () => reject(options.signal?.reason ?? new Error('aborted'));
+        options.signal?.addEventListener('abort', onAbort, { once: true });
+      });
+      return [];
+    },
+    hasActiveJobs: () => false,
+    shutdown: async () => undefined,
+  } as unknown as Orchestrator;
+  const orchestrations = { shutdown: async () => undefined } as unknown as OrchestrationService;
+  let ownershipClosed = false;
+  const ownership = {
+    assertHeld: () => undefined,
+    close: async () => {
+      ownershipClosed = true;
+    },
+  } as unknown as RuntimeOwnership;
+  const runtime = new AgentKnotRuntime(jobs, orchestrations, { ownership });
+
+  const recovery = runtime.recoverInterruptedJobs();
+  await recoveryEntered;
+  await assert.rejects(runtime.close(), /Cannot release runtime storage ownership while work is active/);
+  await runtime.shutdown();
+  await assert.rejects(recovery, /Runtime shutdown interrupted Job recovery/);
+  assert.equal(recoverySignal?.aborted, true);
+  await runtime.close();
+  assert.equal(ownershipClosed, true);
+});
+
+test('exclusive createRuntime refuses mutable legacy replay and keeps parent reconciliation explicit', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-runtime-'));
   const storageDirectory = path.join(directory, 'jobs');
   const orchestrationStorageDirectory = path.join(directory, 'orchestrations');
@@ -251,15 +293,20 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
     },
   });
 
-  for (const [id, previousStatus, expectedSequence] of [
-    ['job_stale_queued', 'queued', 2],
-    ['job_stale_running', 'running', 3],
-    ['job_active_running', 'running', 3],
-    ['job_stale_child', 'running', 3],
+  const recoveredQueued = await runtime.waitForJob('job_stale_queued', 500);
+  assert.equal(recoveredQueued?.status, 'failed');
+  assert.equal(recoveredQueued?.attempt, 0);
+  assert.equal(recoveredQueued?.error?.name, 'RecoverySnapshotUnavailableError');
+  assert.equal(recoveredQueued?.events.at(-1)?.data?.reason, 'workspace-snapshot-unavailable');
+
+  for (const id of [
+    'job_stale_running',
+    'job_active_running',
+    'job_stale_child',
   ] as const) {
     const job = await runtime.get(id);
     assert.equal(job?.status, 'failed');
-    assert.equal(job?.error?.name, 'ExecutionInterruptedError');
+    assert.equal(job?.error?.name, 'ExecutionLeaseLostError');
     assert.equal(job?.error?.retryable, false);
     assert.equal(job?.completedAt, job?.updatedAt);
     assert.equal(job?.completionSummary?.outcome, 'failed');
@@ -267,24 +314,23 @@ test('exclusive createRuntime fails every prior nonterminal record once without 
       status: 'unavailable',
       reason: 'not-retained',
     });
-    assert.equal(job?.events.at(-1)?.sequence, expectedSequence);
+    assert.equal(job?.events.at(-2)?.type, 'job.attempt.lost');
+    assert.equal(job?.events.at(-2)?.data?.reason, 'lease-expired');
+    assert.equal(job?.events.at(-2)?.data?.retryable, false);
+    assert.equal(job?.events.at(-1)?.sequence, 4);
     assert.equal(job?.events.at(-1)?.type, 'job.failed');
-    assert.deepEqual(job?.events.at(-1)?.data, {
-      name: 'ExecutionInterruptedError',
-      message: 'A new AgentKnot runtime found this job without a terminal state; the previous execution cannot be resumed',
-      attempt: previousStatus === 'running' ? 1 : 0,
-      reason: 'runtime_restart',
-      previousStatus,
-    });
+    assert.equal(job?.events.at(-1)?.data?.reason, 'recovery-attempts-exhausted');
+    assert.equal(job?.events.at(-1)?.data?.attempt, 1);
   }
-  assert.deepEqual(observed, []);
+  assert.equal(observed.includes('job.recovery.started'), false);
+  assert.ok(observed.includes('job.attempt.lost'));
   const staleParent = await runtime.getOrchestration('orchestration_stale');
   assert.equal(staleParent?.status, 'failed');
   assert.equal(staleParent?.error?.name, 'ExecutionInterruptedError');
   assert.equal(staleParent?.events.at(-1)?.type, 'orchestration.failed');
   assert.equal(staleParent?.events.at(-1)?.data?.reason, 'runtime_restart');
   assert.equal(staleParent?.children[0]?.status, 'failed');
-  assert.equal(staleParent?.children[0]?.error?.name, 'ExecutionInterruptedError');
+  assert.equal(staleParent?.children[0]?.error?.name, 'ExecutionLeaseLostError');
   assert.deepEqual(staleParent?.qualityReview, {
     status: 'unavailable',
     route: 'mock',

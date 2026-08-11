@@ -152,6 +152,8 @@ export interface JobError {
 export type JobEventType =
   | 'job.queued'
   | 'job.started'
+  | 'job.attempt.lost'
+  | 'job.recovery.started'
   | 'job.retrying'
   | 'job.succeeded'
   | 'job.failed'
@@ -257,6 +259,18 @@ export interface JobExecution {
   startedAt: string;
 }
 
+/** Immutable admitted source state used to reconstruct an isolated attempt after restart. */
+export interface JobWorkspaceSnapshot {
+  format: 'git-binary-patch';
+  sourceWorkspace: string;
+  repository: string;
+  relativeSubdirectory: string;
+  baseCommit: string;
+  baseTree: string;
+  size: number;
+  sha256: string;
+}
+
 export interface JobRecord {
   id: string;
   schemaVersion: 1;
@@ -272,6 +286,8 @@ export interface JobRecord {
   attempt: number;
   events: JobEvent[];
   execution?: JobExecution;
+  /** Present for git-worktree Jobs admitted after durable restart recovery was introduced. */
+  workspaceSnapshot?: JobWorkspaceSnapshot;
   artifacts?: JobArtifact[];
   result?: JobResult;
   error?: JobError;

@@ -337,10 +337,11 @@ Make the controller-neutral execution handoff durable across controller sessions
 - [x] Make production Job and Orchestration persistence transactional: bounded projections, append-only sequenced events, CAS revisions, scoped canonical-request idempotency, atomically admitted first leases, renewable fenced execution leases, and durable cancellation intent.
 - [x] Make same-ID wait, status, and cancellation derive authority from durable stores. HTTP no longer owns separate active-execution maps, and independent store/runtime instances prove duplicate identity, stale-write/fence rejection, event-cursor resume, and cross-session cancellation.
 - [x] Fence cancellation against a simultaneous success transition, retain monotonically increasing fence generations after release, validate legacy filename/record identity, and keep record plus idempotency plus first lease in one admission transaction.
+- [x] Persist an integrity-checked admitted git-worktree input outside the bounded projection, then recover leaf Jobs only after a higher lease fence is claimed: cancellation wins, `queued` replays the admitted input, and `running` records a lost attempt before using only the next configured retry.
 
 ### Next slices
 
-1. Reclaim queued work and expire/recover running work from durable boundaries; replace unconditional `runtime_restart` failure with explicit lost/recovery attempts and prevent late completion from a fenced owner.
+1. Recover queued/dispatching parent Orchestrations after leaf recovery, including known and orphan child/reviewer identities and conservative interrupted validation evidence; do not duplicate child admission or pretend to reattach to a command.
 2. Move child/reviewer capacity and admission accounting from process-local semaphores/counters to durable state before allowing multiple execution hosts.
 3. Converge CLI, HTTP, TypeScript, MCP, callbacks, streams, and controller notifications on persisted event cursors and the same kernel operations; transports remain replaceable notification adapters.
 4. Prove non-invasive multi-session/restart parity, then remove lifetime directory ownership, required native-service setup, and superseded discovery/hook/service paths instead of retaining parallel implementations.

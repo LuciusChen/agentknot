@@ -47,6 +47,8 @@ Durability does not make AgentKnot a controller or an agent-chat product. It mak
 
 The first foundation review exposed five correctness gaps before commit: cancellation could race into success, released leases reused fence `1`, record admission and first lease were separate transactions, legacy filenames could disagree with payload identity, and in-process wait races left timeout timers alive. The corrected foundation now atomically admits record/idempotency/first lease, rejects success after accepted cancellation, retains an inactive lease row so later claims increment the fence, validates migration identity, and uses durable polling without detached wait timers. Job and Orchestration lease/cancellation mechanics share one lifecycle owner rather than duplicated loops.
 
+The first recovery slice covers isolated leaf Jobs only. Git-worktree admission now materializes an exact-ID, integrity-checked input patch before the record may reference it, avoiding both mutable-workspace replay and large inline record growth. Recovery waits for the prior lease to expire, claims a higher fence, resolves cancellation first, replays `queued` work from that admitted input, and records `job.attempt.lost` before durably reserving only the next configured retry. Normal and recovered attempts persist that reservation before invoking the adapter, so a crash consumes an uncertain attempt rather than repeating it. Compatibility-mode Jobs without immutable input fail recovery. The path never changes the persisted route or claims process reattachment. Parent/child/reviewer/validation recovery remains open, so scheduler lifetime ownership is still transitional.
+
 ## Rejected alternatives
 
 ### Keep one supervised server forever
@@ -70,7 +72,8 @@ Rejected as the end state. Snapshot plus append-only event projections may coexi
 - [x] Record the controller/kernel/adapter responsibility boundary and supersede the affected single-owner conclusions in 0022, 0038, 0040, and 0054.
 - [x] Define versioned handoff, event cursor, lease, fencing, idempotency, and recovery contracts in the SPEC.
 - [x] Add one transactional local durable store with append-only events and atomic state transitions.
-- [ ] Reclaim queued work and expire/recover running work without false success or false healthy-runtime failure.
+- [x] Reclaim queued leaf Jobs and expire/recover running leaf attempts without false success, stale-fence publication, route changes, or mutable-workspace replay.
+- [ ] Recover parent/child/reviewer/validation boundaries without duplicate admission or false cleanup claims.
 - [x] Make wait/cancel/status derive authority from durable state and events rather than HTTP process maps.
 - [ ] Converge CLI, HTTP, TypeScript, MCP, and controller adapters on the same kernel contract.
 - [ ] Prove two independent controller sessions, process restart, duplicate admission, stale lease, late completion, cancellation, and cursor resume deterministically.

@@ -1,14 +1,23 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import { createAdapters } from '../src/adapters/index.js';
 import type { AgentKnotConfig } from '../src/config.js';
 import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { FileJobStore, MemoryJobStore, SqliteJobStore } from '../src/store.js';
+import { WorkspaceIsolationManager } from '../src/workspace-isolation.js';
 import type { JobStore, WorkerAdapter, WorkerEventSink } from '../src/types.js';
+
+const execFileAsync = promisify(execFile);
+
+async function git(directory: string, ...args: string[]): Promise<void> {
+  await execFileAsync('git', args, { cwd: directory });
+}
 
 const config: AgentKnotConfig = {
   version: 1,
@@ -157,6 +166,7 @@ test('event persistence failure is not retried or rewritten as worker failure', 
   assert.equal(runs, 1);
   assert.equal(callbacks, 0);
   assert.equal(persisted?.status, 'running');
+  assert.equal(persisted?.attempt, 1, 'attempt is durably reserved before the adapter event');
   assert.deepEqual(persisted?.events.map((event) => event.type), ['job.queued', 'job.started']);
 });
 
@@ -527,5 +537,154 @@ test('durable cancellation accepted while a worker settles wins the terminal suc
       rm(workspace, { recursive: true, force: true }),
       rm(directory, { recursive: true, force: true }),
     ]);
+  }
+});
+
+test('durable recovery waits for lease expiry, retries only the next attempt, and honors cancellation', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-durable-recovery-store-'));
+  const workspace = path.join(directory, 'workspace');
+  await mkdir(workspace);
+  await git(workspace, 'init', '-q');
+  await git(workspace, 'config', 'user.email', 'agentknot-test@example.invalid');
+  await git(workspace, 'config', 'user.name', 'AgentKnot test');
+  await writeFile(path.join(workspace, 'README.md'), 'base\n');
+  await git(workspace, 'add', '--', 'README.md');
+  await git(workspace, 'commit', '-qm', 'base');
+  await writeFile(path.join(workspace, 'README.md'), 'admitted dirty input\n');
+  const firstStore = await SqliteJobStore.open(directory);
+  const secondStore = await SqliteJobStore.open(directory, { importLegacy: false });
+  const retryConfig = structuredClone(config);
+  retryConfig.storage.directory = 'managed';
+  retryConfig.workspaceIsolation = { mode: 'git-worktree', directory: 'worktrees' };
+  retryConfig.routes.mock!.maxAttempts = 2;
+  const start = new Date('2026-08-11T00:00:00.000Z');
+  let clock = new Date(start);
+  const attempts: string[] = [];
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'recovery adapter ready' };
+    },
+    async run(input) {
+      assert.equal((await secondStore.get(input.jobId))?.attempt, input.attempt);
+      attempts.push(`${input.jobId}:${input.attempt}`);
+      return { output: `recovered attempt ${input.attempt}` };
+    },
+  };
+  const recovery = new Orchestrator({
+    config: retryConfig,
+    store: secondStore,
+    adapters: new Map([['mock', adapter]]),
+    baseDirectory: directory,
+    now: () => new Date(clock),
+    leaseTtlMs: 300,
+    leaseHeartbeatMs: 100,
+  });
+
+  const running: Parameters<SqliteJobStore['admit']>[0] = {
+    id: 'job_recover_running',
+    schemaVersion: 1,
+    status: 'running',
+    request: { prompt: 'recover the second attempt', workspace },
+    route: {
+      name: 'mock',
+      worker: 'mock',
+      provider: 'mock-provider',
+      model: 'mock-model',
+      requiredEnv: [],
+      maxAttempts: 2,
+      timeoutMs: 30_000,
+    },
+    createdAt: start.toISOString(),
+    updatedAt: start.toISOString(),
+    startedAt: start.toISOString(),
+    attempt: 1,
+    execution: { runtimeId: 'runtime-old', pid: 1, startedAt: start.toISOString() },
+    events: [
+      { sequence: 1, jobId: 'job_recover_running', at: start.toISOString(), type: 'job.queued' },
+      { sequence: 2, jobId: 'job_recover_running', at: start.toISOString(), type: 'job.started' },
+    ],
+  };
+  const manager = new WorkspaceIsolationManager(retryConfig, directory);
+  const inspection = await manager.inspect(workspace);
+  running.workspaceSnapshot = await manager.persistAdmissionSnapshot(inspection, running.id);
+  const queued: Parameters<SqliteJobStore['admit']>[0] = {
+    ...structuredClone(running),
+    id: 'job_recover_cancelled',
+    status: 'queued',
+    attempt: 0,
+    events: [
+      { sequence: 1, jobId: 'job_recover_cancelled', at: start.toISOString(), type: 'job.queued' },
+    ],
+  };
+  delete queued.startedAt;
+  queued.workspaceSnapshot = await manager.persistAdmissionSnapshot(inspection, queued.id);
+  const recoverableQueued: Parameters<SqliteJobStore['admit']>[0] = {
+    ...structuredClone(queued),
+    id: 'job_recover_queued',
+    events: [
+      { sequence: 1, jobId: 'job_recover_queued', at: start.toISOString(), type: 'job.queued' },
+    ],
+  };
+  recoverableQueued.workspaceSnapshot = await manager.persistAdmissionSnapshot(
+    inspection,
+    recoverableQueued.id
+  );
+
+  try {
+    await firstStore.admit(running, { ownerId: 'runtime-old', ttlMs: 100, now: start });
+    await firstStore.admit(queued, { ownerId: 'runtime-old', ttlMs: 100, now: start });
+    await firstStore.admit(recoverableQueued, {
+      ownerId: 'runtime-old',
+      ttlMs: 100,
+      now: start,
+    });
+    await firstStore.requestCancellation(
+      queued.id,
+      'controller-during-outage',
+      new Date(start.getTime() + 50)
+    );
+
+    assert.deepEqual(
+      await recovery.recoverInterruptedJobs(),
+      [],
+      'a live prior fence is never stolen'
+    );
+    clock = new Date(start.getTime() + 100);
+    const admitted = await recovery.recoverInterruptedJobs();
+    assert.deepEqual(
+      admitted.map((job) => job.id).sort(),
+      ['job_recover_cancelled', 'job_recover_queued', 'job_recover_running']
+    );
+
+    const terminal = await recovery.wait(running.id, 500);
+    const cancelled = await recovery.wait(queued.id, 500);
+    const queuedTerminal = await recovery.wait(recoverableQueued.id, 500);
+    assert.equal(terminal?.status, 'succeeded');
+    assert.equal(terminal?.attempt, 2);
+    assert.deepEqual(attempts.sort(), ['job_recover_queued:1', 'job_recover_running:2']);
+    assert.deepEqual(
+      terminal?.events.map((event) => event.type),
+      [
+        'job.queued',
+        'job.started',
+        'job.attempt.lost',
+        'job.recovery.started',
+        'job.artifact',
+        'job.succeeded',
+      ]
+    );
+    assert.equal(terminal?.events[2]?.data?.recoveryFence, 2);
+    assert.equal(queuedTerminal?.status, 'succeeded');
+    assert.deepEqual(
+      queuedTerminal?.events.map((event) => event.type),
+      ['job.queued', 'job.recovery.started', 'job.started', 'job.artifact', 'job.succeeded']
+    );
+    assert.equal(cancelled?.status, 'cancelled');
+    assert.equal(cancelled?.events.at(-1)?.data?.source, 'controller-during-outage');
+  } finally {
+    await recovery.shutdown();
+    await Promise.all([firstStore.close(), secondStore.close()]);
+    await rm(directory, { recursive: true, force: true });
   }
 });

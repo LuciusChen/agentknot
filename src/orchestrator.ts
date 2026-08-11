@@ -5,7 +5,6 @@ import path from 'node:path';
 import type { AgentKnotConfig, ArtifactValidationConfig } from './config.js';
 import { canonicalJsonSha256 } from './canonical-json.js';
 import { resolveRoute } from './config.js';
-import { isExecutorProcessAlive } from './execution.js';
 import type { ArtifactValidationExecution } from './artifact-validation.js';
 import {
   CancellationRequestedError,
@@ -104,6 +103,21 @@ function isTerminalStatus(status: string): boolean {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function delayWithSignal(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError(signal));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError(signal as AbortSignal));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export interface OrchestratorOptions {
@@ -425,6 +439,10 @@ export class Orchestrator {
     await Promise.allSettled(active.map(([, item]) => item.completion));
   }
 
+  hasActiveJobs(): boolean {
+    return this.#activeJobs.size > 0;
+  }
+
   async #waitUntilTerminal(id: string): Promise<JobRecord> {
     while (true) {
       const record = await this.#store.get(id);
@@ -507,42 +525,188 @@ export class Orchestrator {
     );
   }
 
-  async reconcileInterruptedJobs(options: { exclusiveOwner?: boolean } = {}): Promise<JobRecord[]> {
-    const reconciled: JobRecord[] = [];
-    for (const job of await this.#store.list()) {
-      if (job.status !== 'queued' && job.status !== 'running') continue;
-      if (!options.exclusiveOwner && isExecutorProcessAlive(job.execution)) continue;
-
-      const previousStatus = job.status;
-      const message =
-        'A new AgentKnot runtime found this job without a terminal state; the previous execution cannot be resumed';
-      const completedAt = this.#now().toISOString();
-      job.status = 'failed';
-      job.completedAt = completedAt;
-      job.error = {
-        name: 'ExecutionInterruptedError',
-        message,
-        attempt: job.attempt,
-        retryable: false,
-      };
-      delete job.result;
-      delete job.callback;
-      job.completionSummary = this.#completionSummary(job, 'failed', false, undefined);
-      await this.#appendEvent(
-        job,
-        'job.failed',
-        {
-          name: 'ExecutionInterruptedError',
-          message,
-          attempt: job.attempt,
-          reason: 'runtime_restart',
-          previousStatus,
-        },
-        completedAt
-      );
-      reconciled.push(structuredClone(job));
+  async recoverInterruptedJobs(
+    options: { waitForLease?: boolean; signal?: AbortSignal } = {}
+  ): Promise<JobRecord[]> {
+    if (!this.#durability.enabled) {
+      throw new Error('Job recovery requires a durable execution store');
     }
-    return reconciled;
+    const recovered: JobRecord[] = [];
+    for (const listedJob of await this.#store.list()) {
+      let job = listedJob;
+      if (job.status !== 'queued' && job.status !== 'running') continue;
+      if (this.#activeJobs.has(job.id)) continue;
+
+      const lease = await this.#claimRecoveryLease(job.id, options);
+      if (lease === undefined) continue;
+      let activated = false;
+      try {
+        const current = await this.#store.get(job.id);
+        if (current === undefined) {
+          throw new Error(`Job ${job.id} disappeared after its recovery lease was claimed`);
+        }
+        if (isTerminalStatus(current.status)) continue;
+        if (current.status !== 'queued' && current.status !== 'running') {
+          throw new Error(`Job ${current.id} has unsupported recovery status ${current.status}`);
+        }
+        job = current;
+        const cancellation = await this.#durability.getCancellation(job.id);
+        if (cancellation !== undefined) {
+          await this.#settleRecoveredJob(job, 'cancelled', {
+            name: 'CancellationRequestedError',
+            message: `Job cancellation was requested by ${cancellation.source}`,
+            reason: 'cancellation-requested-before-recovery',
+            source: cancellation.source,
+            requestedAt: cancellation.requestedAt,
+          });
+          recovered.push(structuredClone(job));
+          continue;
+        }
+
+        const previousStatus = job.status;
+        const previousExecution = job.execution;
+        job.execution = structuredClone(this.#execution);
+        let startAttempt = 1;
+        if (previousStatus === 'running') {
+          const retryable = job.attempt < job.route.maxAttempts;
+          const message = `Worker attempt ${job.attempt} lost its execution owner before a terminal result was persisted`;
+          job.error = {
+            name: 'ExecutionLeaseLostError',
+            message,
+            attempt: job.attempt,
+            retryable,
+          };
+          await this.#emit(job, 'job.attempt.lost', {
+            attempt: job.attempt,
+            reason: 'lease-expired',
+            previousRuntimeId: previousExecution?.runtimeId ?? 'unknown',
+            recoveryFence: lease.fence,
+            retryable,
+          });
+          if (!retryable) {
+            await this.#settleRecoveredJob(job, 'failed', {
+              name: 'ExecutionLeaseLostError',
+              message,
+              reason: 'recovery-attempts-exhausted',
+            });
+            recovered.push(structuredClone(job));
+            continue;
+          }
+          startAttempt = job.attempt + 1;
+        } else if (job.attempt !== 0) {
+          await this.#settleRecoveredJob(job, 'failed', {
+            name: 'RecoveryStateError',
+            message: `Queued Job ${job.id} has invalid attempt ${job.attempt}`,
+            reason: 'invalid-queued-attempt',
+          });
+          recovered.push(structuredClone(job));
+          continue;
+        }
+
+        const adapter = this.#adapters.get(job.route.worker);
+        if (adapter === undefined) {
+          await this.#settleRecoveredJob(job, 'failed', {
+            name: 'RecoveryAdapterUnavailableError',
+            message: `Persisted worker adapter "${job.route.worker}" is unavailable during recovery`,
+            reason: 'worker-adapter-unavailable',
+          });
+          recovered.push(structuredClone(job));
+          continue;
+        }
+
+        if (this.#workspaceIsolation.mode !== 'git-worktree' || job.workspaceSnapshot === undefined) {
+          await this.#settleRecoveredJob(job, 'failed', {
+            name: 'RecoverySnapshotUnavailableError',
+            message: 'The Job has no immutable admitted workspace snapshot for recovery',
+            reason: 'workspace-snapshot-unavailable',
+          });
+          recovered.push(structuredClone(job));
+          continue;
+        }
+        let inspection: WorkspaceInspection;
+        try {
+          inspection = await this.#workspaceIsolation.restoreAdmissionSnapshot(
+            job.id,
+            job.request.workspace,
+            job.workspaceSnapshot
+          );
+        } catch (error) {
+          const details = limitErrorDetails(error);
+          await this.#settleRecoveredJob(job, 'failed', {
+            name: 'RecoverySnapshotUnavailableError',
+            message: details.message,
+            reason: 'workspace-snapshot-invalid',
+          });
+          recovered.push(structuredClone(job));
+          continue;
+        }
+
+        job.attempt = startAttempt;
+        await this.#emit(job, 'job.recovery.started', {
+          previousStatus,
+          previousRuntimeId: previousExecution?.runtimeId ?? 'unknown',
+          recoveryFence: lease.fence,
+          nextAttempt: startAttempt,
+        });
+        const reservation = this.#reservePersistedRoute(job);
+        const controller = new AbortController();
+        const started = this.#activate(
+          job,
+          adapter,
+          controller,
+          inspection,
+          reservation,
+          startAttempt
+        );
+        activated = true;
+        recovered.push(started.job);
+      } finally {
+        if (!activated) await this.#durability.release(job.id);
+      }
+    }
+    return recovered;
+  }
+
+  async #claimRecoveryLease(
+    recordId: string,
+    options: { waitForLease?: boolean; signal?: AbortSignal }
+  ): Promise<Awaited<ReturnType<DurableExecutionCoordinator<JobRecord>['claim']>>> {
+    while (true) {
+      if (options.signal?.aborted) throw abortError(options.signal);
+      const claimed = await this.#durability.claim(recordId, this.#execution.runtimeId);
+      if (claimed !== undefined || options.waitForLease !== true) return claimed;
+      const current = await this.#durability.getLease(recordId);
+      const expiresAt = current === undefined ? NaN : Date.parse(current.expiresAt);
+      const waitMs = Number.isFinite(expiresAt)
+        ? Math.max(1, expiresAt - this.#now().getTime())
+        : 1;
+      await delayWithSignal(waitMs, options.signal);
+    }
+  }
+
+  async #settleRecoveredJob(
+    job: JobRecord,
+    outcome: 'failed' | 'cancelled',
+    details: { name: string; message: string; reason: string; [key: string]: unknown }
+  ): Promise<void> {
+    job.status = outcome;
+    job.completedAt = this.#now().toISOString();
+    delete job.result;
+    delete job.callback;
+    job.error = {
+      name: details.name,
+      message: details.message,
+      attempt: job.attempt,
+      retryable: false,
+    };
+    job.completionSummary = this.#completionSummary(job, outcome, false, undefined);
+    await this.#emit(
+      job,
+      outcome === 'cancelled' ? 'job.cancelled' : 'job.failed',
+      { ...details, attempt: job.attempt },
+      job.completedAt
+    );
+    await this.#deliverCallback(job);
   }
 
   async run(request: JobRequest): Promise<JobRecord> {
@@ -586,7 +750,16 @@ export class Orchestrator {
       };
     }
 
-    const route = resolveRoute(this.#config, routeName);
+    return this.#trackRoute(
+      resolveRoute(this.#config, routeName),
+      selection
+    );
+  }
+
+  #trackRoute(
+    route: RouteReservation['route'],
+    selection?: JobRoutePoolSelection
+  ): RouteReservation {
     this.#routeActivity.set(route.name, (this.#routeActivity.get(route.name) ?? 0) + 1);
     let released = false;
     return {
@@ -600,6 +773,10 @@ export class Orchestrator {
         else this.#routeActivity.set(route.name, active - 1);
       },
     };
+  }
+
+  #reservePersistedRoute(job: JobRecord): RouteReservation {
+    return this.#trackRoute(structuredClone(job.route));
   }
 
   async start(request: JobRequest): Promise<StartJobResult> {
@@ -621,6 +798,17 @@ export class Orchestrator {
 
     const now = this.#now().toISOString();
     const id = `job_${randomUUID()}`;
+    let snapshotPersisted = false;
+    let workspaceSnapshot: JobRecord['workspaceSnapshot'];
+    try {
+      if (inspection !== undefined) {
+        workspaceSnapshot = await this.#workspaceIsolation.persistAdmissionSnapshot(inspection, id);
+        snapshotPersisted = workspaceSnapshot.size > 0;
+      }
+    } catch (error) {
+      reservation.release();
+      throw new JobPersistenceError('admission', undefined, error);
+    }
     const job: JobRecord = {
       id,
       schemaVersion: 1,
@@ -643,6 +831,7 @@ export class Orchestrator {
         },
       ],
       execution: structuredClone(this.#execution),
+      ...(workspaceSnapshot === undefined ? {} : { workspaceSnapshot }),
     };
     const controller = new AbortController();
     let admitted = true;
@@ -680,10 +869,16 @@ export class Orchestrator {
         await this.#store.create(job);
       }
     } catch (error) {
+      if (snapshotPersisted) {
+        await this.#workspaceIsolation.discardAdmissionSnapshot(id).catch(() => undefined);
+      }
       reservation.release();
       throw new JobPersistenceError('admission', undefined, error);
     }
     if (!admitted) {
+      if (snapshotPersisted) {
+        await this.#workspaceIsolation.discardAdmissionSnapshot(id);
+      }
       reservation.release();
       const active = this.#activeJobs.get(admittedRecord.id);
       if (active !== undefined) {
@@ -713,9 +908,25 @@ export class Orchestrator {
       throw error;
     }
 
-    const stopLeaseMonitor = this.#startLeaseMonitor(job, controller);
+    return this.#activate(job, adapter, controller, inspection, reservation, 1);
+  }
 
-    const execution = this.#execute(job, adapter, controller.signal, inspection).catch(
+  #activate(
+    job: JobRecord,
+    adapter: WorkerAdapter,
+    controller: AbortController,
+    inspection: WorkspaceInspection | undefined,
+    reservation: RouteReservation,
+    startAttempt: number
+  ): StartJobResult {
+    const stopLeaseMonitor = this.#startLeaseMonitor(job, controller);
+    const execution = this.#execute(
+      job,
+      adapter,
+      controller.signal,
+      inspection,
+      startAttempt
+    ).catch(
       async (error: unknown) => {
         const cancellation =
           error instanceof JobPersistenceError &&
@@ -769,12 +980,12 @@ export class Orchestrator {
 
     const localCancel = () => controller.abort(new Error('Job cancelled by controller'));
     const cancel = async () => {
-      await this.cancel(id, 'start-handle');
+      await this.cancel(job.id, 'start-handle');
     };
-    this.#activeJobs.set(id, { completion, cancel: localCancel });
+    this.#activeJobs.set(job.id, { completion, cancel: localCancel });
     void completion.then(
-      () => this.#activeJobs.delete(id),
-      () => this.#activeJobs.delete(id)
+      () => this.#activeJobs.delete(job.id),
+      () => this.#activeJobs.delete(job.id)
     );
 
     return {
@@ -788,19 +999,33 @@ export class Orchestrator {
     job: JobRecord,
     adapter: WorkerAdapter,
     jobSignal: AbortSignal,
-    inspection?: WorkspaceInspection
+    inspection: WorkspaceInspection | undefined,
+    startAttempt: number
   ): Promise<void> {
-    job.status = 'running';
-    job.startedAt = this.#now().toISOString();
-    await this.#emit(job, 'job.started', {
-      route: job.route.name,
-      worker: job.route.worker,
-      provider: job.route.provider,
-      model: job.route.model,
-    });
+    if (job.status === 'queued') {
+      const previousAttempt = job.attempt;
+      job.attempt = startAttempt;
+      job.status = 'running';
+      job.startedAt = this.#now().toISOString();
+      try {
+        await this.#emit(job, 'job.started', {
+          route: job.route.name,
+          worker: job.route.worker,
+          provider: job.route.provider,
+          model: job.route.model,
+        });
+      } catch (error) {
+        job.attempt = previousAttempt;
+        throw error;
+      }
+    }
 
-    for (let attempt = 1; attempt <= job.route.maxAttempts; attempt += 1) {
-      job.attempt = attempt;
+    for (let attempt = startAttempt; attempt <= job.route.maxAttempts; attempt += 1) {
+      if (job.attempt !== attempt) {
+        throw new Error(
+          `Job ${job.id} attempt reservation ${job.attempt} does not match execution attempt ${attempt}`
+        );
+      }
       const attemptController = new AbortController();
       const onJobAbort = () => attemptController.abort(jobSignal.reason);
       if (jobSignal.aborted) attemptController.abort(jobSignal.reason);
@@ -922,12 +1147,24 @@ export class Orchestrator {
         });
         return;
       }
-      await this.#emit(job, 'job.retrying', { ...details, attempt, nextAttempt: attempt + 1 });
+      const nextAttempt = attempt + 1;
+      job.attempt = nextAttempt;
+      try {
+        await this.#emit(job, 'job.retrying', { ...details, attempt, nextAttempt });
+      } catch (error) {
+        job.attempt = attempt;
+        throw error;
+      }
     }
   }
 
-  async #emit(job: JobRecord, type: JobEventType, data?: Record<string, unknown>): Promise<void> {
-    const event = await this.#appendEvent(job, type, data);
+  async #emit(
+    job: JobRecord,
+    type: JobEventType,
+    data?: Record<string, unknown>,
+    at?: string
+  ): Promise<void> {
+    const event = await this.#appendEvent(job, type, data, at);
     if (!event) return;
     await this.#notifyObserver(job, event);
   }

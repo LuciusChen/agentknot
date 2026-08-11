@@ -13,6 +13,11 @@ interface RecordStore<T> {
 interface DurableExecutionStore<T> extends RecordStore<T> {
   admit(record: T, options: DurableAdmissionOptions): Promise<DurableAdmissionResult<T>>;
   save(record: T, lease?: ExecutionLease, now?: Date): Promise<void>;
+  claimLease(
+    recordId: string,
+    options: { ownerId: string; ttlMs: number; now?: Date }
+  ): Promise<ExecutionLease | undefined>;
+  getLease(recordId: string): Promise<ExecutionLease | undefined>;
   renewLease(lease: ExecutionLease, ttlMs: number, now?: Date): Promise<boolean>;
   releaseLease(lease: ExecutionLease): Promise<boolean>;
   requestCancellation(
@@ -31,7 +36,9 @@ export interface DurableExecutionOptions {
 
 function durableStore<T>(store: RecordStore<T>): DurableExecutionStore<T> | undefined {
   return 'admit' in store &&
+    'claimLease' in store &&
     'getCancellation' in store &&
+    'getLease' in store &&
     'renewLease' in store &&
     'releaseLease' in store &&
     'requestCancellation' in store
@@ -85,6 +92,30 @@ export class DurableExecutionCoordinator<T extends DurableStoredRecord> {
     return this.#durable === undefined
       ? this.#store.save(record)
       : this.#durable.save(record, this.#leases.get(record.id), this.#now());
+  }
+
+  /** Claims one existing record only after its prior fence is absent or expired. */
+  async claim(recordId: string, ownerId: string): Promise<ExecutionLease | undefined> {
+    if (this.#durable === undefined) return undefined;
+    const lease = await this.#durable.claimLease(recordId, {
+      ownerId,
+      ttlMs: this.#leaseTtlMs,
+      now: this.#now(),
+    });
+    if (lease !== undefined) this.#leases.set(recordId, lease);
+    return lease;
+  }
+
+  getLease(recordId: string): Promise<ExecutionLease | undefined> {
+    return this.#durable === undefined
+      ? Promise.resolve(undefined)
+      : this.#durable.getLease(recordId);
+  }
+
+  getCancellation(recordId: string): Promise<CancellationRequest | undefined> {
+    return this.#durable === undefined
+      ? Promise.resolve(undefined)
+      : this.#durable.getCancellation(recordId);
   }
 
   requestCancellation(
