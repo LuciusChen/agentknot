@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, chmod, lstat, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -381,23 +381,24 @@ try {
   if (serverUrl !== undefined && process.env.AGENTKNOT_CONFIG !== undefined) {
     throw new Error('AGENTKNOT_SERVER_URL and AGENTKNOT_CONFIG cannot be used together');
   }
-  let configPath;
-  if (serverUrl === undefined) {
-    if (process.env.AGENTKNOT_CONFIG !== undefined) {
-      configPath = path.resolve(cwd, process.env.AGENTKNOT_CONFIG);
-    } else {
+  const configuredPath = process.env.AGENTKNOT_CONFIG;
+  if (configuredPath !== undefined && configuredPath.trim() === '') {
+    throw new Error('AGENTKNOT_CONFIG must not be empty');
+  }
+  let connectionArgs;
+  if (configuredPath !== undefined) {
+    connectionArgs = ['--config', path.resolve(cwd, configuredPath)];
+  } else {
+    if (serverUrl === undefined) {
       serverUrl = await discoverServerUrl(workspace);
       if (serverUrl === undefined) {
-        configPath = path.join(workspace, 'agentknot.config.json');
-        try {
-          await access(configPath);
-        } catch {
-          process.exit(0);
-        }
+        throw new Error(
+          'no shared AgentKnot endpoint is configured; run agentknot service install, set AGENTKNOT_SERVER_URL, or explicitly opt into local mode with AGENTKNOT_CONFIG'
+        );
       }
     }
+    connectionArgs = ['--server', serverUrl];
   }
-  const connectionArgs = serverUrl === undefined ? ['--config', configPath] : ['--server', serverUrl];
 
   const { stdout: policyOutput } = await run(['delegation', '--json', ...connectionArgs], workspace);
   let policy;

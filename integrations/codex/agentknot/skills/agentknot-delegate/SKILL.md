@@ -44,14 +44,45 @@ Invoke this skill explicitly as `$agentknot-delegate` with the bounded task, or 
    ```
 
    Use `recommendation: "do-not-delegate"` only with an empty `subtasks` array. Use at most 20 task kinds, 20 subtasks, and 20 acceptance criteria per child, and keep every string bounded; do not add keys, routes, providers, models, or controller transcript content. Set `parallelizable` only when the proposed child tasks are independently verifiable and have no execution-order or write-scope dependency.
-2. In one shell call, confirm that the CLI exists and immediately run orchestration with the Codex audit source:
+2. In one shell call, confirm the CLI, select one explicit execution owner, and run orchestration with the Codex audit source. The default path requires an available shared endpoint. Local configuration is allowed only when `AGENTKNOT_CONFIG` is explicitly set; never infer `agentknot.config.json` from the target repository.
 
    ```sh
    if ! command -v agentknot >/dev/null; then
      echo "AgentKnot CLI must be installed and available on PATH." >&2
      exit 127
    fi
-   agentknot orchestrate \
+   if [ "${AGENTKNOT_SERVER_URL+x}" = x ] && [ "${AGENTKNOT_CONFIG+x}" = x ]; then
+     echo "AGENTKNOT_SERVER_URL and AGENTKNOT_CONFIG cannot be used together." >&2
+     exit 2
+   fi
+   if [ "${AGENTKNOT_CONFIG+x}" = x ]; then
+     if [ -z "$AGENTKNOT_CONFIG" ]; then
+       echo "AGENTKNOT_CONFIG must not be empty." >&2
+       exit 2
+     fi
+     set -- --config "$AGENTKNOT_CONFIG"
+   else
+     CLIENT_REPORT="$(agentknot client --json)" || exit $?
+     SERVER_URL="$(printf '%s' "$CLIENT_REPORT" | node -e '
+       let input = "";
+       process.stdin.setEncoding("utf8");
+       process.stdin.on("data", (chunk) => { input += chunk; });
+       process.stdin.on("end", () => {
+         try {
+           const report = JSON.parse(input);
+           if (report?.status !== "available" || typeof report.url !== "string" || report.url === "") {
+             throw new Error(`client status is ${String(report?.status ?? "invalid")}`);
+           }
+           process.stdout.write(report.url);
+         } catch (error) {
+           process.stderr.write(`AgentKnot shared endpoint unavailable: ${error instanceof Error ? error.message : String(error)}\\n`);
+           process.exitCode = 1;
+         }
+       });
+     ')" || exit $?
+     set -- --server "$SERVER_URL" --progress
+   fi
+   agentknot orchestrate "$@" \
       --source codex \
       --workspace "$(git rev-parse --show-toplevel)" \
       --delegation force \
@@ -60,7 +91,7 @@ Invoke this skill explicitly as `$agentknot-delegate` with the bounded task, or 
       --prompt "$TASK"
    ```
 
-   When `AGENTKNOT_SERVER_URL` is set, the CLI uses that shared AgentKnot execution owner. Do not scan the checkout for AgentKnot source, configuration, or storage in that mode, and do not launch another local runtime. If the shared server is unavailable, report the failure without falling back to a local runtime or another worker, provider, or model.
+   `agentknot client --json` validates `AGENTKNOT_SERVER_URL` when it is set and otherwise uses local discovery. Only an `available` report supplies `SERVER_URL`; unconfigured, unavailable, malformed, empty, or conflicting selection is a bounded pre-admission failure. Report it and stop before orchestration. Do not scan the checkout for AgentKnot source, configuration, or storage, and do not fall back to another runtime, worker, route, provider, or model. Shared orchestration includes `--progress` so the controller sees durable phase and worker heartbeats.
 
    If the preflight fails, stop before orchestration and report the prerequisite; do not substitute another command, worker, provider, or model.
 3. Consume the compact terminal JSON handoff. Parse and report its `status`, `result.action`, `error`, `children`, `artifacts`, `result.artifactReview`, optional `qualityReview`, and optional controller-owned `artifactValidation`; a process exit code or worker prose alone is not a terminal record. The `artifacts` array already contains checksum, size, base, changed-file, validity, and issue evidence. Review and validation are advisory; a passed validation covers the exact recorded patch at its recorded base, not the later integrated workspace. Once this command returns a terminal status, do not poll processes, relist full records, or repeat artifact verification. Do not rerun a successful artifact-validation command before deciding on the patch.

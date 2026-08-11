@@ -9,7 +9,7 @@
       "name": "agentknot",
       "source": "./integrations/claude/agentknot",
       "description": "Delegate bounded coding work through AgentKnot while keeping decisions and artifact promotion upstream.",
-      "version": "0.1.1"
+      "version": "0.1.3"
     }
   ]
 }

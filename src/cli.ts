@@ -17,6 +17,7 @@ import type {
   TaskAssessment,
 } from './orchestration-types.js';
 import { limitTextSuffix } from './record-limits.js';
+import { dispatchServiceCommand, formatServiceResult } from './service-cli.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
 import type { JobEvent, JobRequest } from './types.js';
 import type { RouteSelectionModeUsage, UsageRate, UsageReport } from './usage-report.js';
@@ -89,6 +90,8 @@ Usage:
   agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME]
   agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE]
   agentknot serve [--host HOST] [--port PORT]
+  agentknot service install [--host HOST] [--port PORT] [--path PATH]
+  agentknot service start|stop|restart|status|uninstall
   agentknot doctor [--route NAME] [--live]
   agentknot routes [--json]
   agentknot jobs [--json]
@@ -745,6 +748,16 @@ async function main(argv: string[]): Promise<void> {
       }
     }
     if (orchestration.status !== 'succeeded') process.exitCode = 1;
+    return;
+  }
+
+  if (command === 'service') {
+    if (explicitServerUrl !== undefined) throw new Error('service cannot be used with --server');
+    const json = takeFlag(args, '--json');
+    const result = await dispatchServiceCommand(args, {
+      ...(configPath === undefined ? {} : { configPath }),
+    });
+    process.stdout.write(formatServiceResult(result, json));
     return;
   }
 

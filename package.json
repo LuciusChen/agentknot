@@ -27,7 +27,7 @@
     "dev": "node --enable-source-maps dist/src/cli.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

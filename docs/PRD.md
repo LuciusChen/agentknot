@@ -54,7 +54,7 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 9. Optionally ask a separately configured route to review one bounded patch before the controller makes the final acceptance decision.
 10. Optionally obtain controller-owned test evidence for one bounded patch without first applying it to the supplied source workspace.
 11. Use one local AgentKnot execution owner concurrently from multiple upstream controller sessions without sharing file-store write authority with those clients.
-12. Start one exact `127.0.0.1` AgentKnot server once, then let later CLI, Codex, and Claude sessions discover it without shell-profile edits or repeated server flags while retaining deliberate local/server overrides.
+12. Explicitly install or start one exact `127.0.0.1` AgentKnot server once, then let later CLI, Codex, and Claude sessions discover it without shell-profile edits or repeated server flags while retaining deliberate local/server overrides. Linux and macOS use thin native user-service adapters around the same foreground server; unsupported platforms fail explicitly.
 13. Wait for delegated work with visible compact phase/activity evidence, distinguish an active worker from a lost middleware connection, and never resubmit the task merely because a client reconnects.
 
 ## Product principles
@@ -103,7 +103,7 @@ Version 0.0.1 currently implements:
 
 - controller-neutral CLI, HTTP, and TypeScript entry points;
 - a compact CLI orchestration handoff projection for controller consumption that omits duplicated prompts, policy snapshots, and event history without changing the persisted full record or artifact-review authority;
-- experimental thin Codex and Claude plugin packages whose prompt hook performs only bounded workspace/policy discovery and injects a non-blocking handoff obligation; the upstream controller owns semantic classification, planning, decomposition, and acceptance criteria, then the explicit or implicit Skill submits the parent task plus strict assessment through the existing orchestration CLI. Session focus remains source-neutral and resume-safe without parsing commands, outputs, or transcripts. The hook never submits the raw prompt, waits for workers, transports artifact previews, chooses routes/models, or blocks the controller turn on discovery/policy failure ([decision 0053](../postmortems/0053-controller-owned-planning-handoff.md));
+- experimental thin Codex and Claude plugin packages whose prompt hook performs only bounded workspace/shared-endpoint/policy discovery and injects a non-blocking handoff obligation; the upstream controller owns semantic classification, planning, decomposition, and acceptance criteria, then the explicit or implicit Skill requires the available shared endpoint by default and submits the parent task plus strict assessment through the existing orchestration CLI. `AGENTKNOT_CONFIG` is the only explicit local-runtime opt-in; neither hook nor Skill infers target-repository configuration. Session focus remains source-neutral and resume-safe without parsing commands, outputs, or transcripts. The hook never submits the raw prompt, waits for workers, transports artifact previews, chooses routes/models, installs services, or blocks the controller turn on discovery/policy failure ([decisions 0053](../postmortems/0053-controller-owned-planning-handoff.md) and [0054](../postmortems/0054-portable-service-lifecycle.md));
 - immutable resolved route snapshots with worker, provider, and model dimensions;
 - optional process-local least-active pools over complete exact routes for leaf, child, and advisory-review targets, with immutable per-Job selection evidence, explicit member traffic included in load, rotating equal-load ties, and no retry-time route switching or fallback;
 - deterministic Mock, Pi RPC, and OpenCode JSON worker adapters;
@@ -130,6 +130,8 @@ Version 0.0.1 currently implements:
 - configuration validation and explicit configuration-only and opt-in live route diagnostics;
 - canonical HTTP process liveness that explicitly reports storage, routes, and inference as not checked, without claiming route readiness;
 - one exact `127.0.0.1` `serve` process publishing a product-owned per-user record after listen, with `agentknot client --json` reporting `unconfigured`, `available`, or `unavailable`; later CLI and Codex/Claude hooks discover the record without shell-profile edits or repeated server flags, while stale or malformed records fail without local or model fallback;
+- an explicit reversible `agentknot service` lifecycle that installs only that foreground process under systemd-user on Linux or launchd on macOS, persists validated absolute execution/configuration data plus a non-secret `PATH`, rejects unsafe existing definitions and unsupported platforms, and never runs from a prompt hook;
+- cross-platform single-writer ownership through one hidden Node built-in SQLite lifetime lock per canonical storage directory, without an external helper, lease, restart queue, or distributed-lock claim;
 - controller-neutral orchestration through CLI, HTTP, and TypeScript;
 - `off`, `suggest`, and `auto` modes with per-request narrowing;
 - strict controller-authored assessments followed by deterministic task-kind policy;
@@ -166,7 +168,7 @@ AgentKnot is not intended to become:
 - an automatic or learned model/provider ranking system: human-authored active rules do not claim measured intelligence and any optimizer still requires separate scorecards and a new gate;
 - an account-quota estimator or quota-aware router derived from local history, configured budgets, console scraping, or incomplete per-machine observations;
 - a system that automatically applies patches, creates branches or pull requests, merges, commits, or pushes;
-- a daemon manager, service installer, new transport protocol, repository scanner, or shell-profile mutator;
+- a reimplementation of an operating-system service manager, detached-child daemon, new transport protocol, repository scanner, or shell-profile mutator;
 - a reimplementation of Pi, MCP, OpenCode, Codex, Claude Code, or Relay.
 
 Remote workers, dependency graphs, scheduling, and dashboards may be evaluated later, but only after the local single-job contract is dependable and a concrete use case justifies them.
@@ -201,7 +203,9 @@ The product remains on course when all of the following are true:
 - changing `source` from Codex to Claude changes audit metadata, not execution behavior;
 - changing provider or model is a route change unless a genuinely new worker runtime is required;
 - configuration-only `doctor` explicitly says live inference was not checked, while `doctor --live` performs only the bounded exact selected-route probe and leaves no Job or artifact record;
-- one exact `127.0.0.1` server publishes its product-owned per-user record only after listen; `agentknot client --json` reports `unconfigured`, `available`, or `unavailable`; later CLI and Codex/Claude hook calls discover it without shell-profile edits or repeated flags, explicit config/server selection retains documented precedence, stale/malformed records fail without local or model fallback, `doctor` and `usage` stay local, and non-127 binds require explicit selection;
+- one exact `127.0.0.1` server publishes its product-owned per-user record only after listen; `agentknot client --json` reports `unconfigured`, `available`, or `unavailable`; later CLI and Codex/Claude hook calls discover it without shell-profile edits or repeated flags, packaged automatic delegation requires an available shared endpoint unless `AGENTKNOT_CONFIG` explicitly opts into local execution, target repositories are never scanned for fallback configuration, stale/malformed records fail before admission without local or model fallback, `doctor` and `usage` stay local, and non-127 binds require explicit selection;
+- `agentknot service` installs, starts, stops, restarts, reports, and uninstalls one AgentKnot-owned user definition through systemd-user or launchd; installation is explicit, replacement is atomic, service-manager failures remain visible, unsupported platforms fail explicitly, and hooks never install or mutate service state;
+- execution-owning file runtimes contend through built-in SQLite lifetime locks on distinct canonical storage directories and release them on close or process death without an external ownership process;
 - the same Job API works through CLI, HTTP, and TypeScript entry points;
 - the same orchestration policy and record shape work through CLI, HTTP, and TypeScript without controller-name branches;
 - every automatically dispatched child is admitted through the ordinary Job API only after its plan is persisted;

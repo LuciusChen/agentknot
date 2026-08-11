@@ -249,7 +249,11 @@ test('Codex and Claude packages preserve parity and expose the controller-author
     for (const upstream of ['product decisions', 'artifact integration', 'commit', 'push', 'merge', 'deployment']) {
       assert.match(body, new RegExp(upstream));
     }
-    assert.doesNotMatch(body, /--progress/);
+    assert.match(body, /agentknot client --json/);
+    assert.match(body, /SERVER_URL="\$\(/);
+    assert.match(body, /set -- --server "\$SERVER_URL" --progress/);
+    assert.match(body, /never infer `agentknot\.config\.json` from the target repository/);
+    assert.match(body, /AGENTKNOT_SERVER_URL and AGENTKNOT_CONFIG cannot be used together/);
     assert.doesNotMatch(body, /agentknot artifacts/);
     assert.doesNotMatch(body, /agentknot artifact-verify/);
     skills.push({ description, body });
@@ -260,6 +264,7 @@ test('Codex and Claude packages preserve parity and expose the controller-author
     assert.doesNotMatch(hook, /AGENTKNOT_AUTOMATIC_HANDOFF_V1/);
     assert.doesNotMatch(hook, /artifact-preview/);
     assert.doesNotMatch(hook, /--progress/);
+    assert.doesNotMatch(hook, /path\.join\(workspace, 'agentknot\.config\.json'\)/);
     assert.doesNotMatch(hook, /forwardStderr/);
     assert.doesNotMatch(hook, /decision: 'block'/);
     assert.doesNotMatch(hook, /\['orchestrate'/);
@@ -352,7 +357,7 @@ for (const integration of integrations) {
 }
 
 for (const integration of integrations) {
-  test(`${integration.controller} hook preserves available-server and local-config discovery`, async (t) => {
+  test(`${integration.controller} hook uses an available shared endpoint or explicit local config`, async (t) => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-discovery-'));
     t.after(() => rm(directory, { recursive: true, force: true }));
     const callsFile = await writeFakeAgentKnot(directory);
@@ -375,16 +380,15 @@ for (const integration of integrations) {
     await writeFile(callsFile, '');
     const localEnvironment = hookEnvironment(directory, callsFile);
     localEnvironment.AGENTKNOT_SERVER_URL = undefined;
-    localEnvironment.FAKE_AGENTKNOT_CLIENT = JSON.stringify({ status: 'unconfigured' });
+    localEnvironment.AGENTKNOT_CONFIG = 'agentknot.config.json';
     const output = await runHook(
       path.join(repositoryRoot, integration.hookScript),
       integration.controller,
       localEnvironment,
-      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt: 'Use the local repository configuration.' }
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt: 'Use the explicit local configuration.' }
     );
     assertObligation(output);
     assert.deepEqual(await readCalls(callsFile), [
-      { args: ['client', '--json'], cwd: repositoryRoot },
       {
         args: ['delegation', '--json', '--config', path.join(repositoryRoot, 'agentknot.config.json')],
         cwd: repositoryRoot,
@@ -394,7 +398,40 @@ for (const integration of integrations) {
 }
 
 for (const integration of integrations) {
+  test(`${integration.controller} hook never infers configuration from the target repository`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-controller-no-fallback-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const callsFile = await writeFakeAgentKnot(directory);
+    const environment = hookEnvironment(directory, callsFile);
+    environment.AGENTKNOT_SERVER_URL = undefined;
+    environment.FAKE_AGENTKNOT_CLIENT = JSON.stringify({ status: 'unconfigured' });
+    const prompt = `PRIVATE_PROMPT_${integration.controller}_unconfigured`;
+    const output = await runHook(
+      path.join(repositoryRoot, integration.hookScript),
+      integration.controller,
+      environment,
+      { hook_event_name: 'UserPromptSubmit', cwd: repositoryRoot, prompt }
+    );
+    const context = parseHookContext(output);
+    assert.match(context, /handoff status: unavailable/i);
+    assert.match(context, /no shared AgentKnot endpoint is configured/);
+    assert.match(context, /Do not block this user prompt/);
+    assert.doesNotMatch(context, /PRIVATE_PROMPT/);
+    const calls = await readCalls(callsFile);
+    assert.deepEqual(calls, [{ args: ['client', '--json'], cwd: repositoryRoot }]);
+    assertNoPromptOrLegacyCalls(calls, prompt);
+  });
+}
+
+for (const integration of integrations) {
   for (const failure of [
+    {
+      name: 'server and config conflict',
+      environment: (environment: NodeJS.ProcessEnv) => {
+        environment.AGENTKNOT_CONFIG = 'agentknot.config.json';
+      },
+      expectedCalls: [],
+    },
     {
       name: 'unavailable discovery',
       environment: (environment: NodeJS.ProcessEnv) => {

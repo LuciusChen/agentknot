@@ -6,7 +6,7 @@ Use it when Codex, Claude, CI, or a custom controller should keep product decisi
 
 ## Quick Start
 
-Requires Node.js 22 or newer. Build and verify the deterministic local path first:
+Requires Node.js 22.13 or newer. Build and verify the deterministic local path first:
 
 ```bash
 npm install
@@ -16,11 +16,12 @@ node dist/src/cli.js run --route mock --source codex --workspace . \
   "Inspect this project and propose the next implementation step"
 ```
 
-For a real configured repository, install the CLI once, start one shared loopback execution owner, and submit an orchestration:
+For a real configured repository, install the CLI once, explicitly install one shared loopback execution owner, and submit an orchestration:
 
 ```bash
 npm install --global --prefix "$HOME/.local" /path/to/agentknot
-agentknot serve --config /path/to/agentknot.config.json --host 127.0.0.1 --port 7391
+agentknot service install --config /path/to/agentknot.config.json --host 127.0.0.1 --port 7391
+agentknot service status
 agentknot client --json
 ASSESSMENT='{"schemaVersion":1,"recommendation":"delegate","complexity":"medium","parallelizable":false,"taskKinds":["implementation"],"reasoning":"bounded implementation with objective acceptance criteria","subtasks":[{"title":"Implement the approved feature","kind":"implementation","prompt":"Implement the approved feature within its stated scope.","acceptanceCriteria":["the public contract is implemented and relevant tests pass"]}]}'
 agentknot orchestrate --source codex --workspace /path/to/target-repository \
@@ -28,7 +29,7 @@ agentknot orchestrate --source codex --workspace /path/to/target-repository \
   --prompt "Implement the approved feature and verify its public contract"
 ```
 
-The server command remains attached to its terminal; run it under a process supervisor only after choosing one explicitly. To make new Codex or Claude sessions enter this flow automatically, continue to [Codex and Claude controller integrations](#codex-and-claude-controller-integrations). Jobs and orchestration records use the configured storage paths; the repository defaults are `.agentknot/jobs/` and `.agentknot/orchestrations/`.
+`service install` writes a user-owned native definition and starts the same foreground `serve` implementation under systemd-user on Linux or launchd on macOS. Use `service start|stop|restart|status|uninstall` from any directory; unsupported platforms fail explicitly. Manual `agentknot serve` remains available for an attached foreground process. To make new Codex or Claude sessions enter this flow automatically, continue to [Codex and Claude controller integrations](#codex-and-claude-controller-integrations). Jobs and orchestration records use the configured storage paths; the repository defaults are `.agentknot/jobs/` and `.agentknot/orchestrations/`.
 
 ## How it fits
 
@@ -64,7 +65,8 @@ The labels below are availability claims, not maturity ratings. **Current** mean
 | **Current** | Additive terminal Job completion summaries and required real-worker completion reports. | Newly terminal success, failure, and cancellation records include terminal outcome/attempt, controller-captured terminal-artifact path evidence or a stable unavailable reason, and an explicit worker-reported reported/unavailable branch. Normal Pi and OpenCode Jobs must end with one valid strict completion envelope; missing or malformed envelopes fail the attempt even when the worker process exits cleanly and the captured patch is empty and valid. Custom TypeScript adapters may still omit the optional report, while every accepted report remains an unverified worker claim ([incident/decision 0044](postmortems/0044-required-worker-completion-and-canonical-worktree-id.md)). |
 | **Current** | Git worktree attempt isolation, dirty-source snapshots, patch artifacts, read-only inspection, and delegated-child path-overlap review. | Supported staged, unstaged, and non-ignored untracked content is snapshotted through temporary Git state; retries see that same content while artifacts contain only worker deltas and carry its exact tree identity. Newly captured artifacts include controller-derived repository-relative `changedFiles` (including `[]`); delegated parent results group exact paths owned by multiple children as potential conflicts and mark missing evidence incomplete. This is not semantic verification or acceptance, and artifacts are never applied, committed, merged, or pushed automatically ([decisions 0026](postmortems/0026-child-artifact-path-overlap-review.md) and [0049](postmortems/0049-dirty-workspace-snapshot-isolation.md)). |
 | **Current** | Configuration-only `doctor`, opt-in exact-route `doctor --live`, and HTTP process liveness. | Implemented and covered by diagnostic and HTTP contract tests; live probes are point-in-time evidence and are not run as normal-job preflights. |
-| **Current** | Product-owned local service discovery for one exact `127.0.0.1` `serve` process. | After listen, the server publishes one per-user record that later CLI commands and Codex/Claude hooks discover; `agentknot client --json` reports `unconfigured`, `available`, or `unavailable`. Deterministic verification passes 249 of 249, including cross-process, wait/reconnect, and hook-parity gates; stale or malformed records do not trigger local or model fallback. |
+| **Current** | Product-owned local service discovery for one exact `127.0.0.1` `serve` process. | After listen, the server publishes one per-user record that later CLI commands and Codex/Claude hooks discover; `agentknot client --json` reports `unconfigured`, `available`, or `unavailable`. The current 264-of-264 deterministic suite includes cross-process, wait/reconnect, hook-parity, portable ownership, and service-host gates; stale or malformed records do not trigger local or model fallback. |
+| **Current** | Explicit portable user-service lifecycle for the shared foreground server. | `agentknot service` renders one mode-0600 AgentKnot-owned systemd-user unit on Linux or LaunchAgent on macOS, supports install/start/stop/restart/status/uninstall, and rejects unsupported hosts or unsafe existing definitions. It stores absolute execution paths and a validated non-secret `PATH`; hooks never install it or edit shell profiles ([decision 0054](postmortems/0054-portable-service-lifecycle.md)). |
 | **Experimental** | Reviewed Pi worker profiles/extensions; none is promoted. | Evaluation only: use an exact version or immutable path without global or repository installation, then run repeated same-task Luna/max A/B trials against the minimal profile; completion, artifact verification, and target tests must not regress and session-statistics, elapsed-time, retry, or upstream-intervention evidence must show a repeatable net benefit before promotion. `pi-readseek@0.9.10` regressed its first pair. `pi-lean-ctx@3.9.18` produced two selected, passing artifacts and saved 39.0% total Pi tokens on the larger task, but on an independent smaller task it used 36.2% more tokens and took 45.7% longer; the inconsistent profile is not promoted. See [experiments 0013](postmortems/0013-pi-readseek-profile-ab.md) and [0014](postmortems/0014-pi-lean-ctx-profile-ab.md). |
 | **Experimental** | Pi/OpenCode Go/DeepSeek V4 Flash at `thinkingLevel=max` for configured low-complexity dogfood work. | The route passed live probes and one isolated same-task comparison. It is now selected only by the repository's human-authored `low` rule; it is not a claimed intelligence ranking, fallback target, or replacement for Luna on medium/high work. Upstream artifact review remains required. See [experiment 0017](postmortems/0017-deepseek-flash-route-ab.md) and [decision 0020](postmortems/0020-human-authored-active-route-selection.md). |
 | **Current** | Native OpenCode JSON worker as a replaceable pool member. | The pinned `v1.18.15` adapter passes deterministic protocol/lifecycle coverage plus repeated real Luna/max success, error/nonzero, cancellation, timeout, cleanup, and non-empty artifact evidence. Native OpenCode may participate in routine, advanced, and review pools through configuration; no efficiency, capacity, ranking, quota, or fallback claim is made ([decisions 0041](postmortems/0041-native-opencode-worker-portability.md), [0042](postmortems/0042-complete-route-pool-balancing.md), [0043](postmortems/0043-native-opencode-lifecycle-soak.md), and [0047](postmortems/0047-resumable-controller-binding-and-replaceable-role-pools.md)). |
@@ -132,14 +134,17 @@ agentknot routes
 
 Ensure `$HOME/.local/bin` is on the controller process `PATH`.
 
-For concurrent controller sessions, start one AgentKnot server with the authoritative configuration on the exact loopback host:
+For concurrent controller sessions, explicitly install one AgentKnot user service with the authoritative configuration on the exact loopback host:
 
 ```bash
-agentknot serve --config /path/to/agentknot.config.json --host 127.0.0.1 --port 7391
+agentknot service install --config /path/to/agentknot.config.json --host 127.0.0.1 --port 7391
+agentknot service status
 agentknot client --json
 ```
 
-After it listens, the server publishes a per-user discovery record; later CLI commands and controller hooks reuse the shared execution owner without shell-profile edits. Stale or malformed discovery fails explicitly and never starts a local runtime or selects another model. Selector precedence, compact waiting, progress, and HTTP examples are documented once under [HTTP automation](#http-automation).
+Installation copies the current non-secret `PATH` into the native definition so configured worker executables remain discoverable; override it with `service install --path ABSOLUTE_PATH_LIST`. It does not copy arbitrary environment variables or credentials. Keep credentials in the selected worker's own protected auth store or deliberately configure them through the native service manager. Re-run installation after changing the config, executable paths, or service `PATH`; the replacement is validated, atomic, and immediately restarted.
+
+After it listens, the server publishes a per-user discovery record; later CLI commands and controller hooks reuse the shared execution owner without shell-profile edits. Packaged automatic Skills require an available shared endpoint by default and stop before admission when it is unavailable. `AGENTKNOT_CONFIG` is the only local-runtime opt-in for a Skill; neither the Skill nor hook infers `agentknot.config.json` from the target repository. Stale or malformed discovery never starts a local runtime or selects another worker, provider, or model. Selector precedence, compact waiting, progress, and HTTP examples are documented once under [HTTP automation](#http-automation).
 
 Install the Codex plugin from a local checkout, then start a new Codex session:
 
@@ -161,7 +166,7 @@ Invoke it explicitly as `/agentknot:agentknot-delegate`; Claude uses the same co
 
 After installation or any hook change, review and trust the plugin hook in the controller's native hook UI, then start or resume the controller in a new process. The shared dependency-free hook accepts a bounded adapter-provided source namespace and explicit-invocation marker; Codex and Claude are packaged adapters, not core branches. It resolves the event cwd, one explicit repository path, or the revalidated source/session binding. `PostToolUse` may update focus from one structured `cwd`, `workdir`, or `workspace`; command strings, outputs, transcripts, and home are never parsed or scanned ([decisions 0045](postmortems/0045-controller-session-workspace-binding.md) and [0047](postmortems/0047-resumable-controller-binding-and-replaceable-role-pools.md)).
 
-For a resolved `auto` workspace, `UserPromptSubmit` performs only a bounded delegation-policy lookup and injects `AGENTKNOT_HANDOFF_OBLIGATION_V1`. It never submits `event.prompt`, calls `orchestrate`, waits for workers, parses terminal handoff, or previews artifacts. The host command and each AgentKnot lookup are time-bounded; discovery/policy failure adds bounded unavailable context and does not block the user prompt. The upstream controller then owns eligibility, planning, decomposition, and acceptance criteria and invokes the normal Skill/CLI when work is suitable. AgentKnot owns validation, deterministic policy, routing, scheduling, isolation, completion, and artifact evidence. No MCP server, wrapper daemon, transcript parser, local semantic classifier, learned router, or fallback model is added ([decision 0053](postmortems/0053-controller-owned-planning-handoff.md)).
+For a resolved `auto` workspace, `UserPromptSubmit` performs only a bounded delegation-policy lookup and injects `AGENTKNOT_HANDOFF_OBLIGATION_V1`. It never submits `event.prompt`, calls `orchestrate`, waits for workers, parses terminal handoff, or previews artifacts. The host command and each AgentKnot lookup are time-bounded; discovery/policy failure adds bounded unavailable context and does not block the user prompt. The upstream controller then owns eligibility, planning, decomposition, and acceptance criteria and invokes the normal Skill/CLI when work is suitable. The Skill selects the same shared endpoint once, enables compact `--progress`, and reports a pre-admission failure as zero downstream work instead of doing repository work first. AgentKnot owns validation, deterministic policy, routing, scheduling, isolation, completion, and artifact evidence. No MCP server, wrapper daemon, transcript parser, local semantic classifier, learned router, or fallback model is added ([decisions 0053](postmortems/0053-controller-owned-planning-handoff.md) and [0054](postmortems/0054-portable-service-lifecycle.md)).
 
 ### Human-authored route selection
 
@@ -290,13 +295,15 @@ The included `deepseek-flash` route keeps Pi and OpenCode Go but selects DeepSee
 
 ## HTTP automation
 
-Start the local control plane:
+Start the local control plane through its installed user service, or run the same `serve` command manually in an attached terminal:
 
 ```bash
-agentknot serve --config /path/to/agentknot.config.json --host 127.0.0.1 --port 7391
+agentknot service start
+# Manual alternative:
+# agentknot serve --config /path/to/agentknot.config.json --host 127.0.0.1 --port 7391
 ```
 
-The server is the single execution and file-store owner for any number of trusted local clients. Client-capable `run`, `orchestrate`, `routes`, `jobs`, `show`, `delegation`, orchestration inspection, and artifact inspection use the existing HTTP API without constructing another runtime. They honor explicit `--config`, `--server`, `AGENTKNOT_SERVER_URL`, and the existing `AGENTKNOT_CONFIG` local selection before implicit discovery; without those selectors, the registered endpoint is used before the default local configuration. `doctor`, `usage`, and live `--events` remain local-only in this slice. `--server URL` and `AGENTKNOT_SERVER_URL` remain available as explicit overrides, and server lifecycle is explicit; this is not a durable queue, remote fleet, or automatic service manager.
+The server is the single execution and file-store owner for any number of trusted local clients. Client-capable `run`, `orchestrate`, `routes`, `jobs`, `show`, `delegation`, orchestration inspection, and artifact inspection use the existing HTTP API without constructing another runtime. They honor explicit `--config`, `--server`, `AGENTKNOT_SERVER_URL`, and the existing `AGENTKNOT_CONFIG` local selection before implicit discovery; without those selectors, the registered endpoint is used before the default local configuration. `doctor`, `usage`, and live `--events` remain local-only in this slice. `--server URL` and `AGENTKNOT_SERVER_URL` remain available as explicit overrides. Native service adapters supervise only this foreground process; they add no durable queue, remote fleet, second scheduler, or detached-child daemon.
 
 Submit asynchronously:
 
@@ -340,7 +347,7 @@ The deliberate handoff workflow is: inspect the parent and child records; verify
 
 Without shared-server mode, read-oriented CLI commands, including `show`, lists, artifact inspection, route and delegation inspection, and both doctor modes, open persisted records without ownership or startup reconciliation. A TypeScript runtime created with `reconcileOnStartup: false` has the same read-only capability boundary: its execution and reconciliation methods refuse calls. Local `run`, local `orchestrate`, and a valid `serve` invocation are execution owners. They acquire non-blocking advisory locks on the canonical Job and Orchestration storage directories before any reconciliation or admission; a second conforming owner exits clearly. Concurrent upstream sessions must use one selected server rather than multiple checkout-relative execution runtimes. Invalid `serve` arguments are rejected before runtime construction.
 
-The file-backed owner helper uses the host `flock` command and holds kernel locks for the runtime lifetime. One-shot CLI commands release them after completion; a server process crash releases them through the kernel. TypeScript callers must call `await runtime.close()` after all admitted work settles; closing while admission or completion is active is refused. After a new owner acquires both locks, all prior nonterminal snapshots are failed once without replay, regardless of recorded PID, so PID reuse or a different PID namespace is not used as takeover authority. Directly constructed stores/runtimes remain an advanced in-process API and do not bypass the documented single-writer responsibility ([decision 0022](postmortems/0022-file-runtime-single-writer-ownership.md)).
+The file-backed owner opens one hidden Node built-in SQLite database in each canonical storage directory and holds a non-blocking exclusive transaction for the runtime lifetime. No external `flock` helper or native add-on is required. One-shot CLI commands close the databases after completion; process death lets the operating system release the locks. TypeScript callers must call `await runtime.close()` after all admitted work settles; closing while admission or completion is active is refused. After a new owner acquires both locks, all prior nonterminal snapshots are failed once without replay, regardless of recorded PID, so PID reuse or a different PID namespace is not used as takeover authority. The hidden lock database is coordination metadata, not a Job store, journal, lease, or distributed lock. Directly constructed stores/runtimes remain an advanced in-process API and do not bypass the documented single-writer responsibility ([decisions 0022](postmortems/0022-file-runtime-single-writer-ownership.md) and [0054](postmortems/0054-portable-service-lifecycle.md)).
 
 After a CLI `run` or `orchestrate` request has been admitted, catchable `SIGINT`/`SIGTERM` cancels that exact execution, awaits worker cleanup and terminal persistence, and only then releases runtime ownership. HTTP graceful close first rejects new Job/orchestration admissions with 503 while keeping liveness and read-only access available, waits for in-flight admission decisions, cancels and drains active work, then closes the listener before releasing runtime locks. A hard kill cannot run these handlers; the next owner fails persisted nonterminal records without replay, but arbitrary descendants or worktrees left by an uncatchable host failure still require exact operator cleanup ([incident 0024](postmortems/0024-stale-dogfood-test-processes.md) and [incident/decision 0046](postmortems/0046-clutch-review-listing-and-shutdown-gaps.md)).
 

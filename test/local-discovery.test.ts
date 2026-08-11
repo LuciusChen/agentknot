@@ -140,7 +140,10 @@ test('registration holds one owner, publishes only on request, and atomically wr
     assert.deepEqual(JSON.parse(bytes.toString('utf8')), record);
     assert.deepEqual(await registration.read(), record);
     assert.deepEqual(await readLocalDiscovery({ environment: fixture.environment }), record);
-    assert.deepEqual(await readdir(registration.paths.directory), ['server.json']);
+    assert.deepEqual(
+      (await readdir(registration.paths.directory)).filter((name) => name.endsWith('.json')),
+      ['server.json']
+    );
 
     const replacement = await registration.publish(7392);
     assert.equal(replacement.instanceId, record.instanceId);
