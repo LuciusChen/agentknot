@@ -182,10 +182,15 @@ test('job activity distinguishes worker retry from broker-client connectivity', 
   const projection = projectJobActivity(job('running', events(
     { type: 'job.started' },
     { type: 'worker.started' },
-    { type: 'worker.retry.started', data: { attempt: 2, delayMs: 1_000 } }
+    {
+      type: 'worker.retry.started',
+      data: { scope: 'downstream', attempt: 2, maxAttempts: 3, delayMs: 1_000 },
+    }
   )));
   assert.equal(projection.state, 'retrying');
   assert.equal(projection.lastObserved?.retryAttempt, 2);
+  assert.equal(projection.lastObserved?.retryScope, 'downstream');
+  assert.equal(projection.lastObserved?.retryMaxAttempts, 3);
   assert.equal('connectivity' in projection, false);
 
   const control = projectJobActivity(job('running', events(

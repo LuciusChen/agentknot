@@ -425,6 +425,13 @@ test('CLI progress names active tools without exposing worker payloads', async (
       arguments: { path: '/private/secret' },
     },
   };
+  const retryEvent = {
+    sequence: 3,
+    jobId: initial.id,
+    at: now,
+    type: 'worker.retry.started',
+    data: { scope: 'downstream', attempt: 2, maxAttempts: 3, delayMs: 4_000 },
+  };
   const terminal = {
     ...initial,
     status: 'succeeded',
@@ -433,7 +440,8 @@ test('CLI progress names active tools without exposing worker payloads', async (
     events: [
       ...initial.events,
       toolEvent,
-      { sequence: 3, jobId: initial.id, at: now, type: 'job.succeeded' },
+      retryEvent,
+      { sequence: 4, jobId: initial.id, at: now, type: 'job.succeeded' },
     ],
   };
   const server = createServer((request, response) => {
@@ -472,7 +480,36 @@ test('CLI progress names active tools without exposing worker payloads', async (
       return;
     }
     if (request.url === `/v1/jobs/${initial.id}/events?after=2`) {
-      response.writeHead(200).end(JSON.stringify({ nextSequence: 3, job: terminal }));
+      response.writeHead(202).end(JSON.stringify({
+        events: [retryEvent],
+        nextSequence: 3,
+        wait: {
+          schemaVersion: 1,
+          kind: 'job',
+          id: initial.id,
+          status: 'running',
+          updatedAt: now,
+          route: 'route',
+          attempt: 1,
+          activity: {
+            schemaVersion: 1,
+            state: 'retrying',
+            coverage: 'complete',
+            lastObserved: {
+              sequence: 3,
+              at: now,
+              type: 'worker.retry.started',
+              retryAttempt: 2,
+              retryScope: 'downstream',
+              retryMaxAttempts: 3,
+            },
+          },
+        },
+      }));
+      return;
+    }
+    if (request.url === `/v1/jobs/${initial.id}/events?after=3`) {
+      response.writeHead(200).end(JSON.stringify({ nextSequence: 4, job: terminal }));
       return;
     }
     response.writeHead(404).end(JSON.stringify({ error: 'Not found' }));
@@ -499,6 +536,7 @@ test('CLI progress names active tools without exposing worker payloads', async (
     });
     assert.match(result.stderr, /activity=tools:read/);
     assert.match(result.stderr, /last=worker\.tool\.started:read age=/);
+    assert.match(result.stderr, /activity=retrying:downstream:2\/3/);
     assert.doesNotMatch(result.stderr, /private-call-id|private\/secret|private prompt/);
   } finally {
     await new Promise<void>((resolve, reject) =>

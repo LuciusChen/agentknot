@@ -49,7 +49,8 @@ The controller, worker, provider, and model are separate concepts:
 | Assessment validation and deterministic plan composition | orchestration service | controller/model discretion at dispatch time |
 | Parent policy/plan/events/child provenance | `OrchestrationStore` | leaf `JobStore` semantics |
 | Route resolution | configuration/orchestrator | controller identity branches |
-| State, attempts, retry, timeout, cancellation | orchestrator | provider-specific code |
+| Job state, whole-worker attempts, timeout, cancellation | orchestrator | provider-specific code |
+| In-session downstream request retry and settled-failure disposition | worker adapter | route fallback or controller policy |
 | Process startup and wire protocol | worker adapter | Job API and store |
 | Provider/model flags | resolved route and worker adapter | controller-specific code |
 | Worktree creation, capture, cleanup | workspace manager | worker adapter |
@@ -334,9 +335,12 @@ The adapter owns:
 - translation from resolved route settings to worker startup/protocol input;
 - strict decoding of worker output;
 - normalization of worker activity into AgentKnot worker events;
+- retry of downstream requests while retaining that worker session's context;
 - worker-process termination when its implementation supports cancellation.
 
-The adapter does not own job state transitions, retries, attempt numbering, workspace isolation, artifact capture, callback delivery, or persistence. A custom adapter may return the optional strict `WorkerCompletionReport` as `completionReport`; `undefined` means absent and `null` explicitly means a detected malformed or unsupported envelope. The built-in Pi normal-run adapter enforces its required envelope before returning. The orchestrator owns runtime validation and terminal-summary placement.
+The adapter does not own job state transitions, whole-worker attempt numbering, workspace isolation, artifact capture, callback delivery, or persistence. A custom adapter may return the optional strict `WorkerCompletionReport` as `completionReport`; `undefined` means absent and `null` explicitly means a detected malformed or unsupported envelope. The built-in Pi normal-run adapter enforces its required envelope before returning. The orchestrator owns runtime validation and terminal-summary placement.
+
+An adapter that reaches a settled worker-session error after owning its downstream retry policy throws `WorkerSettledError`. The orchestrator records that exact bounded message as terminal and does not consume another configured whole-worker attempt. Other adapter failures retain ordinary Job-attempt behavior, including process exit, malformed transport/protocol before settlement, and retryable custom-adapter exceptions. This contract does not classify provider strings in core, infer account quota, switch routes, or prevent a controller/human from explicitly admitting a later Job. Normalized retry events may carry only bounded route-neutral scope, attempt, maximum, delay, outcome, and exhaustion reason; compact wait activity exposes scope/progress without raw downstream error text ([incident/decision 0084](../postmortems/0084-worker-settled-retry-ownership.md)).
 
 The reusable route-neutral `WorkerAdapter` unit kit runs against Mock and Pi RPC. It requires healthy diagnostic shape, normalized start/text events and output, propagation of event-sink failures, and rejection when `run` receives an already-aborted signal. Route-resolution, lifecycle, workspace/artifact, and transport-specific evidence remains at its owning boundary. Mock remains deterministic-only evidence and Pi is the built-in real implementation; custom adapters remain replaceable at the worker boundary.
 

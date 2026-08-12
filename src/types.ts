@@ -421,6 +421,14 @@ export interface WorkerRunResult {
   completionReport?: WorkerCompletionReport | null;
 }
 
+/**
+ * The worker session reached its own terminal error. Its adapter owns any downstream retry policy.
+ * Replaying a fresh worker session inside the same Job would duplicate completed work.
+ */
+export class WorkerSettledError extends Error {
+  readonly name = 'WorkerSettledError';
+}
+
 export interface WorkerProbeInput {
   route: ResolvedRoute;
   signal: AbortSignal;

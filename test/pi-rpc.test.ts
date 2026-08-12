@@ -1244,6 +1244,56 @@ test('Orchestrator retries one exited Pi child and leaves both exact PIDs gone',
   }
 });
 
+test('Pi settled downstream failure does not replay a fresh worker session', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-settled-error-'));
+  const pidLog = path.join(directory, 'children.pids');
+  const orchestrator = createConformanceOrchestrator(
+    {
+      FAKE_PI_MODE: 'settled-downstream-error',
+      FAKE_PI_PID_LOG: pidLog,
+    },
+    10_000,
+    2
+  );
+  try {
+    const job = await orchestrator.run({ prompt: 'downstream failure', workspace: directory });
+    const pids = (await readFile(pidLog, 'utf8')).trim().split('\n').filter(Boolean).map(Number);
+
+    assert.equal(job.status, 'failed');
+    assert.equal(job.attempt, 1);
+    assert.equal(job.error?.name, 'WorkerSettledError');
+    assert.match(job.error?.message ?? '', /temporary downstream failure/);
+    assert.equal(job.error?.retryable, false);
+    assert.equal(job.events.some((event) => event.type === 'job.retrying'), false);
+    assert.deepEqual(
+      job.events.filter((event) => event.type.startsWith('worker.retry')).map((event) => ({
+        type: event.type,
+        data: event.data,
+      })),
+      [
+        {
+          type: 'worker.retry.started',
+          data: { scope: 'downstream', attempt: 3, maxAttempts: 3, delayMs: 8000 },
+        },
+        {
+          type: 'worker.retry.completed',
+          data: {
+            scope: 'downstream',
+            attempt: 3,
+            success: false,
+            reason: 'downstream-retries-exhausted',
+          },
+        },
+      ]
+    );
+    assert.equal(JSON.stringify(job.events).includes('private downstream detail'), false);
+    assert.equal(pids.length, 1);
+    assertProcessGone(pids[0]!);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('PiRpcWorkerAdapter distinguishes agent_end without agent_settled', async () => {
   const adapter = createConformanceAdapter('agent-end-without-settled');
 

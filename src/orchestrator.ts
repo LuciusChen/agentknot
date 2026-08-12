@@ -22,6 +22,7 @@ import {
   normalizeWorkerControlKinds,
   validateWorkerControlRequest,
 } from './worker-control.js';
+import { WorkerSettledError } from './types.js';
 import {
   capturedChangedFilesSummary,
   validateWorkerCompletionReport,
@@ -1848,6 +1849,7 @@ export class Orchestrator {
         !(failure instanceof WorkerReadOnlyTaskViolationError) &&
         !(failure instanceof WorkerArtifactReadError) &&
         !(failure instanceof WorkerArtifactReadUnusedError) &&
+        !(failure instanceof WorkerSettledError) &&
         !jobSignal.aborted &&
         attempt < job.route.maxAttempts;
       job.error = { ...details, attempt, retryable };

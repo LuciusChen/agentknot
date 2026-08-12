@@ -23,6 +23,8 @@ export interface JobActivityObservation {
   type: JobEventType;
   toolName?: string;
   retryAttempt?: number;
+  retryScope?: 'downstream';
+  retryMaxAttempts?: number;
 }
 
 export interface JobActivityProjection {
@@ -58,6 +60,12 @@ function activityObservation(event: JobEvent): JobActivityObservation {
   const attempt = event.type === 'worker.retry.started' || event.type === 'worker.retry.completed'
     ? event.data?.attempt
     : undefined;
+  const retryScope = event.type === 'worker.retry.started' || event.type === 'worker.retry.completed'
+    ? event.data?.scope
+    : undefined;
+  const retryMaxAttempts = event.type === 'worker.retry.started'
+    ? event.data?.maxAttempts
+    : undefined;
   return {
     sequence: event.sequence,
     at: event.at,
@@ -66,6 +74,10 @@ function activityObservation(event: JobEvent): JobActivityObservation {
     ...(!Number.isSafeInteger(attempt) || (attempt as number) < 0
       ? {}
       : { retryAttempt: attempt as number }),
+    ...(retryScope === 'downstream' ? { retryScope } : {}),
+    ...(!Number.isSafeInteger(retryMaxAttempts) || (retryMaxAttempts as number) < 1
+      ? {}
+      : { retryMaxAttempts: retryMaxAttempts as number }),
   };
 }
 
@@ -191,7 +203,11 @@ export function isJobActivityProjection(value: unknown): value is JobActivityPro
       typeof observation.type !== 'string' ||
       (observation.toolName !== undefined && typeof observation.toolName !== 'string') ||
       (observation.retryAttempt !== undefined &&
-        (!Number.isSafeInteger(observation.retryAttempt) || (observation.retryAttempt as number) < 0))
+        (!Number.isSafeInteger(observation.retryAttempt) || (observation.retryAttempt as number) < 0)) ||
+      (observation.retryScope !== undefined && observation.retryScope !== 'downstream') ||
+      (observation.retryMaxAttempts !== undefined &&
+        (!Number.isSafeInteger(observation.retryMaxAttempts) ||
+          (observation.retryMaxAttempts as number) < 1))
     ) {
       return false;
     }

@@ -102,6 +102,33 @@ function handle(command) {
         }, 50);
       });
       break;
+    case 'settled-downstream-error':
+      sendFrames([
+        { id: 'prompt', type: 'response', command: 'prompt', success: true },
+        { type: 'agent_start' },
+        {
+          type: 'auto_retry_start',
+          attempt: 3,
+          maxAttempts: 3,
+          delayMs: 8000,
+          errorMessage: 'private downstream detail',
+        },
+        {
+          type: 'auto_retry_end',
+          success: false,
+          attempt: 3,
+          finalError: 'private downstream detail',
+        },
+        {
+          type: 'agent_end',
+          messages: [
+            { role: 'assistant', stopReason: 'error', errorMessage: 'temporary downstream failure' },
+          ],
+          willRetry: false,
+        },
+        { type: 'agent_settled' },
+      ], true, () => {});
+      break;
     case 'stderr-split-exit':
       sendFrames([{ type: 'agent_start' }], true, () => {
         sendSplitUtf8Stderr(() => process.exit(29));

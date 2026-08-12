@@ -2,7 +2,7 @@
 
 - Status: Living product contract
 - Version: 0.1
-- Last updated: 2026-08-12
+- Last updated: 2026-08-13
 
 ## Product thesis
 
@@ -68,6 +68,8 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 ### Explicit routing
 
 A route resolves worker, provider, model, thinking level, timeout, and retry settings before execution. Existing jobs retain that resolved snapshot even if configuration changes later. The optional human-authored `delegation.dispatch.routeSelection` policy supports `shadow` evidence and `active` execution. Shadow keeps `dispatch.defaultRoute`; active writes the first matching configured route into the planned child and ordinary Job request. The controller assesses complexity, but its strict assessment cannot name a route.
+
+Retry ownership follows the same replaceable boundary. A worker may preserve its live context while retrying downstream requests; once it settles that session as failed, middleware must not immediately replay the whole Job as though the worker process had been lost. AgentKnot's configured attempts remain available for pre-settlement worker process, protocol, or transport failures, always on the exact admitted route ([decision 0084](../postmortems/0084-worker-settled-retry-ownership.md)).
 
 ### Records first, live signals second
 

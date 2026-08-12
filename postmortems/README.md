@@ -178,7 +178,7 @@ Incident records should also include severity, user/controller impact, immediate
 | [0064](./0064-broker-startup-child-cleanup.md) | Incident / Architecture Decision | Resolved / Accepted | Bound broker startup child cleanup |
 | [0065](./0065-retire-http-wait-aliases.md) | Incident / Architecture Decision | Resolved / Accepted | Retire pre-release HTTP wait aliases |
 | [0066](./0066-pi-duplicate-tool-start-events.md) | Incident | Resolved | Remove duplicate Pi tool-start events |
-| [0067](./0067-route-tool-execution-budget.md) | Incident / Architecture Decision | Accepted | Add an optional route tool-execution budget |
+| [0067](./0067-route-tool-execution-budget.md) | Incident / Architecture Decision | Superseded | Add an optional route tool-execution budget |
 | [0068](./0068-bounded-shared-task-context.md) | Incident / Architecture Decision | Resolved / Accepted | Bound shared task context without worker-session coupling |
 | [0069](./0069-repeated-shared-context-scope-trials.md) | Experiment / Incident | Accepted / Resolved | Repeat shared-context scope trials, remove contradictory check guidance, and settle blocked reports without retry |
 | [0070](./0070-sparse-worktree-artifact-boundary.md) | Incident / Decision | Resolved / Accepted | Preserve sparse-checkout artifact semantics and enforce read-only analysis |
@@ -193,3 +193,6 @@ Incident records should also include severity, user/controller impact, immediate
 | [0079](./0079-external-worktree-ancestor-isolation.md) | Incident / Architecture Decision | Resolved / Accepted | Keep external target worktrees outside the host project ancestry |
 | [0080](./0080-artifact-read-review-ab.md) | Experiment / Incident | Accepted / Resolved | Keep exact artifact reads without claiming measured review efficiency |
 | [0081](./0081-selective-workspace-context-ab.md) | Experiment / Architecture Decision | Accepted / Experimental | Select workspace-file context on demand after repeatable total-token wins but failed latency gates |
+| [0082](./0082-real-repository-selective-context-gate.md) | Experiment / Architecture Decision | Accepted | Reject automatic context candidates and invalidate a confounded delegated A/B |
+| [0083](./0083-remove-tool-count-task-boundaries.md) | Incident / Architecture Decision | Accepted / Implemented | Remove fixed tool-count task boundaries |
+| [0084](./0084-worker-settled-retry-ownership.md) | Incident / Architecture Decision | Resolved / Accepted | Keep downstream retry inside the worker session and prevent full Job replay |

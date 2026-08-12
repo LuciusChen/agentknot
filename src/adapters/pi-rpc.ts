@@ -6,6 +6,7 @@ import { StringDecoder } from 'node:string_decoder';
 
 import type { PiRpcWorkerConfig } from '../config.js';
 import { MAX_WORKER_STDERR_BYTES, limitTextSuffix } from '../record-limits.js';
+import { WorkerSettledError } from '../types.js';
 import type {
   ResolvedRoute,
   WorkerAdapter,
@@ -62,6 +63,7 @@ interface PiRpcEvent {
   result?: unknown;
   isError?: boolean;
   attempt?: number;
+  maxAttempts?: number;
   delayMs?: number;
 }
 
@@ -848,10 +850,22 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           });
           break;
         case 'auto_retry_start':
-          await emit('worker.retry.started', { attempt: event.attempt, delayMs: event.delayMs });
+          await emit('worker.retry.started', {
+            scope: 'downstream',
+            attempt: event.attempt,
+            ...(Number.isSafeInteger(event.maxAttempts) && (event.maxAttempts as number) > 0
+              ? { maxAttempts: event.maxAttempts }
+              : {}),
+            delayMs: event.delayMs,
+          });
           break;
         case 'auto_retry_end':
-          await emit('worker.retry.completed', { attempt: event.attempt, success: event.success });
+          await emit('worker.retry.completed', {
+            scope: 'downstream',
+            attempt: event.attempt,
+            success: event.success,
+            ...(event.success === false ? { reason: 'downstream-retries-exhausted' } : {}),
+          });
           break;
         case 'agent_end':
           agentEnded = true;
@@ -973,7 +987,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       child.stdin.write(rpcLine({ id: 'prompt', type: 'prompt', message: prompt }));
       await settled;
       await artifactProtocol?.settleObserved();
-      if (assistantError) throw new Error(assistantError);
+      if (assistantError) throw new WorkerSettledError(assistantError);
       if (input.signal.aborted) {
         throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
       }
