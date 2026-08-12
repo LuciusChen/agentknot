@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -36,6 +36,11 @@ import {
   parseRequiredWorkerCompletionOutput,
   WORKER_COMPLETION_REPORT_INSTRUCTION,
 } from '../worker-completion-report.js';
+import {
+  PI_ARTIFACT_READ_EXTENSION_SOURCE,
+  PI_ARTIFACT_READ_PROTOCOL,
+  PI_ARTIFACT_READ_TOOL,
+} from './pi-artifact-reader-extension.js';
 
 interface PiRpcEvent {
   id?: string;
@@ -102,6 +107,91 @@ const AMBIENT_DISCOVERY_DISABLE_FLAGS = [
   '--no-prompt-templates',
   '--no-themes',
 ] as const;
+function sanitizedArtifactToolResult(value: unknown): Record<string, unknown> {
+  const result = isRecord(value) ? value : {};
+  const details = isRecord(result.details) ? result.details : {};
+  return {
+    status: typeof details.status === 'string' ? details.status : 'unknown',
+    ...(typeof details.sourceJobId === 'string' ? { sourceJobId: details.sourceJobId } : {}),
+    ...(Number.isSafeInteger(details.attempt) ? { attempt: details.attempt } : {}),
+    ...(typeof details.sha256 === 'string' ? { sha256: details.sha256 } : {}),
+    ...(Number.isSafeInteger(details.bytes) ? { bytes: details.bytes } : {}),
+  };
+}
+
+interface PiArtifactReadProtocol {
+  settleObserved(): Promise<void>;
+  close(): Promise<void>;
+}
+
+function bindArtifactReader(
+  child: ChildProcessWithoutNullStreams,
+  reader: NonNullable<WorkerRunInput['artifactReader']>,
+  onFailure: (error: Error) => void
+): PiArtifactReadProtocol {
+  let observed = false;
+  let tail = Promise.resolve();
+  let failureReported = false;
+  const reportFailure = (error: unknown): void => {
+    if (failureReported) return;
+    failureReported = true;
+    onFailure(error instanceof Error ? error : new Error(String(error)));
+  };
+  const send = (message: Record<string, unknown>): Promise<void> => new Promise((resolve, reject) => {
+    try {
+      child.send(message, (error) => error === null ? resolve() : reject(error));
+    } catch (error) {
+      reject(error);
+    }
+  });
+  const onMessage = (message: unknown): void => {
+    if (
+      !isRecord(message) ||
+      message.protocol !== PI_ARTIFACT_READ_PROTOCOL ||
+      message.schemaVersion !== 1 ||
+      message.action !== 'read' ||
+      typeof message.requestId !== 'string'
+    ) return;
+    observed = true;
+    const requestId = message.requestId;
+    tail = tail.then(async () => {
+      try {
+        const result = await reader.read();
+        await send({
+          protocol: PI_ARTIFACT_READ_PROTOCOL,
+          schemaVersion: 1,
+          requestId,
+          ok: true,
+          sourceJobId: result.sourceJobId,
+          attempt: result.artifact.attempt,
+          size: result.artifact.size,
+          sha256: result.artifact.sha256,
+          content: result.content,
+        });
+      } catch (error) {
+        await send({
+          protocol: PI_ARTIFACT_READ_PROTOCOL,
+          schemaVersion: 1,
+          requestId,
+          ok: false,
+        }).catch(() => undefined);
+        throw error;
+      }
+    });
+    void tail.catch(reportFailure);
+  };
+  child.on('message', onMessage);
+  return {
+    async settleObserved() {
+      child.off('message', onMessage);
+      if (observed) await tail;
+    },
+    async close() {
+      child.off('message', onMessage);
+      await Promise.allSettled([tail]);
+    },
+  };
+}
 
 type SessionStatsUnavailableReason = 'timeout' | 'unsupported' | 'invalid';
 
@@ -147,6 +237,32 @@ function withAmbientDiscoveryDisabled(configuredArgs: readonly string[] | undefi
     if (!seen.has(flag)) args.push(flag);
   }
   return args;
+}
+
+function withRequiredToolAllowed(args: readonly string[], toolName: string): string[] {
+  const result: string[] = [];
+  let hasAllowlist = false;
+  let disablesAllTools = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--no-tools' || arg === '-nt') disablesAllTools = true;
+    if ((arg === '--tools' || arg === '-t') && index + 1 < args.length) {
+      const names = args[++index]!.split(',').map((name) => name.trim()).filter(Boolean);
+      if (!names.includes(toolName)) names.push(toolName);
+      result.push(arg, names.join(','));
+      hasAllowlist = true;
+      continue;
+    }
+    if ((arg === '--exclude-tools' || arg === '-xt') && index + 1 < args.length) {
+      const names = args[++index]!.split(',').map((name) => name.trim()).filter(Boolean);
+      const remaining = names.filter((name) => name !== toolName);
+      if (remaining.length > 0) result.push(arg, remaining.join(','));
+      continue;
+    }
+    result.push(arg);
+  }
+  if (disablesAllTools && !hasAllowlist) result.push('--tools', toolName);
+  return result;
 }
 
 function isPiRpcEvent(value: unknown): value is PiRpcEvent {
@@ -559,8 +675,26 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     if (!health.ok) throw new Error(health.message);
 
     const command = this.config.command ?? 'pi';
+    let artifactExtensionDirectory: string | undefined;
+    let artifactExtensionFile: string | undefined;
+    if (input.artifactReader !== undefined) {
+      artifactExtensionDirectory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-artifact-read-'));
+      artifactExtensionFile = path.join(artifactExtensionDirectory, 'extension.mjs');
+      try {
+        await writeFile(artifactExtensionFile, PI_ARTIFACT_READ_EXTENSION_SOURCE, { mode: 0o600 });
+      } catch (error) {
+        await rm(artifactExtensionDirectory, { recursive: true, force: true });
+        throw error;
+      }
+    }
+    const configuredArgs = withAmbientDiscoveryDisabled(this.config.commandArgs);
     const args = [
-      ...withAmbientDiscoveryDisabled(this.config.commandArgs),
+      ...(artifactExtensionFile === undefined
+        ? configuredArgs
+        : withRequiredToolAllowed(configuredArgs, PI_ARTIFACT_READ_TOOL)),
+      ...(artifactExtensionFile === undefined
+        ? []
+        : ['--extension', artifactExtensionFile]),
       '--mode',
       'rpc',
       '--provider',
@@ -571,11 +705,25 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       `agentknot-${input.jobId}`,
       ...(this.config.noSession === false ? [] : ['--no-session']),
     ];
-    const child = spawn(command, args, {
-      cwd: input.workspace,
-      env: environment,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = artifactExtensionFile === undefined
+        ? spawn(command, args, {
+            cwd: input.workspace,
+            env: environment,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          })
+        : spawn(command, args, {
+            cwd: input.workspace,
+            env: environment,
+            stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+          }) as ChildProcessWithoutNullStreams;
+    } catch (error) {
+      if (artifactExtensionDirectory !== undefined) {
+        await rm(artifactExtensionDirectory, { recursive: true, force: true });
+      }
+      throw error;
+    }
     const exit = waitForExit(child);
 
     let completed = false;
@@ -611,6 +759,11 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     // Abort or spawn failure can reject before the startup path reaches its await. Keep that
     // rejection observed while preserving it for the normal await path.
     void settled.catch(() => undefined);
+    const artifactProtocol = input.artifactReader === undefined
+      ? undefined
+      : bindArtifactReader(child, input.artifactReader, (error) => {
+          if (!completed) rejectSettled(error);
+        });
 
     const abort = () => {
       if (!completed) rejectSettled(input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted'));
@@ -673,10 +826,11 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           await emit('worker.tool.started', {
             toolCallId: event.toolCallId,
             toolName: event.toolName,
-            arguments: event.args,
+            ...(event.toolName === PI_ARTIFACT_READ_TOOL ? {} : { arguments: event.args }),
           });
           break;
         case 'tool_execution_update':
+          if (event.toolName === PI_ARTIFACT_READ_TOOL) break;
           await emit('worker.tool.updated', {
             toolCallId: event.toolCallId,
             toolName: event.toolName,
@@ -687,7 +841,9 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           await emit('worker.tool.completed', {
             toolCallId: event.toolCallId,
             toolName: event.toolName,
-            result: event.result,
+            result: event.toolName === PI_ARTIFACT_READ_TOOL
+              ? sanitizedArtifactToolResult(event.result)
+              : event.result,
             isError: event.isError,
           });
           break;
@@ -816,6 +972,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       const prompt = `${input.prompt}\n\n${WORKER_COMPLETION_REPORT_INSTRUCTION}`;
       child.stdin.write(rpcLine({ id: 'prompt', type: 'prompt', message: prompt }));
       await settled;
+      await artifactProtocol?.settleObserved();
       if (assistantError) throw new Error(assistantError);
       if (input.signal.aborted) {
         throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
@@ -842,8 +999,15 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       try {
         child.stdin.end();
       } finally {
-        await terminateChild(child, exit);
-        await awaitChildOutput(child, stdoutTask, stderrTask);
+        try {
+          await terminateChild(child, exit);
+          await awaitChildOutput(child, stdoutTask, stderrTask);
+        } finally {
+          await artifactProtocol?.close();
+          if (artifactExtensionDirectory !== undefined) {
+            await rm(artifactExtensionDirectory, { recursive: true, force: true });
+          }
+        }
       }
     }
   }

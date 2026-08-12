@@ -12,8 +12,8 @@ if (process.env.FAKE_PI_CWD_FILE) {
 if (process.env.FAKE_PI_PID_FILE) {
   writeFileSync(process.env.FAKE_PI_PID_FILE, String(process.pid));
 }
-
 const WORKER_COMPLETION_REPORT_MARKER = 'AGENTKNOT_WORKER_COMPLETION_REPORT_V1';
+const ARTIFACT_READ_PROTOCOL = 'agentknot-artifact-read-v1';
 
 let buffer = '';
 const controls = [];
@@ -84,7 +84,34 @@ function completionOutput(message) {
   }
 }
 
-function handle(command) {
+function requestArtifact() {
+  return new Promise((resolve, reject) => {
+    if (typeof process.send !== 'function') {
+      reject(new Error('Fixture artifact IPC is unavailable'));
+      return;
+    }
+    const requestId = 'fixture-artifact-read-1';
+    const onMessage = (message) => {
+      if (
+        message?.protocol !== ARTIFACT_READ_PROTOCOL ||
+        message?.requestId !== requestId
+      ) return;
+      process.off('message', onMessage);
+      resolve(message);
+    };
+    process.on('message', onMessage);
+    process.send(
+      { protocol: ARTIFACT_READ_PROTOCOL, schemaVersion: 1, action: 'read', requestId },
+      (error) => {
+        if (error === null) return;
+        process.off('message', onMessage);
+        reject(error);
+      }
+    );
+  });
+}
+
+async function handle(command) {
   if (command.type === 'steer' || command.type === 'follow_up') {
     controls.push(command);
     if (process.env.FAKE_PI_CONTROL_FILE) {
@@ -195,6 +222,41 @@ function handle(command) {
   send({ type: 'agent_start' });
   if (emitLifecycleFixture) send({ type: 'message_start', messageId: 'fixture-message' });
   sendTextDeltas(output.slice(0, splitAt));
+  const artifactToolMode = process.env.FAKE_PI_ARTIFACT_TOOL;
+  if (
+    artifactToolMode === 'true' ||
+    (
+      artifactToolMode === 'review' &&
+      command.message.startsWith("You are AgentKnot's independent advisory quality reviewer")
+    )
+  ) {
+    send({
+      type: 'tool_execution_start',
+      toolCallId: 'artifact-tool-1',
+      toolName: 'agentknot_artifact_read',
+      args: { injectedPath: '/must/not/persist', injectedContent: 'must/not/persist' },
+    });
+    const artifact = await requestArtifact();
+    if (process.env.FAKE_PI_ARTIFACT_CAPTURE_FILE) {
+      writeFileSync(process.env.FAKE_PI_ARTIFACT_CAPTURE_FILE, JSON.stringify(artifact));
+    }
+    send({
+      type: 'tool_execution_end',
+      toolCallId: 'artifact-tool-1',
+      toolName: 'agentknot_artifact_read',
+      result: {
+        content: [{ type: 'text', text: artifact.content }],
+        details: {
+          status: 'served',
+          sourceJobId: artifact.sourceJobId,
+          attempt: artifact.attempt,
+          sha256: artifact.sha256,
+          bytes: artifact.size,
+        },
+      },
+      isError: false,
+    });
+  }
   if (process.env.FAKE_PI_TOOLCALL_END === 'true') {
     send({
       type: 'message_update',
@@ -241,6 +303,9 @@ process.stdin.on('data', (chunk) => {
   while ((index = buffer.indexOf('\n')) !== -1) {
     const line = buffer.slice(0, index).replace(/\r$/, '');
     buffer = buffer.slice(index + 1);
-    if (line !== '') handle(JSON.parse(line));
+    if (line !== '') void handle(JSON.parse(line)).catch((error) => {
+      process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+      process.exitCode = 1;
+    });
   }
 });

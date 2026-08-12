@@ -11,6 +11,7 @@ import { DurableExecutionCoordinator } from './durable-execution.js';
 import { isTerminalStatus } from './execution-status.js';
 import { DurableEventSubscription } from './durable-subscription.js';
 import { MAX_ARTIFACT_VALIDATION_PATCH_BYTES } from './artifact-validation.js';
+import { artifactReadIdentity } from './artifact-read.js';
 import { assertJsonMetadata } from './metadata.js';
 import {
   MAX_PROMPT_BYTES,
@@ -993,24 +994,11 @@ export class OrchestrationService {
       await this.#skipQualityReview(record, 'artifact-too-large');
       return;
     }
-    const preview = await this.#jobs.previewArtifact(child.jobId, verified.artifact.attempt);
-    if (!preview || !preview.verification.valid || preview.content === null) {
-      await this.#skipQualityReview(record, 'artifact-invalid');
-      return;
-    }
-    if (preview.truncated) {
-      await this.#skipQualityReview(record, 'artifact-truncated');
-      return;
-    }
-    if (preview.content.trim() === '') {
-      await this.#skipQualityReview(record, 'artifact-empty');
-      return;
-    }
     const prompt = buildQualityReviewPrompt({
       parentGoal: record.request.prompt,
       subtask,
       childJob,
-      preview,
+      artifact: verified.artifact,
     });
     if (utf8Bytes(prompt) > MAX_PROMPT_BYTES) {
       await this.#skipQualityReview(record, 'handoff-too-large');
@@ -1023,6 +1011,11 @@ export class OrchestrationService {
         prompt,
         workspace: record.request.workspace,
         route: config.route,
+        artifactReadGrant: {
+          schemaVersion: 1,
+          sourceJobId: child.jobId,
+          artifact: artifactReadIdentity(verified.artifact),
+        },
         idempotencyKey: `${record.id}:reviewer:${child.jobId}:${plan.planHash}`,
         ...(record.request.source === undefined ? {} : { source: record.request.source }),
         metadata: {

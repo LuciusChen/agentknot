@@ -217,7 +217,15 @@ export class WorkspaceIsolationManager {
   }
 
   #managedRoot(): string {
-    return path.resolve(this.#baseDirectory, this.#config.directory ?? '.agentknot/worktrees');
+    const configured = this.#config.directory;
+    if (configured !== undefined && path.isAbsolute(configured)) return path.resolve(configured);
+    const namespace = createHash('sha256')
+      .update(this.#baseDirectory)
+      .update('\0')
+      .update(configured ?? '.agentknot/worktrees')
+      .digest('hex')
+      .slice(0, 24);
+    return path.join(os.tmpdir(), 'agentknot-worktrees', namespace);
   }
 
   get mode(): WorkspaceIsolationConfig['mode'] {

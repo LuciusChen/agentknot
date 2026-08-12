@@ -611,6 +611,130 @@ test('PiRpcWorkerAdapter normalizes Pi tool events', async () => {
   assert.equal(events.filter((event) => event.type === 'worker.tool.completed').length, 1);
 });
 
+test('PiRpcWorkerAdapter explicitly maps an artifact reader and never persists its content in tool events', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-artifact-reader-'));
+  const argvFile = path.join(directory, 'argv.json');
+  const captureFile = path.join(directory, 'capture.json');
+  const content = 'diff --git a/secret.ts b/secret.ts\n+private-context-marker\n';
+  const sha256 = 'a'.repeat(64);
+  let reads = 0;
+  const adapter = new PiRpcWorkerAdapter('pi', {
+    adapter: 'pi-rpc',
+    command: process.execPath,
+    commandArgs: [
+      fakePiFixture,
+      '--tools',
+      'read,grep',
+      '--exclude-tools',
+      'agentknot_artifact_read,write',
+    ],
+    noSession: true,
+    environment: {
+      FAKE_PI_ARGV_FILE: argvFile,
+      FAKE_PI_ARTIFACT_CAPTURE_FILE: captureFile,
+      FAKE_PI_ARTIFACT_TOOL: 'true',
+    },
+  });
+  const events: Array<{ type: JobEventType; data?: Record<string, unknown> }> = [];
+  try {
+    await adapter.run(
+      {
+        jobId: 'job_pi_artifact_reader',
+        prompt: 'review the authorized patch',
+        workspace: directory,
+        route,
+        attempt: 1,
+        signal: new AbortController().signal,
+        artifactReader: {
+          async read() {
+            reads += 1;
+            return {
+              sourceJobId: 'job_source',
+              artifact: {
+                kind: 'git-patch',
+                attempt: 2,
+                size: Buffer.byteLength(content, 'utf8'),
+                sha256,
+                baseCommit: 'b'.repeat(40),
+              },
+              content,
+            };
+          },
+        },
+      },
+      (type, data) => {
+        events.push(data === undefined ? { type } : { type, data });
+      }
+    );
+
+    assert.equal(reads, 1);
+    const args = await readFixtureArgv(argvFile);
+    const extensionIndex = args.lastIndexOf('--extension');
+    assert.ok(extensionIndex >= 0);
+    const extensionFile = args[extensionIndex + 1] ?? '';
+    assert.match(extensionFile, /agentknot-artifact-read-[^/]+\/extension\.mjs$/u);
+    const toolsIndex = args.lastIndexOf('--tools');
+    assert.equal(args[toolsIndex + 1], 'read,grep,agentknot_artifact_read');
+    const excludeToolsIndex = args.lastIndexOf('--exclude-tools');
+    assert.equal(args[excludeToolsIndex + 1], 'write');
+    const capture = recordValue(JSON.parse(await readFile(captureFile, 'utf8')));
+    assert.equal(capture.content, content);
+    await assert.rejects(stat(extensionFile), { code: 'ENOENT' });
+
+    const artifactStarted = events.find(
+      (event) => event.type === 'worker.tool.started' && event.data?.toolName === 'agentknot_artifact_read'
+    );
+    const artifactCompleted = events.find(
+      (event) => event.type === 'worker.tool.completed' && event.data?.toolName === 'agentknot_artifact_read'
+    );
+    assert.ok(artifactStarted);
+    assert.equal(artifactStarted.data?.arguments, undefined);
+    assert.deepEqual(artifactCompleted?.data?.result, {
+      status: 'served',
+      sourceJobId: 'job_source',
+      attempt: 2,
+      sha256,
+      bytes: Buffer.byteLength(content, 'utf8'),
+    });
+    assert.doesNotMatch(JSON.stringify(events), /private-context-marker|must\/not\/persist/u);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter does not consume an artifact grant before its tool is invoked', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-artifact-unused-'));
+  let reads = 0;
+  const adapter = new PiRpcWorkerAdapter('pi', {
+    adapter: 'pi-rpc',
+    command: process.execPath,
+    commandArgs: [fakePiFixture],
+    noSession: true,
+  });
+  try {
+    await adapter.run(
+      {
+        jobId: 'job_pi_artifact_unused',
+        prompt: 'do not call the artifact tool',
+        workspace: directory,
+        route,
+        attempt: 1,
+        signal: new AbortController().signal,
+        artifactReader: {
+          async read() {
+            reads += 1;
+            throw new Error('artifact reader must remain unused');
+          },
+        },
+      },
+      () => undefined
+    );
+    assert.equal(reads, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('PiRpcWorkerAdapter filters Pi lifecycle envelopes while counting every normal-run frame', async () => {
   const adapter = new PiRpcWorkerAdapter('pi', {
     adapter: 'pi-rpc',

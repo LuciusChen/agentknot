@@ -147,6 +147,7 @@ async function createDelegatedFixture(): Promise<CliFixture> {
                 summary: 'The patch matches the bounded acceptance criterion.',
                 findings: [],
               }),
+              FAKE_PI_ARTIFACT_TOOL: 'review',
               FAKE_PI_WRITE_REVIEWED_FILE: 'true',
             },
           },

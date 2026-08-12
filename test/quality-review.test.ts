@@ -7,7 +7,7 @@ import {
   buildQualityReviewPrompt,
   parseQualityReview,
 } from '../src/quality-review.js';
-import type { JobArtifactPreview, JobRecord } from '../src/types.js';
+import type { JobRecord } from '../src/types.js';
 
 const timestamp = '2026-08-10T00:00:00.000Z';
 const artifact = {
@@ -62,35 +62,6 @@ const childJob: JobRecord = {
     },
   },
 };
-const preview: JobArtifactPreview = {
-  jobId: childJob.id,
-  artifact,
-  format: 'git-patch',
-  encoding: 'utf-8',
-  content: 'diff --git a/src/example.ts b/src/example.ts\n+export const value = 1;\n',
-  truncated: false,
-  maxBytes: 1024,
-  verification: {
-    artifact,
-    file: {
-      exists: true,
-      expectedSize: 42,
-      actualSize: 42,
-      sizeMatches: true,
-      expectedSha256: artifact.sha256,
-      actualSha256: artifact.sha256,
-      sha256Matches: true,
-    },
-    source: {
-      repositoryAvailable: true,
-      expectedBaseCommit: artifact.baseCommit,
-      actualHead: artifact.baseCommit,
-      headMatchesBase: true,
-    },
-    issues: [],
-    valid: true,
-  },
-};
 const subtask: PlannedSubtask = {
   id: 'subtask_1',
   title: 'Implement example',
@@ -101,16 +72,17 @@ const subtask: PlannedSubtask = {
   executionPrompt: 'implement',
 };
 
-test('quality review prompt separates verified patch evidence from worker test claims', () => {
-  const prompt = buildQualityReviewPrompt({ parentGoal: 'Implement the example.', subtask, childJob, preview });
+test('quality review prompt separates the artifact grant from worker test claims and patch bytes', () => {
+  const prompt = buildQualityReviewPrompt({ parentGoal: 'Implement the example.', subtask, childJob, artifact });
   assert.match(prompt, /independent advisory quality reviewer/);
   assert.match(prompt, /only permitted text outside the review object/);
   assert.match(prompt, /Use repository inspection tools when available/);
   assert.match(prompt, /Do not edit files, apply the patch, execute repository commands/);
   assert.match(prompt, /Worker completion\/test claims \(unverified\)/);
   assert.match(prompt, /"command":"npm test","outcome":"passed"/);
-  assert.match(prompt, /Verified patch preview:/);
-  assert.match(prompt, /export const value = 1/);
+  assert.match(prompt, /adapter-provided artifact read/);
+  assert.doesNotMatch(prompt, /Verified patch preview:/);
+  assert.doesNotMatch(prompt, /export const value = 1/);
   assert.doesNotMatch(prompt, /untrusted prose/);
   assert.match(prompt, /upstream controller remains the final authority/);
 });

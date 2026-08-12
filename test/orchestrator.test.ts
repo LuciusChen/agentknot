@@ -11,7 +11,7 @@ import type { AgentKnotConfig } from '../src/config.js';
 import { JobControlPersistenceError, JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { FileJobStore, MemoryJobStore, SqliteJobStore } from '../src/store.js';
 import { WorkspaceIsolationManager } from '../src/workspace-isolation.js';
-import type { JobStore, WorkerAdapter, WorkerEventSink } from '../src/types.js';
+import type { JobArtifactReadGrant, JobStore, WorkerAdapter, WorkerEventSink } from '../src/types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -97,6 +97,100 @@ test('Orchestrator persists a complete evented job without knowing the controlle
     [1, 2, 3, 4, 5]
   );
   assert.equal((await store.get(job.id))?.status, 'succeeded');
+});
+
+test('Job admission rejects malformed artifact read authority before starting a worker', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-artifact-grant-invalid-'));
+  let runs = 0;
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() { return { ok: true, message: 'ready' }; },
+    async run() { runs += 1; return { output: 'unexpected' }; },
+  };
+  const orchestrator = new Orchestrator({
+    config,
+    store: new MemoryJobStore(),
+    adapters: new Map([['mock', adapter]]),
+  });
+
+  await assert.rejects(
+    orchestrator.start({
+      prompt: 'invalid grant',
+      workspace,
+      artifactReadGrant: {
+        schemaVersion: 1,
+        sourceJobId: 'job_source',
+        artifact: {
+          kind: 'git-patch',
+          attempt: 1,
+          size: 2,
+          sha256: 'a'.repeat(64),
+          baseCommit: 'b'.repeat(40),
+        },
+        maxBytes: 1,
+      } as unknown as JobArtifactReadGrant,
+    }),
+    /invalid fields; unknown: maxBytes/
+  );
+  assert.equal(runs, 0);
+});
+
+test('Artifact read grants fail closed without retry when the exact source Job is unavailable', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-artifact-grant-missing-'));
+  let runs = 0;
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() { return { ok: true, message: 'ready' }; },
+    async run(input) {
+      runs += 1;
+      try {
+        await input.artifactReader?.read();
+      } catch {
+        // A worker adapter cannot turn a refused capability read back into success.
+      }
+      return { output: 'suppressed refusal' };
+    },
+  };
+  const retryConfig = structuredClone(config);
+  retryConfig.routes.mock!.maxAttempts = 2;
+  const orchestrator = new Orchestrator({
+    config: retryConfig,
+    store: new MemoryJobStore(),
+    adapters: new Map([['mock', adapter]]),
+  });
+
+  const job = await orchestrator.run({
+    prompt: 'read exact missing evidence',
+    workspace,
+    artifactReadGrant: {
+      schemaVersion: 1,
+      sourceJobId: 'job_source_missing',
+      artifact: {
+        kind: 'git-patch',
+        attempt: 1,
+        size: 1,
+        sha256: 'a'.repeat(64),
+        baseCommit: 'b'.repeat(40),
+      },
+    },
+  });
+
+  assert.equal(job.status, 'failed');
+  assert.equal(job.error?.name, 'WorkerArtifactReadError');
+  assert.equal(job.error?.retryable, false);
+  assert.equal(runs, 1);
+  assert.deepEqual(
+    job.events.find((event) => event.type === 'worker.artifact.read')?.data,
+    {
+      sourceJobId: 'job_source_missing',
+      attempt: 1,
+      sha256: 'a'.repeat(64),
+      call: 1,
+      outcome: 'refused',
+      reason: 'source-job-missing',
+      bytes: 0,
+    }
+  );
 });
 
 test('Orchestrator fences route-neutral live control to one active attempt with durable receipts', async () => {

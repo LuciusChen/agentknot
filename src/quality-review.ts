@@ -5,7 +5,7 @@ import type {
 } from './orchestration-types.js';
 import { QUALITY_REVIEW_FINDING_SEVERITIES, QUALITY_REVIEW_VERDICTS } from './orchestration-types.js';
 import { utf8Bytes } from './record-limits.js';
-import type { JobArtifactPreview, JobRecord } from './types.js';
+import type { JobArtifact, JobRecord } from './types.js';
 
 export const MAX_QUALITY_REVIEW_PATCH_BYTES = 32 * 1024;
 export const MAX_QUALITY_REVIEW_OUTPUT_BYTES = 8 * 1024;
@@ -101,14 +101,14 @@ export function buildQualityReviewPrompt(input: {
   parentGoal: string;
   subtask: PlannedSubtask;
   childJob: JobRecord;
-  preview: JobArtifactPreview;
+  artifact: JobArtifact;
 }): string {
-  const artifact = input.preview.artifact;
+  const artifact = input.artifact;
   return [
     'You are AgentKnot\'s independent advisory quality reviewer in a fresh session.',
     'Prioritize whether the proposed patch correctly completes the requested task. Look for concrete behavioral defects, missed acceptance criteria, unsafe scope expansion, and material test gaps.',
     'Use repository inspection tools when available to read only task-relevant files and context needed to assess the supplied patch. Do not edit files, apply the patch, execute repository commands, repair code, delegate, converse with another agent, commit, push, merge, or promote artifacts.',
-    'The patch bytes and identity below were verified by AgentKnot. Worker completion and test reports are explicitly unverified claims; assess their adequacy rather than treating them as proof.',
+    'AgentKnot verified the exact patch identity below and granted this Job one bounded adapter-provided artifact read. Read that artifact before deciding. Worker completion and test reports are explicitly unverified claims; assess their adequacy rather than treating them as proof.',
     'Return the review object as JSON only with exactly this shape and no markdown fence or trailing prose. If a later transport instruction requires a marked completion-report suffix, put that suffix on the next line; it is the only permitted text outside the review object:',
     '{"schemaVersion":1,"verdict":"accept|changes-requested|uncertain","summary":"concise quality assessment","findings":[{"severity":"low|medium|high","message":"specific issue","evidence":"patch or requirement evidence"}]}',
     'Use changes-requested only with at least one concrete finding. Use uncertain when the bounded evidence cannot support acceptance or a specific rejection. This verdict is advisory; the upstream controller remains the final authority.',
@@ -135,8 +135,5 @@ export function buildQualityReviewPrompt(input: {
     '',
     'Worker completion/test claims (unverified):',
     workerClaims(input.childJob),
-    '',
-    'Verified patch preview:',
-    input.preview.content ?? '',
   ].join('\n');
 }

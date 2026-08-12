@@ -117,6 +117,39 @@ test('worktree jobs leave the source unchanged and capture tracked/untracked/bin
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
 });
 
+test('relative managed-worktree configuration cannot nest an external target under the host project', async () => {
+  const paths = await repository();
+  const hostProject = await mkdtemp(path.join(os.tmpdir(), 'agentknot-host-project-'));
+  await writeFile(path.join(hostProject, 'package.json'), '{"name":"wrong-ancestor"}\n');
+  let isolatedWorkspace = '';
+  const relativeConfig = config(paths.storage, '.agentknot/worktrees');
+  const adapter = new (class extends TestAdapter {
+    async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+      isolatedWorkspace = input.workspace;
+      return { output: 'isolated' };
+    }
+  })();
+  const orchestrator = new Orchestrator({
+    config: relativeConfig,
+    baseDirectory: hostProject,
+    store: new MemoryJobStore(),
+    adapters: new Map([['test', adapter]]),
+  });
+
+  try {
+    const job = await orchestrator.run({ prompt: 'inspect isolation', workspace: paths.root });
+    assert.equal(job.status, 'succeeded');
+    assert.equal(path.relative(hostProject, isolatedWorkspace).startsWith('..'), true);
+    assert.equal(isolatedWorkspace.startsWith(path.join(os.tmpdir(), 'agentknot-worktrees')), true);
+  } finally {
+    await Promise.all(
+      [paths.root, paths.worktreeDirectory, paths.storage, hostProject].map((directory) =>
+        rm(directory, { recursive: true, force: true })
+      )
+    );
+  }
+});
+
 test('sparse-checkout jobs ignore unmaterialized tracked files and capture only worker deltas', async () => {
   const paths = await repository();
   await mkdir(path.join(paths.root, 'outside'));

@@ -189,3 +189,5 @@ Incident records should also include severity, user/controller impact, immediate
 | [0075](./0075-bounded-mcp-wait-and-resume-gate.md) | Incident / Architecture Decision | Resolved / Accepted | Bound MCP waiting without controller-session ownership |
 | [0076](./0076-durable-capacity-and-live-control-fences.md) | Incident / Architecture Decision | Resolved / Accepted | Fence shared Job capacity and live-control settlement |
 | [0077](./0077-task-context-reference-manifest.md) | Architecture Decision | Accepted / Implemented | Extend the bounded task context with metadata-only references |
+| [0078](./0078-exact-artifact-read-grant.md) | Architecture Decision | Accepted / Implemented | Authorize one exact artifact read without turning references into capabilities |
+| [0079](./0079-external-worktree-ancestor-isolation.md) | Incident / Architecture Decision | Resolved / Accepted | Keep external target worktrees outside the host project ancestry |

@@ -3,6 +3,11 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { AgentKnotConfig, ArtifactValidationConfig } from './config.js';
+import {
+  artifactIdentityMatches,
+  artifactReadIdentity,
+  validateJobArtifactReadGrant,
+} from './artifact-read.js';
 import { canonicalJsonSha256 } from './canonical-json.js';
 import { resolveDelegationConfig, resolveRoute } from './config.js';
 import type { ArtifactValidationExecution } from './artifact-validation.js';
@@ -59,6 +64,7 @@ import type {
   RouteDiagnostic,
   StartJobResult,
   WorkerAdapter,
+  WorkerArtifactReader,
   WorkerControlCapabilities,
   WorkerControlReceipt,
   WorkerControlRequest,
@@ -107,6 +113,14 @@ class WorkerTaskBlockedError extends Error {
 
 class WorkerReadOnlyTaskViolationError extends Error {
   readonly name = 'WorkerReadOnlyTaskViolationError';
+}
+
+class WorkerArtifactReadError extends Error {
+  readonly name = 'WorkerArtifactReadError';
+}
+
+class WorkerArtifactReadUnusedError extends Error {
+  readonly name = 'WorkerArtifactReadUnusedError';
 }
 
 export const ROUTE_DIAGNOSTIC_TIMEOUT_MS = 30_000;
@@ -232,6 +246,9 @@ function normalizeRequest(request: JobRequest): JobRequest {
     }
   }
   if (request.metadata !== undefined) assertJsonMetadata(request.metadata);
+  const artifactReadGrant = request.artifactReadGrant === undefined
+    ? undefined
+    : validateJobArtifactReadGrant(request.artifactReadGrant);
   if (request.idempotencyKey !== undefined) {
     if (typeof request.idempotencyKey !== 'string' || request.idempotencyKey.trim() === '') {
       throw new Error('Job idempotencyKey must be a non-empty string');
@@ -246,6 +263,7 @@ function normalizeRequest(request: JobRequest): JobRequest {
     ...(request.source === undefined ? {} : { source: request.source }),
     ...(request.callbackUrl === undefined ? {} : { callbackUrl: request.callbackUrl }),
     ...(request.metadata === undefined ? {} : { metadata: structuredClone(request.metadata) }),
+    ...(artifactReadGrant === undefined ? {} : { artifactReadGrant }),
     ...(request.idempotencyKey === undefined
       ? {}
       : { idempotencyKey: request.idempotencyKey }),
@@ -870,6 +888,79 @@ export class Orchestrator {
       format: 'git-patch',
       encoding: 'utf-8',
       ...preview,
+    };
+  }
+
+  #artifactReader(
+    job: JobRecord,
+    emit: WorkerEventSink
+  ): {
+    port: WorkerArtifactReader;
+    state: () => { served: boolean; refused: boolean };
+  } | undefined {
+    const grant = job.request.artifactReadGrant;
+    if (grant === undefined) return undefined;
+    let reads = 0;
+    let served = false;
+    let refused = false;
+    const evidence = {
+      sourceJobId: grant.sourceJobId,
+      attempt: grant.artifact.attempt,
+      sha256: grant.artifact.sha256,
+    };
+    const refuse = async (reason: string): Promise<never> => {
+      refused = true;
+      await emit('worker.artifact.read', {
+        ...evidence,
+        call: reads,
+        outcome: 'refused',
+        reason,
+        bytes: 0,
+      });
+      throw new WorkerArtifactReadError(`Artifact read refused: ${reason}`);
+    };
+    return {
+      state: () => ({ served, refused }),
+      port: {
+        read: async () => {
+          reads += 1;
+          if (reads > 1) return refuse('budget-exhausted');
+          if (grant.sourceJobId === job.id) return refuse('self-reference');
+          const source = await this.#store.get(grant.sourceJobId);
+          if (source === undefined) return refuse('source-job-missing');
+          if (!isTerminalStatus(source.status)) return refuse('source-job-not-terminal');
+          if (path.resolve(source.request.workspace) !== path.resolve(job.request.workspace)) {
+            return refuse('workspace-mismatch');
+          }
+          const artifact = (source.artifacts ?? []).find(
+            (candidate) => candidate.attempt === grant.artifact.attempt
+          );
+          if (artifact === undefined) return refuse('artifact-missing');
+          if (!artifactIdentityMatches(grant.artifact, artifact)) {
+            return refuse('identity-mismatch');
+          }
+          const preview = await this.previewArtifact(grant.sourceJobId, artifact.attempt);
+          if (preview === undefined || preview.content === null) return refuse('artifact-unavailable');
+          if (!preview.verification.valid) {
+            return refuse(`stale-reference:${preview.verification.issues.join(',') || 'invalid'}`);
+          }
+          if (preview.truncated || Buffer.byteLength(preview.content, 'utf8') !== artifact.size) {
+            return refuse('artifact-not-exact');
+          }
+          await emit('worker.artifact.read', {
+            ...evidence,
+            call: reads,
+            outcome: 'served',
+            bytes: artifact.size,
+          });
+          served = true;
+          return {
+            sourceJobId: grant.sourceJobId,
+            artifact: artifactReadIdentity(artifact),
+            content: preview.content,
+          };
+        },
+      },
     };
   }
 
@@ -1629,6 +1720,7 @@ export class Orchestrator {
             ? attemptController.signal.reason
             : new Error('Job cancelled');
         }
+        const artifactReader = this.#artifactReader(job, workerEmit);
         result = await adapter.run(
           {
             jobId: job.id,
@@ -1638,9 +1730,23 @@ export class Orchestrator {
             attempt,
             signal: attemptController.signal,
             control: controlChannel,
+            ...(artifactReader === undefined ? {} : { artifactReader: artifactReader.port }),
           },
           workerEmit
         );
+        if (artifactReader !== undefined) {
+          const artifactReadState = artifactReader.state();
+          if (artifactReadState.refused) {
+            throw new WorkerArtifactReadError(
+              'Worker adapter completed after an artifact read was refused'
+            );
+          }
+          if (!artifactReadState.served) {
+            throw new WorkerArtifactReadUnusedError(
+              'Worker adapter completed without consuming its required artifact read grant'
+            );
+          }
+        }
         if (attemptController.signal.aborted) {
           throw attemptController.signal.reason instanceof Error
             ? attemptController.signal.reason
@@ -1763,6 +1869,8 @@ export class Orchestrator {
         !(failure instanceof ArtifactSizeLimitError) &&
         !(failure instanceof WorkerToolCallLimitError) &&
         !(failure instanceof WorkerReadOnlyTaskViolationError) &&
+        !(failure instanceof WorkerArtifactReadError) &&
+        !(failure instanceof WorkerArtifactReadUnusedError) &&
         !jobSignal.aborted &&
         attempt < job.route.maxAttempts;
       job.error = { ...details, attempt, retryable };

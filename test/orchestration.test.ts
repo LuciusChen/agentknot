@@ -103,6 +103,7 @@ class PlannerAndWorkerAdapter implements WorkerAdapter {
     try {
       if (input.route.name.startsWith('reviewer')) {
         this.reviewerRuns += 1;
+        await input.artifactReader?.read();
         return {
           output: JSON.stringify({
             schemaVersion: 1,
@@ -150,6 +151,7 @@ class ArtifactWritingAdapter implements WorkerAdapter {
     await emit('worker.started', { route: input.route.name });
     if (input.route.name.startsWith('reviewer')) {
       this.reviewerRuns += 1;
+      await input.artifactReader?.read();
       return { output: this.reviewerOutput };
     }
     for (const [prompt, changedPaths] of this.pathsByPrompt) {
@@ -182,6 +184,7 @@ class BlockingReviewerAdapter implements WorkerAdapter {
       await writeFile(path.join(input.workspace, 'reviewed.ts'), 'export const reviewed = true;\n');
       return { output: 'implemented reviewed.ts' };
     }
+    await input.artifactReader?.read();
     this.reviewerJobId = input.jobId;
     this.#reviewerStartedResolve?.();
     await new Promise<void>((_resolve, reject) => {
@@ -215,6 +218,7 @@ class CoordinatedReviewerAdapter implements WorkerAdapter {
       await writeFile(path.join(input.workspace, 'reviewed.ts'), 'export const reviewed = true;\n');
       return { output: 'implemented reviewed.ts' };
     }
+    await input.artifactReader?.read();
     await writeFile(this.reviewerMarker, 'started\n');
     let validationStarted = false;
     for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -928,7 +932,17 @@ test('OrchestrationService runs one advisory reviewer after one valid low-comple
   assert.equal(reviewer.request.route, 'reviewer');
   assert.equal(reviewer.request.source, 'controller-test');
   assert.match(reviewer.request.prompt, /Worker completion\/test claims \(unverified\)/);
-  assert.match(reviewer.request.prompt, /diff --git a\/reviewed\.ts b\/reviewed\.ts/);
+  assert.doesNotMatch(reviewer.request.prompt, /diff --git a\/reviewed\.ts b\/reviewed\.ts/);
+  assert.equal(reviewer.request.artifactReadGrant?.sourceJobId, record.children[0]?.jobId);
+  assert.equal(
+    reviewer.events.some(
+      (event) =>
+        event.type === 'worker.artifact.read' &&
+        event.data?.outcome === 'served' &&
+        event.data?.bytes === reviewer.request.artifactReadGrant?.artifact.size
+    ),
+    true
+  );
   const provenance = reviewer.request.metadata?.agentknotDelegation as Record<string, unknown>;
   assert.equal(provenance.role, 'reviewer');
   assert.equal(provenance.depth, 1);

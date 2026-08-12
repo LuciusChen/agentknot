@@ -133,8 +133,26 @@ export interface JobRequest {
   source?: string;
   callbackUrl?: string;
   metadata?: Record<string, unknown>;
+  /** Exact durable authority for one attempt-scoped read of a recorded AgentKnot artifact. */
+  artifactReadGrant?: JobArtifactReadGrant;
   /** Opaque caller key for exactly-once admission of one canonical request. */
   idempotencyKey?: string;
+}
+
+export interface JobArtifactReadIdentity {
+  kind: 'git-patch';
+  attempt: number;
+  size: number;
+  sha256: string;
+  baseCommit: string;
+  baseTree?: string;
+}
+
+/** Contains logical evidence only; filesystem paths and artifact bytes are never authority. */
+export interface JobArtifactReadGrant {
+  schemaVersion: 1;
+  sourceJobId: string;
+  artifact: JobArtifactReadIdentity;
 }
 
 export interface ResolvedRoute {
@@ -195,6 +213,7 @@ export type JobEventType =
   | 'worker.tool.completed'
   | 'worker.retry.started'
   | 'worker.retry.completed'
+  | 'worker.artifact.read'
   | 'worker.raw'
   | 'worker.stderr';
 
@@ -336,6 +355,18 @@ export interface WorkerRunInput {
   signal: AbortSignal;
   /** Attempt-scoped live control. Omitted when the caller does not provide a control channel. */
   control?: WorkerControlPort;
+  /** Attempt-scoped exact artifact reader. Adapters must not expose paths or broader storage. */
+  artifactReader?: WorkerArtifactReader;
+}
+
+export interface WorkerArtifactReadResult {
+  sourceJobId: string;
+  artifact: JobArtifactReadIdentity;
+  content: string;
+}
+
+export interface WorkerArtifactReader {
+  read(): Promise<WorkerArtifactReadResult>;
 }
 
 export const WORKER_CONTROL_KINDS = ['steer', 'follow-up'] as const;
