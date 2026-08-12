@@ -151,6 +151,151 @@ test('durable admission commits the record, idempotency identity, and first leas
   });
 });
 
+test('durable capacity admission is FIFO across independent store instances', async () => {
+  await withStores(async (first, second) => {
+    const start = new Date('2026-08-11T00:00:00.000Z');
+    const admittedA = await first.admit(fixture('job_capacity_a'), {
+      ownerId: 'runtime-a',
+      ttlMs: 1_000,
+      capacityLimit: 1,
+      now: start,
+    });
+    const admittedB = await second.admit(fixture('job_capacity_b'), {
+      ownerId: 'runtime-b',
+      ttlMs: 1_000,
+      capacityLimit: 1,
+      now: new Date(start.getTime() + 1),
+    });
+    const admittedC = await first.admit(fixture('job_capacity_c'), {
+      ownerId: 'runtime-c',
+      ttlMs: 1_000,
+      capacityLimit: 1,
+      now: new Date(start.getTime() + 2),
+    });
+    assert.equal(admittedA.created, true);
+    assert.equal(admittedB.created, true);
+    assert.equal(admittedC.created, true);
+    if (!admittedA.created || !admittedB.created || !admittedC.created) {
+      assert.fail('expected three newly admitted records');
+    }
+
+    assert.equal(
+      await first.tryAcquireCapacity(admittedA.lease, 1, new Date(start.getTime() + 3)),
+      'acquired'
+    );
+    assert.equal(
+      await second.tryAcquireCapacity(admittedB.lease, 1, new Date(start.getTime() + 3)),
+      'waiting'
+    );
+    assert.equal(
+      await first.tryAcquireCapacity(admittedC.lease, 1, new Date(start.getTime() + 3)),
+      'waiting'
+    );
+
+    assert.equal(await first.releaseCapacity(admittedA.lease), true);
+    assert.equal(
+      await first.tryAcquireCapacity(admittedC.lease, 1, new Date(start.getTime() + 4)),
+      'waiting'
+    );
+    assert.equal(
+      await second.tryAcquireCapacity(admittedB.lease, 1, new Date(start.getTime() + 4)),
+      'acquired'
+    );
+    assert.equal(await second.releaseCapacity(admittedB.lease), true);
+    assert.equal(
+      await first.tryAcquireCapacity(admittedC.lease, 1, new Date(start.getTime() + 5)),
+      'acquired'
+    );
+  });
+});
+
+test('durable capacity reclaims a crashed holder after its execution lease expires', async () => {
+  await withStores(async (first, second) => {
+    const start = new Date('2026-08-11T00:00:00.000Z');
+    const holder = await first.admit(fixture('job_capacity_holder'), {
+      ownerId: 'runtime-holder',
+      ttlMs: 100,
+      capacityLimit: 1,
+      now: start,
+    });
+    const waiter = await second.admit(fixture('job_capacity_waiter'), {
+      ownerId: 'runtime-waiter',
+      ttlMs: 1_000,
+      capacityLimit: 1,
+      now: start,
+    });
+    assert.equal(holder.created, true);
+    assert.equal(waiter.created, true);
+    if (!holder.created || !waiter.created) assert.fail('expected newly admitted records');
+    assert.equal(await first.tryAcquireCapacity(holder.lease, 1, start), 'acquired');
+    assert.equal(await second.tryAcquireCapacity(waiter.lease, 1, start), 'waiting');
+
+    assert.equal(
+      await second.tryAcquireCapacity(waiter.lease, 1, new Date(start.getTime() + 100)),
+      'acquired'
+    );
+    assert.equal(await first.releaseCapacity(holder.lease), false);
+  });
+});
+
+test('durable capacity keeps the reclaimed successor row fenced against the stale lease', async () => {
+  await withStores(async (first, second) => {
+    const start = new Date('2026-08-11T00:00:00.000Z');
+    const holder = await first.admit(fixture('job_capacity_fenced_holder'), {
+      ownerId: 'runtime-holder',
+      ttlMs: 100,
+      capacityLimit: 1,
+      now: start,
+    });
+    const waiter = await second.admit(fixture('job_capacity_fenced_waiter'), {
+      ownerId: 'runtime-waiter',
+      ttlMs: 1_000,
+      capacityLimit: 1,
+      now: start,
+    });
+    assert.equal(holder.created, true);
+    assert.equal(waiter.created, true);
+    if (!holder.created || !waiter.created) assert.fail('expected newly admitted records');
+    assert.equal(holder.lease.fence, 1);
+    assert.equal(await first.tryAcquireCapacity(holder.lease, 1, start), 'acquired');
+    assert.equal(await second.tryAcquireCapacity(waiter.lease, 1, start), 'waiting');
+
+    const reclaimed = await second.claimLease(holder.record.id, {
+      ownerId: 'runtime-holder-2',
+      ttlMs: 1_000,
+      now: new Date(start.getTime() + 100),
+    });
+    assert.ok(reclaimed);
+    assert.equal(reclaimed.fence, 2);
+
+    assert.equal(
+      await second.tryAcquireCapacity(waiter.lease, 1, new Date(start.getTime() + 100)),
+      'waiting',
+      'lease reclaim must atomically preserve the reclaimed holder capacity row'
+    );
+    assert.equal(
+      await first.tryAcquireCapacity(reclaimed, 1, new Date(start.getTime() + 100)),
+      'acquired'
+    );
+    assert.equal(
+      await second.tryAcquireCapacity(waiter.lease, 1, new Date(start.getTime() + 100)),
+      'waiting'
+    );
+
+    assert.equal(await first.releaseCapacity(holder.lease), false);
+    assert.equal(
+      await second.tryAcquireCapacity(waiter.lease, 1, new Date(start.getTime() + 101)),
+      'waiting'
+    );
+
+    assert.equal(await second.releaseCapacity(reclaimed), true);
+    assert.equal(
+      await first.tryAcquireCapacity(waiter.lease, 1, new Date(start.getTime() + 102)),
+      'acquired'
+    );
+  });
+});
+
 test('durable leases fence stale owners and can be reclaimed only after expiry', async () => {
   await withStores(async (first, second) => {
     await first.create(fixture());

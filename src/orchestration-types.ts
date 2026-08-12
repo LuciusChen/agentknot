@@ -24,6 +24,12 @@ export const ORCHESTRATION_DELEGATION_OVERRIDES = ['inherit', 'never', 'suggest'
 
 export type OrchestrationDelegationOverride = (typeof ORCHESTRATION_DELEGATION_OVERRIDES)[number];
 
+export function isOrchestrationDelegationOverride(
+  value: unknown
+): value is OrchestrationDelegationOverride {
+  return ORCHESTRATION_DELEGATION_OVERRIDES.includes(value as OrchestrationDelegationOverride);
+}
+
 export interface OrchestrationRequest {
   prompt: string;
   workspace: string;
@@ -68,6 +74,8 @@ export interface AssessedSubtask {
   kind: string;
   prompt: string;
   acceptanceCriteria: string[];
+  /** Optional controller-authored hard stop for normalized tool executions in this subtask. */
+  maxToolCalls?: number;
 }
 
 /** Bounded controller-authored navigation context shared by every child in one handoff. */

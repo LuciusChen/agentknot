@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { DelegationConfig, DelegationMode, RouteSelectionConfig } from './config.js';
+import { validateMaxToolCalls } from './types.js';
 import type {
   AssessedSubtask,
   DelegationPlan,
@@ -132,7 +133,21 @@ export function validateTaskAssessment(value: unknown): TaskAssessment {
   const subtasks: AssessedSubtask[] = value.subtasks.map((item, index) => {
     const subtaskLabel = `${label} subtasks[${index}]`;
     assertRecord(item, subtaskLabel);
-    assertExactKeys(item, ['title', 'kind', 'prompt', 'acceptanceCriteria'], subtaskLabel);
+    assertExactKeys(
+      item,
+      [
+        'title',
+        'kind',
+        'prompt',
+        'acceptanceCriteria',
+        ...(Object.hasOwn(item, 'maxToolCalls') ? ['maxToolCalls'] : []),
+      ],
+      subtaskLabel
+    );
+    const maxToolCalls = validateMaxToolCalls(
+      item.maxToolCalls,
+      `${subtaskLabel}.maxToolCalls`
+    );
     const acceptanceCriteria = stringArray(
       item.acceptanceCriteria,
       `${subtaskLabel}.acceptanceCriteria`
@@ -148,6 +163,7 @@ export function validateTaskAssessment(value: unknown): TaskAssessment {
       kind: boundedString(item.kind, `${subtaskLabel}.kind`, 100),
       prompt: boundedString(item.prompt, `${subtaskLabel}.prompt`, 8_000),
       acceptanceCriteria,
+      ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
     };
   });
 
@@ -212,6 +228,9 @@ function executionPrompt(request: OrchestrationRequest, subtask: AssessedSubtask
     '',
     `Subtask: ${subtask.title}`,
     subtask.prompt,
+    ...(subtask.maxToolCalls === undefined
+      ? []
+      : [`Hard execution budget: at most ${subtask.maxToolCalls} normalized tool calls.`]),
     '',
     'Acceptance criteria:',
     ...subtask.acceptanceCriteria.map((criterion) => `- ${criterion}`),
@@ -303,6 +322,29 @@ export function composeDelegationPlan(
   const delegatedKinds = new Set(config.policy.delegate);
   const upstreamKinds = new Set(config.policy.keepUpstream);
   const forceEligibility = request.delegation === 'force';
+  const keptUpstream = [
+    ...new Set(
+      assessment.subtasks
+        .filter((subtask) => upstreamKinds.has(subtask.kind))
+        .map((subtask) => subtask.kind)
+    ),
+  ];
+  const notDelegable = [
+    ...new Set(
+      assessment.subtasks
+        .filter((subtask) => !upstreamKinds.has(subtask.kind))
+        .filter((subtask) => !forceEligibility && !delegatedKinds.has(subtask.kind))
+        .map((subtask) => subtask.kind)
+    ),
+  ];
+  const rejectionEvidence = [
+    ...(keptUpstream.length === 0 ? [] : [`keep-upstream=[${keptUpstream.join(', ')}]`]),
+    ...(notDelegable.length === 0 ? [] : [`not-delegable=[${notDelegable.join(', ')}]`]),
+  ];
+  const reasoning =
+    rejectionEvidence.length === 0
+      ? assessment.reasoning
+      : `${assessment.reasoning} Rejected task kinds: ${rejectionEvidence.join('; ')}.`;
   const eligible = assessment.subtasks
     .filter((subtask) => !upstreamKinds.has(subtask.kind))
     .filter((subtask) => forceEligibility || delegatedKinds.has(subtask.kind))
@@ -334,7 +376,7 @@ export function composeDelegationPlan(
       mode,
       decision: 'upstream',
       willDispatch: false,
-      reasoning: `${assessment.reasoning} No proposed subtask passed the deterministic delegation policy.`,
+      reasoning: `${reasoning} No proposed subtask passed the deterministic delegation policy.`,
       assessment,
       subtasks: [],
     });
@@ -346,7 +388,7 @@ export function composeDelegationPlan(
     mode,
     decision,
     willDispatch: mode === 'auto',
-    reasoning: assessment.reasoning,
+    reasoning,
     assessment,
     subtasks: eligible,
   });

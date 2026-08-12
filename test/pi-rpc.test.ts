@@ -15,6 +15,7 @@ import {
   WORKER_COMPLETION_REPORT_MARKER,
 } from '../src/worker-completion-report.js';
 import { MemoryJobStore } from '../src/store.js';
+import { AttemptWorkerControlChannel } from '../src/worker-control.js';
 import type { JobEventType, ResolvedRoute } from '../src/types.js';
 import { registerWorkerAdapterConformanceTests } from './worker-adapter-conformance.js';
 
@@ -656,6 +657,156 @@ test('PiRpcWorkerAdapter filters Pi lifecycle envelopes while counting every nor
     ),
     false
   );
+});
+
+test('PiRpcWorkerAdapter coalesces tiny text frames without changing output', async () => {
+  const humanOutput = 'x'.repeat(2_500);
+  const adapter = new PiRpcWorkerAdapter('pi', {
+    adapter: 'pi-rpc',
+    command: process.execPath,
+    commandArgs: [fakePiFixture],
+    noSession: true,
+    environment: {
+      FAKE_PI_HUMAN_OUTPUT: humanOutput,
+      FAKE_PI_TEXT_DELTA_SIZE: '1',
+    },
+  });
+  const deltas: string[] = [];
+
+  const result = await adapter.run(
+    {
+      jobId: 'job_pi_text_coalescing',
+      prompt: 'do work',
+      workspace: process.cwd(),
+      route,
+      attempt: 1,
+      signal: new AbortController().signal,
+    },
+    (type, data) => {
+      if (type === 'worker.text.delta' && typeof data?.delta === 'string') {
+        deltas.push(data.delta);
+      }
+    }
+  );
+
+  assert.equal(result.output, humanOutput);
+  assert.ok(Number(recordValue(result.metadata).rawEventCount) > 2_500);
+  assert.ok(deltas.length >= 2 && deltas.length <= 5, String(deltas.length));
+  assert.ok(deltas.join('').startsWith(humanOutput));
+});
+
+test('PiRpcWorkerAdapter binds steer and follow-up to the current run-owned stdin', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-control-'));
+  const controlFile = path.join(directory, 'controls.json');
+  const channel = new AttemptWorkerControlChannel();
+  const adapter = new PiRpcWorkerAdapter('pi', {
+    adapter: 'pi-rpc',
+    command: process.execPath,
+    commandArgs: [fakePiFixture],
+    noSession: true,
+    environment: {
+      FAKE_PI_CONTROL_FILE: controlFile,
+      FAKE_PI_SETTLE_DELAY_MS: '500',
+    },
+  });
+  try {
+    const run = adapter.run({
+      jobId: 'job_pi_control',
+      prompt: 'stay active for control',
+      workspace: process.cwd(),
+      route,
+      attempt: 1,
+      signal: new AbortController().signal,
+      control: channel,
+    }, () => undefined);
+    for (let index = 0; index < 100 && !channel.ready; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(channel.ready, true);
+    assert.deepEqual(await channel.deliver({
+      controlId: 'steer-1', kind: 'steer', message: 'Narrow the current check.',
+    }), { delivered: true, uncertain: false, result: { accepted: true } });
+    assert.deepEqual(await channel.deliver({
+      controlId: 'follow-1', kind: 'follow-up', message: 'Then report the evidence.',
+    }), { delivered: true, uncertain: false, result: { accepted: true } });
+    await run;
+
+    const commands = JSON.parse(await readFile(controlFile, 'utf8')) as Array<Record<string, unknown>>;
+    assert.deepEqual(commands.map((command) => [command.type, command.message]), [
+      ['steer', 'Narrow the current check.'],
+      ['follow_up', 'Then report the evidence.'],
+    ]);
+    assert.equal(commands.some((command) => command.id === 'steer-1' || command.id === 'follow-1'), false);
+    assert.equal(channel.ready, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter returns command rejection without failing the worker run', async () => {
+  const channel = new AttemptWorkerControlChannel();
+  const adapter = new PiRpcWorkerAdapter('pi', {
+    adapter: 'pi-rpc',
+    command: process.execPath,
+    commandArgs: [fakePiFixture],
+    noSession: true,
+    environment: { FAKE_PI_CONTROL_MODE: 'reject', FAKE_PI_SETTLE_DELAY_MS: '300' },
+  });
+  const run = adapter.run({
+    jobId: 'job_pi_control_rejected',
+    prompt: 'stay active for rejected control',
+    workspace: process.cwd(),
+    route,
+    attempt: 1,
+    signal: new AbortController().signal,
+    control: channel,
+  }, () => undefined);
+  for (let index = 0; index < 100 && !channel.ready; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.deepEqual(await channel.deliver({
+    controlId: 'rejected', kind: 'steer', message: 'Reject this fixture command.',
+  }), {
+    delivered: true,
+    uncertain: false,
+    result: { accepted: false, reason: 'worker-control-command-rejected' },
+  });
+  assert.equal((await run).output, 'fake result');
+});
+
+test('PiRpcWorkerAdapter quarantines a rejected control response that arrives after timeout', async () => {
+  const channel = new AttemptWorkerControlChannel(6_000);
+  const adapter = new PiRpcWorkerAdapter('pi', {
+    adapter: 'pi-rpc',
+    command: process.execPath,
+    commandArgs: [fakePiFixture],
+    noSession: true,
+    environment: {
+      FAKE_PI_CONTROL_MODE: 'reject',
+      FAKE_PI_CONTROL_RESPONSE_DELAY_MS: '5100',
+      FAKE_PI_SETTLE_DELAY_MS: '5300',
+    },
+  });
+  const run = adapter.run({
+    jobId: 'job_pi_control_late_rejection',
+    prompt: 'stay active past the bounded control wait',
+    workspace: process.cwd(),
+    route,
+    attempt: 1,
+    signal: new AbortController().signal,
+    control: channel,
+  }, () => undefined);
+  for (let index = 0; index < 100 && !channel.ready; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.deepEqual(await channel.deliver({
+    controlId: 'late-rejection', kind: 'steer', message: 'This response will arrive too late.',
+  }), {
+    delivered: true,
+    uncertain: false,
+    result: { accepted: false, reason: 'worker-control-response-timeout' },
+  });
+  assert.equal((await run).output, 'fake result');
 });
 
 test('PiRpcWorkerAdapter isolates ambient discovery for normal runs while preserving explicit resources and context', async () => {

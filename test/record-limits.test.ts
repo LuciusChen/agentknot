@@ -209,6 +209,39 @@ test('worker event payloads and event count are bounded with one durable truncat
   });
 });
 
+test('oversized tool events retain bounded activity identity while replacing payload content', async () => {
+  const directory = await workspace();
+  const job = await orchestrator(async (_input, emit) => {
+    await emit('worker.tool.started', {
+      toolCallId: 'tool-large',
+      toolName: 'read',
+      arguments: { path: 'private/'.repeat(MAX_EVENT_DATA_BYTES) },
+    });
+    await emit('worker.tool.completed', {
+      toolCallId: 'tool-large',
+      toolName: 'read',
+      result: { content: 'private-result'.repeat(MAX_EVENT_DATA_BYTES) },
+      isError: false,
+    });
+    return { output: 'ok' };
+  }).run({ prompt: 'bound tool events', workspace: directory });
+
+  const toolEvents = job.events.filter((event) => event.type.startsWith('worker.tool.'));
+  assert.equal(toolEvents.length, 2);
+  for (const event of toolEvents) {
+    assert.equal(event.data?.toolCallId, 'tool-large');
+    assert.equal(event.data?.toolName, 'read');
+    const marker = event.data?.agentknotRecordLimit as Record<string, unknown>;
+    assert.equal(marker.field, 'event.data');
+    assert.equal(marker.action, 'replaced');
+    assert.ok(Number(marker.originalBytes) > MAX_EVENT_DATA_BYTES);
+    assert.equal(marker.maxBytes, MAX_EVENT_DATA_BYTES);
+    assert.equal(JSON.stringify(event.data).includes('private/'), false);
+    assert.equal(JSON.stringify(event.data).includes('private-result'), false);
+  }
+  assert.equal(toolEvents[1]?.data?.isError, false);
+});
+
 test('non-serializable adapter event and result objects are replaced with bounded evidence', async () => {
   const directory = await workspace();
   const circular: Record<string, unknown> = {};

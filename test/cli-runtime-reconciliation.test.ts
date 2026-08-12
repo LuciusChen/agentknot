@@ -53,9 +53,16 @@ interface RouteFixture {
 }
 
 async function runCli(configPath: string, ...args: string[]): Promise<CliResult> {
+  const fixtureHome = path.join(path.dirname(configPath), 'home');
   try {
     const result = await execFileAsync(process.execPath, [cliPath, ...args, '--config', configPath], {
-      env: { ...process.env, AGENTKNOT_CONFIG: undefined },
+      env: {
+        ...process.env,
+        AGENTKNOT_CONFIG: undefined,
+        XDG_RUNTIME_DIR: path.join(path.dirname(configPath), 'runtime'),
+        HOME: fixtureHome,
+        USERPROFILE: fixtureHome,
+      },
     });
     return { code: 0, stdout: String(result.stdout), stderr: String(result.stderr) };
   } catch (error: unknown) {
@@ -73,7 +80,11 @@ async function createFixture(kind: 'mock' | 'pi'): Promise<Fixture> {
   const workspace = path.join(directory, 'workspace');
   const jobsDirectory = path.join(directory, 'jobs');
   const orchestrationDirectory = path.join(directory, 'orchestrations');
+  const runtimeDirectory = path.join(directory, 'runtime');
+  const homeDirectory = path.join(directory, 'home');
   await mkdir(workspace);
+  await mkdir(runtimeDirectory, { mode: 0o700 });
+  await mkdir(homeDirectory, { mode: 0o700 });
   const configPath = path.join(directory, 'agentknot.config.json');
   const route =
     kind === 'mock'
@@ -229,11 +240,18 @@ async function readSnapshot(directory: string, id: string): Promise<Buffer> {
 }
 
 async function startServer(configPath: string): Promise<ReturnType<typeof spawn>> {
+  const fixtureHome = path.join(path.dirname(configPath), 'home');
   const child = spawn(
     process.execPath,
     [cliPath, 'serve', '--host', '127.0.0.1', '--port', '0', '--config', configPath],
     {
-      env: { ...process.env, AGENTKNOT_CONFIG: undefined },
+      env: {
+        ...process.env,
+        AGENTKNOT_CONFIG: undefined,
+        XDG_RUNTIME_DIR: path.join(path.dirname(configPath), 'runtime'),
+        HOME: fixtureHome,
+        USERPROFILE: fixtureHome,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     }
   );

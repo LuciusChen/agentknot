@@ -62,6 +62,30 @@ test('validateTaskAssessment accepts a strict controller handoff and returns a d
   );
 });
 
+test('subtask tool budgets are strict, prompt-visible, and covered by the plan hash', () => {
+  const bounded = validateTaskAssessment({
+    ...assessment,
+    subtasks: assessment.subtasks.map((subtask) => ({ ...subtask, maxToolCalls: 7 })),
+  });
+  const basePlan = composeDelegationPlan(request, assessment, config);
+  const boundedPlan = composeDelegationPlan(
+    { ...request, assessment: bounded },
+    bounded,
+    config
+  );
+  assert.notEqual(boundedPlan.planHash, basePlan.planHash);
+  assert.match(boundedPlan.subtasks[0]?.executionPrompt ?? '', /at most 7 normalized tool calls/);
+  for (const maxToolCalls of [0, 1.5, 1_001]) {
+    assert.throws(
+      () => validateTaskAssessment({
+        ...assessment,
+        subtasks: [{ ...assessment.subtasks[0], maxToolCalls }],
+      }),
+      /maxToolCalls must be an integer between 1 and 1000/
+    );
+  }
+});
+
 test('validateTaskAssessment strictly rejects a subtask that omits acceptanceCriteria', () => {
   const withoutAcceptanceCriteria = {
     ...assessment,
@@ -455,4 +479,51 @@ test('composeDelegationPlan deterministically applies allowlists, keep-upstream 
   assert.equal(overLimit.decision, 'upstream');
   assert.equal(overLimit.willDispatch, false);
   assert.match(overLimit.reasoning, /exceeded the configured child limit/);
+
+  const rejected = composeDelegationPlan(
+    request,
+    {
+      ...assessment,
+      taskKinds: ['product-decision', 'analysis'],
+      subtasks: [
+        {
+          title: 'Choose the product direction',
+          kind: 'product-decision',
+          prompt: 'Choose the product direction.',
+          acceptanceCriteria: ['A product decision is recorded'],
+        },
+        {
+          title: 'Generic analysis',
+          kind: 'analysis',
+          prompt: 'Perform generic analysis.',
+          acceptanceCriteria: ['One conclusion is returned'],
+        },
+      ],
+    },
+    config
+  );
+  assert.equal(rejected.decision, 'upstream');
+  assert.match(rejected.reasoning, /keep-upstream=\[product-decision\]/);
+  assert.match(rejected.reasoning, /not-delegable=\[analysis\]/);
+
+  const partiallyRejected = composeDelegationPlan(
+    request,
+    {
+      ...assessment,
+      taskKinds: ['documentation', 'commit'],
+      subtasks: [
+        assessment.subtasks[1]!,
+        {
+          title: 'Commit the result',
+          kind: 'commit',
+          prompt: 'Commit the result.',
+          acceptanceCriteria: ['The commit exists'],
+        },
+      ],
+    },
+    config
+  );
+  assert.equal(partiallyRejected.decision, 'split');
+  assert.deepEqual(partiallyRejected.subtasks.map((subtask) => subtask.kind), ['documentation']);
+  assert.match(partiallyRejected.reasoning, /keep-upstream=\[commit\]/);
 });

@@ -1,5 +1,9 @@
 import type { DelegationConfig } from './config.js';
 import { isTerminalStatus } from './execution-status.js';
+import {
+  isJobActivityProjection,
+  type JobActivityProjection,
+} from './job-activity.js';
 import type { AgentKnotBrokerIdentity } from './http-server.js';
 import type { JobList } from './job-list.js';
 import type {
@@ -14,6 +18,9 @@ import type {
   JobEvent,
   JobRecord,
   JobRequest,
+  WorkerControlCapabilities,
+  WorkerControlReceipt,
+  WorkerControlRequest,
 } from './types.js';
 
 const HTTP_OPERATION_TIMEOUT_MS = 10_000;
@@ -32,6 +39,7 @@ interface WaitChildProgress {
   readonly jobId: string;
   readonly status: string;
   readonly route?: string;
+  readonly activity?: JobActivityProjection;
   readonly lastActivity?: WaitActivity;
 }
 
@@ -44,6 +52,7 @@ export type AgentKnotWaitProgress =
       readonly updatedAt: string;
       readonly route: string;
       readonly attempt?: number;
+      readonly activity?: JobActivityProjection;
       readonly lastActivity?: WaitActivity;
     }
   | {
@@ -58,7 +67,11 @@ export type AgentKnotWaitProgress =
     };
 
 export type AgentKnotWaitUpdate =
-  | { readonly connectivity: 'connected'; readonly progress: AgentKnotWaitProgress }
+  | {
+      readonly connectivity: 'connected';
+      readonly nextSequence: number;
+      readonly progress?: AgentKnotWaitProgress;
+    }
   | {
       readonly connectivity: 'disconnected';
       readonly id: string;
@@ -107,6 +120,18 @@ function asObject(value: unknown, label: string): Record<string, unknown> {
     throw new AgentKnotHttpClientError(`${label} must be a JSON object`);
   }
   return value as Record<string, unknown>;
+}
+
+function recordWithId<Record extends { readonly id: string }>(
+  value: unknown,
+  label: string,
+  expectedId: string
+): Record {
+  const record = asObject(value, label);
+  if (record.id !== expectedId) {
+    throw new AgentKnotHttpClientError(`${label}.id does not match requested ID ${expectedId}`);
+  }
+  return record as unknown as Record;
 }
 
 function errorMessage(value: unknown): string | undefined {
@@ -207,8 +232,21 @@ function waitProgress(value: unknown, kind: AgentKnotWaitProgress['kind'], id: s
     if (typeof progress.route !== 'string') {
       throw new AgentKnotHttpClientError('job wait response.wait.route must be a string');
     }
+    if (progress.activity !== undefined && !isJobActivityProjection(progress.activity)) {
+      throw new AgentKnotHttpClientError('job wait response.wait.activity is invalid');
+    }
   } else if (typeof progress.phase !== 'string' || !Array.isArray(progress.children)) {
     throw new AgentKnotHttpClientError('orchestration wait response.wait progress is invalid');
+  } else {
+    for (const child of progress.children) {
+      if (typeof child !== 'object' || child === null || Array.isArray(child)) {
+        throw new AgentKnotHttpClientError('orchestration wait response.wait child is invalid');
+      }
+      const activity = (child as Record<string, unknown>).activity;
+      if (activity !== undefined && !isJobActivityProjection(activity)) {
+        throw new AgentKnotHttpClientError('orchestration wait response.wait child activity is invalid');
+      }
+    }
   }
   return progress as unknown as AgentKnotWaitProgress;
 }
@@ -302,9 +340,11 @@ export class AgentKnotHttpClient {
         reconnectAttempts = 0;
         cursor = batch.nextSequence;
         if (batch.record !== undefined) return batch.record;
-        if (batch.progress !== undefined) {
-          onUpdate?.({ connectivity: 'connected', progress: batch.progress });
-        }
+        onUpdate?.({
+          connectivity: 'connected',
+          nextSequence: cursor,
+          ...(batch.progress === undefined ? {} : { progress: batch.progress }),
+        });
       } catch (error) {
         if (signal?.aborted) throw clientAbortError(signal);
         if (!retryableTransportError(error)) throw error;
@@ -348,7 +388,7 @@ export class AgentKnotHttpClient {
     const record =
       value === undefined
         ? undefined
-        : asObject(value, `${label}.${kind}`) as unknown as Record;
+        : recordWithId<Record>(value, `${label}.${kind}`, id);
     const events =
       body.events === undefined
         ? record?.events.filter((event) => event.sequence > afterSequence) ?? []
@@ -436,16 +476,23 @@ export class AgentKnotHttpClient {
     ) as unknown as OrchestrationRecord;
   }
 
-  async getOrchestration(id: string): Promise<OrchestrationRecord | undefined> {
+  async getOrchestration(
+    id: string,
+    signal?: AbortSignal
+  ): Promise<OrchestrationRecord | undefined> {
     try {
       const body = asObject(
-        await this.#request(`/v1/orchestrations/${encodeURIComponent(id)}`),
+        await this.#request(
+          `/v1/orchestrations/${encodeURIComponent(id)}`,
+          signal === undefined ? {} : { signal }
+        ),
         'orchestration response'
       );
-      return asObject(
+      return recordWithId<OrchestrationRecord>(
         body.orchestration,
-        'orchestration response.orchestration'
-      ) as unknown as OrchestrationRecord;
+        'orchestration response.orchestration',
+        id
+      );
     } catch (error) {
       if (error instanceof AgentKnotHttpClientError && error.status === 404) return undefined;
       throw error;
@@ -500,7 +547,7 @@ export class AgentKnotHttpClient {
   async getJob(id: string): Promise<JobRecord | undefined> {
     try {
       const body = asObject(await this.#request(`/v1/jobs/${encodeURIComponent(id)}`), 'job response');
-      return asObject(body.job, 'job response.job') as unknown as JobRecord;
+      return recordWithId<JobRecord>(body.job, 'job response.job', id);
     } catch (error) {
       if (error instanceof AgentKnotHttpClientError && error.status === 404) return undefined;
       throw error;
@@ -549,6 +596,99 @@ export class AgentKnotHttpClient {
       method: 'POST',
       body: '{}',
     });
+  }
+
+  async workerControlCapabilities(id: string): Promise<WorkerControlCapabilities | undefined> {
+    try {
+      const body = asObject(
+        await this.#request(`/v1/jobs/${encodeURIComponent(id)}/control`),
+        'worker control capabilities response'
+      );
+      return this.#workerControlCapabilities(
+        body.capabilities,
+        'worker control capabilities response.capabilities',
+        id
+      );
+    } catch (error) {
+      if (error instanceof AgentKnotHttpClientError && error.status === 404) return undefined;
+      throw error;
+    }
+  }
+
+  async controlJob(
+    id: string,
+    request: WorkerControlRequest
+  ): Promise<WorkerControlReceipt | undefined> {
+    try {
+      const body = asObject(
+        await this.#request(`/v1/jobs/${encodeURIComponent(id)}/control`, {
+          method: 'POST',
+          body: JSON.stringify(request),
+        }),
+        'worker control response'
+      );
+      return this.#workerControlReceipt(
+        body.receipt,
+        'worker control response.receipt',
+        id,
+        request
+      );
+    } catch (error) {
+      if (error instanceof AgentKnotHttpClientError && error.status === 404) return undefined;
+      throw error;
+    }
+  }
+
+  #workerControlCapabilities(
+    value: unknown,
+    label: string,
+    expectedJobId: string
+  ): WorkerControlCapabilities {
+    const capabilities = asObject(value, label);
+    if (
+      capabilities.schemaVersion !== 1 ||
+      capabilities.jobId !== expectedJobId ||
+      !Number.isSafeInteger(capabilities.attempt) ||
+      (capabilities.attempt as number) < 0 ||
+      (capabilities.state !== 'active' && capabilities.state !== 'inactive') ||
+      typeof capabilities.ready !== 'boolean' ||
+      !Array.isArray(capabilities.kinds) ||
+      !(capabilities.kinds as unknown[]).every((kind) => kind === 'steer' || kind === 'follow-up')
+    ) {
+      throw new AgentKnotHttpClientError(`${label} is invalid`);
+    }
+    return capabilities as unknown as WorkerControlCapabilities;
+  }
+
+  #workerControlReceipt(
+    value: unknown,
+    label: string,
+    expectedJobId: string,
+    request: WorkerControlRequest
+  ): WorkerControlReceipt {
+    const receipt = asObject(value, label);
+    if (
+      receipt.schemaVersion !== 1 ||
+      typeof receipt.jobId !== 'string' ||
+      receipt.jobId !== expectedJobId ||
+      typeof receipt.controlId !== 'string' ||
+      receipt.controlId !== request.controlId ||
+      !Number.isSafeInteger(receipt.attempt) ||
+      (receipt.attempt as number) < 1 ||
+      receipt.attempt !== request.attempt ||
+      (receipt.kind !== 'steer' && receipt.kind !== 'follow-up') ||
+      receipt.kind !== request.kind ||
+      !['accepted', 'unsupported', 'stale-attempt', 'adapter-rejected', 'lost'].includes(
+        receipt.status as string
+      ) ||
+      typeof receipt.durable !== 'boolean' ||
+      typeof receipt.requestedAt !== 'string' ||
+      typeof receipt.settledAt !== 'string' ||
+      (receipt.reason !== undefined && typeof receipt.reason !== 'string')
+    ) {
+      throw new AgentKnotHttpClientError(`${label} is invalid`);
+    }
+    return receipt as unknown as WorkerControlReceipt;
   }
 
   async listArtifacts(id: string): Promise<JobArtifactList | undefined> {

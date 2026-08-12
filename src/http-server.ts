@@ -2,15 +2,20 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import type { DelegationConfig } from './config.js';
 import { isTerminalStatus } from './execution-status.js';
+import { projectJobActivity } from './job-activity.js';
 import { validateTaskAssessment } from './delegation-policy.js';
 import { assertJsonMetadata } from './metadata.js';
 import { buildJobList } from './job-list.js';
-import type {
-  OrchestrationEvent,
-  OrchestrationRecord,
-  OrchestrationRequest,
-  StartOrchestrationResult,
+import { JobControlPersistenceError } from './orchestrator.js';
+import { validateWorkerControlRequest } from './worker-control.js';
+import {
+  isOrchestrationDelegationOverride,
+  type OrchestrationEvent,
+  type OrchestrationRecord,
+  type OrchestrationRequest,
+  type StartOrchestrationResult,
 } from './orchestration-types.js';
+import { validateMaxToolCalls } from './types.js';
 import type {
   JobArtifactList,
   JobArtifactPreview,
@@ -18,6 +23,9 @@ import type {
   JobEvent,
   JobRequest,
   StartJobResult,
+  WorkerControlCapabilities,
+  WorkerControlReceipt,
+  WorkerControlRequest,
 } from './types.js';
 import type { JobRecord } from './types.js';
 
@@ -54,6 +62,7 @@ function compactJobProgress(job: JobRecord): object {
     updatedAt: job.updatedAt,
     route: job.route.name,
     attempt: job.attempt,
+    activity: projectJobActivity(job),
     ...(lastEvent === undefined
       ? {}
       : {
@@ -79,6 +88,7 @@ async function compactOrchestrationProgress(
         jobId: child.jobId,
         status: job?.status ?? child.status,
         ...(child.route === undefined ? {} : { route: child.route.name }),
+        ...(job === undefined ? {} : { activity: projectJobActivity(job) }),
         ...(lastEvent === undefined
           ? {}
           : {
@@ -174,6 +184,7 @@ function asJobRequest(value: unknown): JobRequest {
   if (body.callbackUrl !== undefined && typeof body.callbackUrl !== 'string') {
     throw new Error('callbackUrl must be a string');
   }
+  const maxToolCalls = validateMaxToolCalls(body.maxToolCalls);
   if (body.idempotencyKey !== undefined && typeof body.idempotencyKey !== 'string') {
     throw new Error('idempotencyKey must be a string');
   }
@@ -183,6 +194,7 @@ function asJobRequest(value: unknown): JobRequest {
     prompt: body.prompt,
     workspace: body.workspace,
     ...(body.route === undefined ? {} : { route: body.route as string }),
+    ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
     ...(body.source === undefined ? {} : { source: body.source as string }),
     ...(body.callbackUrl === undefined ? {} : { callbackUrl: body.callbackUrl as string }),
     ...(metadata === undefined ? {} : { metadata }),
@@ -207,7 +219,7 @@ function asOrchestrationRequest(value: unknown): OrchestrationRequest {
   }
   if (
     body.delegation !== undefined &&
-    !['inherit', 'never', 'suggest', 'force'].includes(String(body.delegation))
+    !isOrchestrationDelegationOverride(body.delegation)
   ) {
     throw new Error('delegation must be "inherit", "never", "suggest", or "force"');
   }
@@ -247,6 +259,8 @@ export interface AgentKnotHttpRuntime {
   wait?(id: string, timeoutMs?: number, signal?: AbortSignal): Promise<JobRecord | undefined>;
   eventsAfter?(id: string, sequence: number): Promise<JobEvent[]>;
   cancelJob?(id: string, source?: string): Promise<boolean>;
+  workerControlCapabilities?(id: string): Promise<WorkerControlCapabilities | undefined>;
+  controlJob?(id: string, request: WorkerControlRequest): Promise<WorkerControlReceipt | undefined>;
   delegationPolicy?(): DelegationConfig;
   getOrchestration?(id: string): Promise<OrchestrationRecord | undefined>;
   listOrchestrations?(): Promise<OrchestrationRecord[]>;
@@ -264,6 +278,7 @@ export interface AgentKnotHttpRuntime {
 export interface AgentKnotHttpServer {
   server: Server;
   listen(port: number, host?: string): Promise<{ host: string; port: number }>;
+  drain(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -286,6 +301,7 @@ export function createAgentKnotHttpServer(
   let closing = false;
   let admissionsInFlight = 0;
   let admissionsDrained: (() => void) | undefined;
+  let drainPromise: Promise<void> | undefined;
   let closePromise: Promise<void> | undefined;
   let admittedWork = false;
 
@@ -300,7 +316,11 @@ export function createAgentKnotHttpServer(
       if (finished) return;
       finished = true;
       admissionsInFlight -= 1;
-      if (admissionsInFlight === 0) admissionsDrained?.();
+      if (admissionsInFlight === 0) {
+        const resolve = admissionsDrained;
+        admissionsDrained = undefined;
+        resolve?.();
+      }
     };
   };
 
@@ -310,6 +330,15 @@ export function createAgentKnotHttpServer(
       : new Promise<void>((resolve) => {
           admissionsDrained = resolve;
         });
+
+  const drain = (): Promise<void> => {
+    drainPromise ??= (async () => {
+      closing = true;
+      await waitForAdmissions();
+      if (admittedWork) await runtime.shutdown?.();
+    })();
+    return drainPromise;
+  };
 
   const server = createServer(async (request, response) => {
     response.once('error', () => undefined);
@@ -421,7 +450,7 @@ export function createAgentKnotHttpServer(
         return;
       }
 
-      const match = /^\/v1\/jobs\/([a-zA-Z0-9_-]+)(?:\/(events|cancel))?$/.exec(pathname);
+      const match = /^\/v1\/jobs\/([a-zA-Z0-9_-]+)(?:\/(events|cancel|control))?$/.exec(pathname);
       if (match) {
         const id = match[1];
         const action = match[2];
@@ -485,6 +514,35 @@ export function createAgentKnotHttpServer(
             return;
           }
           sendJson(response, 202, { accepted: true, jobId: id });
+          return;
+        }
+        if (action === 'control') {
+          if (!runtime.workerControlCapabilities || !runtime.controlJob) {
+            sendJson(response, 501, { error: 'Live worker control is not available on this runtime' });
+            return;
+          }
+          if (method === 'GET') {
+            const capabilities = await runtime.workerControlCapabilities(id);
+            if (capabilities === undefined) {
+              sendJson(response, 404, { error: 'Job not found' });
+              return;
+            }
+            sendJson(response, 200, { capabilities });
+            return;
+          }
+          if (method === 'POST') {
+            const receipt = await runtime.controlJob(
+              id,
+              validateWorkerControlRequest(await readJson(request))
+            );
+            if (receipt === undefined) {
+              sendJson(response, 404, { error: 'Job not found' });
+              return;
+            }
+            sendJson(response, receipt.status === 'accepted' ? 202 : 200, { receipt });
+            return;
+          }
+          sendJson(response, 405, { error: 'Method not allowed' });
           return;
         }
       }
@@ -574,6 +632,10 @@ export function createAgentKnotHttpServer(
         response.destroy();
         return;
       }
+      if (error instanceof JobControlPersistenceError) {
+        sendJson(response, 503, { error: error.message, delivery: error.delivery });
+        return;
+      }
       sendJson(response, 400, { error: error instanceof Error ? error.message : String(error) });
     }
   });
@@ -595,14 +657,26 @@ export function createAgentKnotHttpServer(
         });
       });
     },
+    drain,
     close() {
       closePromise ??= (async () => {
-        closing = true;
-        await waitForAdmissions();
-        if (admittedWork) await runtime.shutdown?.();
-        await new Promise<void>((resolve, reject) => {
-          server.close((error) => (error ? reject(error) : resolve()));
-        });
+        const errors: unknown[] = [];
+        try {
+          await drain();
+        } catch (error: unknown) {
+          errors.push(error);
+        }
+        if (server.listening) {
+          try {
+            await new Promise<void>((resolve, reject) => {
+              server.close((error) => (error ? reject(error) : resolve()));
+            });
+          } catch (error: unknown) {
+            errors.push(error);
+          }
+        }
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) throw new AggregateError(errors, 'AgentKnot HTTP close failed');
       })();
       return closePromise;
     },

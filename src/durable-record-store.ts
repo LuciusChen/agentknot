@@ -65,6 +65,7 @@ export interface OpenDurableStoreOptions {
 export interface DurableAdmissionOptions {
   ownerId: string;
   ttlMs: number;
+  capacityLimit?: number;
   now?: Date;
   idempotency?: {
     scope: string;
@@ -90,6 +91,8 @@ export interface DurableRoutePoolAdmissionOptions<T> extends DurableAdmissionOpt
 export type DurableAdmissionResult<T> =
   | { created: true; record: T; lease: ExecutionLease }
   | { created: false; record: T };
+
+export type CapacityAcquireStatus = 'acquired' | 'waiting';
 
 export type IdempotentCreateResult<T> =
   | { created: true; record: T }
@@ -126,6 +129,12 @@ function assertIdentifier(label: string, value: string): void {
 function assertTtl(ttlMs: number): void {
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 86_400_000) {
     throw new Error('Lease ttlMs must be an integer between 1 and 86400000');
+  }
+}
+
+function assertCapacityLimit(capacityLimit: number): void {
+  if (!Number.isSafeInteger(capacityLimit) || capacityLimit < 1) {
+    throw new Error('Capacity limit must be a positive safe integer');
   }
 }
 
@@ -255,6 +264,15 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
             pool_key TEXT PRIMARY KEY,
             next_index INTEGER NOT NULL CHECK (next_index >= 0)
           ) STRICT;
+          CREATE TABLE IF NOT EXISTS execution_capacity (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_id TEXT NOT NULL UNIQUE REFERENCES records(id) ON DELETE CASCADE,
+            owner_id TEXT NOT NULL,
+            fence INTEGER NOT NULL CHECK (fence > 0),
+            acquired_at_ms INTEGER
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS execution_capacity_waiting
+            ON execution_capacity(acquired_at_ms, sequence);
         `);
       }
     }
@@ -343,6 +361,10 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
     this.#assertOpen();
     assertIdentifier('Lease ownerId', options.ownerId);
     assertTtl(options.ttlMs);
+    if (options.capacityLimit !== undefined) {
+      if (this.#kind !== 'Job') throw new Error('Capacity admission is available only for Jobs');
+      assertCapacityLimit(options.capacityLimit);
+    }
     if (options.idempotency !== undefined) {
       assertIdentifier('Idempotency scope', options.idempotency.scope);
       assertIdentifier('Idempotency key', options.idempotency.key);
@@ -381,6 +403,13 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
       if (lease === undefined) {
         throw new Error(`${this.#kind} ${normalized.id} could not acquire its admission lease`);
       }
+      if (options.capacityLimit !== undefined) {
+        this.#tryAcquireCapacityInTransaction(
+          lease,
+          options.capacityLimit,
+          options.now ?? new Date()
+        );
+      }
       return { created: true as const, recordId: normalized.id, lease };
     });
     if (outcome.created) {
@@ -411,6 +440,7 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
     assertIdentifier('Route-pool cursorKey', options.cursorKey);
     assertIdentifier('Lease ownerId', options.ownerId);
     assertTtl(options.ttlMs);
+    if (options.capacityLimit !== undefined) assertCapacityLimit(options.capacityLimit);
     if (
       options.candidates.length < 2 ||
       options.candidates.length > 20 ||
@@ -507,6 +537,13 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
       const lease = this.#claimLeaseInTransaction(normalized.id, options);
       if (lease === undefined) {
         throw new Error(`${this.#kind} ${normalized.id} could not acquire its admission lease`);
+      }
+      if (options.capacityLimit !== undefined) {
+        this.#tryAcquireCapacityInTransaction(
+          lease,
+          options.capacityLimit,
+          options.now ?? new Date()
+        );
       }
       this.#database
         .prepare(
@@ -700,6 +737,33 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
     return changes(this.#releaseLease.run(lease.recordId, lease.ownerId, lease.fence)) === 1;
   }
 
+  async tryAcquireCapacity(
+    lease: ExecutionLease,
+    capacityLimit: number,
+    now = new Date()
+  ): Promise<CapacityAcquireStatus> {
+    this.#assertOpen();
+    if (this.#kind !== 'Job') throw new Error('Capacity admission is available only for Jobs');
+    assertCapacityLimit(capacityLimit);
+    return transaction(this.#database, () =>
+      this.#tryAcquireCapacityInTransaction(lease, capacityLimit, now)
+    );
+  }
+
+  async releaseCapacity(lease: ExecutionLease): Promise<boolean> {
+    this.#assertOpen();
+    if (this.#kind !== 'Job') throw new Error('Capacity admission is available only for Jobs');
+    return (
+      changes(
+        this.#database
+          .prepare(
+            'DELETE FROM execution_capacity WHERE record_id = ? AND owner_id = ? AND fence = ?'
+          )
+          .run(lease.recordId, lease.ownerId, lease.fence)
+      ) === 1
+    );
+  }
+
   async getLease(recordId: string): Promise<ExecutionLease | undefined> {
     this.#assertOpen();
     return this.#lease(recordId);
@@ -856,7 +920,109 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
       recordId,
       nowMs
     );
-    return changes(claimed) === 1 ? this.#lease(recordId) : undefined;
+    if (changes(claimed) !== 1) return undefined;
+    const lease = this.#lease(recordId);
+    if (lease === undefined) {
+      throw new Error(`${this.#kind} ${recordId} reclaimed lease was not observable`);
+    }
+    if (this.#kind === 'Job') {
+      this.#database
+        .prepare(
+          `UPDATE execution_capacity
+           SET owner_id = ?, fence = ?
+           WHERE record_id = ? AND owner_id = ? AND fence = ?`
+        )
+        .run(lease.ownerId, lease.fence, recordId, existing.owner_id, existing.fence);
+    }
+    return lease;
+  }
+
+  #tryAcquireCapacityInTransaction(
+    lease: ExecutionLease,
+    capacityLimit: number,
+    now: Date
+  ): CapacityAcquireStatus {
+    const nowMs = now.getTime();
+    const currentLease = this.#leaseRow(lease.recordId);
+    if (
+      currentLease === undefined ||
+      currentLease.owner_id !== lease.ownerId ||
+      currentLease.fence !== lease.fence ||
+      currentLease.expires_at_ms <= nowMs
+    ) {
+      throw new ExecutionLeaseLostError(
+        `${this.#kind} ${lease.recordId} execution lease ${lease.fence} is no longer current`
+      );
+    }
+
+    this.#database
+      .prepare(
+        `INSERT INTO execution_capacity (record_id, owner_id, fence, acquired_at_ms)
+         VALUES (?, ?, ?, NULL)
+         ON CONFLICT(record_id) DO UPDATE SET
+           owner_id = excluded.owner_id,
+           fence = excluded.fence`
+      )
+      .run(lease.recordId, lease.ownerId, lease.fence);
+    this.#database
+      .prepare(
+        `DELETE FROM execution_capacity
+         WHERE NOT EXISTS (
+           SELECT 1 FROM execution_leases
+           WHERE execution_leases.record_id = execution_capacity.record_id
+             AND execution_leases.owner_id = execution_capacity.owner_id
+             AND execution_leases.fence = execution_capacity.fence
+             AND execution_leases.expires_at_ms > ?
+         )`
+      )
+      .run(nowMs);
+
+    const current = this.#database
+      .prepare('SELECT acquired_at_ms FROM execution_capacity WHERE record_id = ?')
+      .get(lease.recordId) as { acquired_at_ms: number | null } | undefined;
+    if (current?.acquired_at_ms !== null && current?.acquired_at_ms !== undefined) {
+      return 'acquired';
+    }
+    const active = this.#database
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM execution_capacity
+         JOIN execution_leases ON execution_leases.record_id = execution_capacity.record_id
+         WHERE execution_capacity.acquired_at_ms IS NOT NULL
+           AND execution_leases.owner_id = execution_capacity.owner_id
+           AND execution_leases.fence = execution_capacity.fence
+           AND execution_leases.expires_at_ms > ?`
+      )
+      .get(nowMs) as { count: number };
+    const next = this.#database
+      .prepare(
+        `SELECT execution_capacity.record_id
+         FROM execution_capacity
+         JOIN execution_leases ON execution_leases.record_id = execution_capacity.record_id
+         WHERE execution_capacity.acquired_at_ms IS NULL
+           AND execution_leases.owner_id = execution_capacity.owner_id
+           AND execution_leases.fence = execution_capacity.fence
+           AND execution_leases.expires_at_ms > ?
+         ORDER BY execution_capacity.sequence
+         LIMIT 1`
+      )
+      .get(nowMs) as { record_id: string } | undefined;
+    if (Number(active.count) >= capacityLimit || next?.record_id !== lease.recordId) {
+      return 'waiting';
+    }
+    const acquired = this.#database
+      .prepare(
+        `UPDATE execution_capacity
+         SET acquired_at_ms = ?
+         WHERE record_id = ? AND owner_id = ? AND fence = ? AND acquired_at_ms IS NULL`
+      )
+      .run(nowMs, lease.recordId, lease.ownerId, lease.fence);
+    if (changes(acquired) !== 1) {
+      throw new ExecutionLeaseLostError(
+        `${this.#kind} ${lease.recordId} capacity fence ${lease.fence} is no longer current`
+      );
+    }
+    return 'acquired';
   }
 
   #cancellation(recordId: string): CancellationRequest | undefined {
@@ -915,6 +1081,18 @@ export class SqliteDurableStoreAdapter<T extends DurableStoredRecord> {
 
   releaseLease(lease: ExecutionLease): Promise<boolean> {
     return this.backend.releaseLease(lease);
+  }
+
+  tryAcquireCapacity(
+    lease: ExecutionLease,
+    capacityLimit: number,
+    now?: Date
+  ): Promise<CapacityAcquireStatus> {
+    return this.backend.tryAcquireCapacity(lease, capacityLimit, now);
+  }
+
+  releaseCapacity(lease: ExecutionLease): Promise<boolean> {
+    return this.backend.releaseCapacity(lease);
   }
 
   getLease(recordId: string): Promise<ExecutionLease | undefined> {

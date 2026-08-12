@@ -3,12 +3,18 @@ import { serveStdio, type StdioServerHandle } from '@modelcontextprotocol/server
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
-import { readBrokerStatus, startBroker } from './broker-lifecycle.js';
-import { readBrokerLaunchProfile } from './broker-profile.js';
+import { readProfiledBrokerStatus, startProfiledBroker } from './broker-lifecycle.js';
 import { validateTaskAssessment } from './delegation-policy.js';
-import { AgentKnotHttpClient } from './http-client.js';
+import { isTerminalStatus } from './execution-status.js';
+import {
+  AgentKnotHttpClient,
+  type AgentKnotWaitProgress,
+  type AgentKnotWaitUpdate,
+} from './http-client.js';
 import { readLocalDiscovery } from './local-discovery.js';
 import { buildOrchestrationHandoff } from './orchestration-handoff.js';
+import { MAX_WORKER_CONTROL_MESSAGE_BYTES } from './record-limits.js';
+import { MAX_TOOL_CALLS } from './types.js';
 
 const text = z.string().min(1).max(64 * 1024);
 const shortText = z.string().min(1).max(1_000);
@@ -37,6 +43,7 @@ const assessmentSchema = z
             kind: shortText,
             prompt: text,
             acceptanceCriteria: z.array(text).min(1).max(20),
+            maxToolCalls: z.number().int().min(1).max(MAX_TOOL_CALLS).optional(),
           })
           .strict()
       )
@@ -47,6 +54,23 @@ const assessmentSchema = z
 const orchestrationIdSchema = z.object({ id: shortText }).strict();
 const orchestrationFollowSchema = z
   .object({ id: shortText, afterSequence: z.number().int().nonnegative().default(0) })
+  .strict();
+const orchestrationWaitSchema = z
+  .object({
+    id: shortText,
+    afterSequence: z.number().int().nonnegative().default(0),
+    waitMs: z.number().int().min(100).max(40_000).default(40_000),
+  })
+  .strict();
+const jobControlIdSchema = z.object({ id: shortText }).strict();
+const jobControlSchema = z
+  .object({
+    id: shortText,
+    controlId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/u),
+    attempt: z.number().int().positive(),
+    kind: z.enum(['steer', 'follow-up']),
+    message: z.string().min(1).max(MAX_WORKER_CONTROL_MESSAGE_BYTES),
+  })
   .strict();
 const cliEntryPath = fileURLToPath(new URL('./cli.js', import.meta.url));
 
@@ -63,6 +87,18 @@ function errorResult(error: unknown) {
     isError: true,
     content: [{ type: 'text' as const, text: message }],
   };
+}
+
+function waitProgressMessage(progress: AgentKnotWaitProgress): string {
+  if (progress.kind === 'job') return `${progress.status} route=${progress.route}`;
+  const children = progress.children
+    .map((child) => `${child.status}:${child.route ?? 'unknown'}`)
+    .join(',');
+  return `${progress.phase} children=${children || 'none'}`;
+}
+
+function lastEventSequence(events: ReadonlyArray<{ sequence: number }>): number {
+  return events.reduce((sequence, event) => Math.max(sequence, event.sequence), 0);
 }
 
 async function withErrors(operation: () => Promise<object>) {
@@ -105,13 +141,7 @@ export function createAgentKnotMcpServer(): McpServer {
       annotations: { readOnlyHint: true },
     },
     async () =>
-      withErrors(async () => {
-        const [status, profile] = await Promise.all([
-          readBrokerStatus(),
-          readBrokerLaunchProfile(),
-        ]);
-        return { ...status, launchConfigured: profile !== undefined };
-      })
+      withErrors(() => readProfiledBrokerStatus())
   );
 
   server.registerTool(
@@ -128,17 +158,7 @@ export function createAgentKnotMcpServer(): McpServer {
         if (process.env.AGENTKNOT_SERVER_URL !== undefined) {
           throw new Error('Cannot start a local broker while AGENTKNOT_SERVER_URL selects an explicit server');
         }
-        const profile = await readBrokerLaunchProfile();
-        if (profile === undefined) {
-          throw new Error(
-            'AgentKnot broker launch is not configured; run `agentknot broker up --config <path>` once'
-          );
-        }
-        return startBroker({
-          cliEntryPath,
-          configPath: profile.configPath,
-          port: profile.port,
-        });
+        return startProfiledBroker({ cliEntryPath });
       })
   );
 
@@ -216,6 +236,101 @@ export function createAgentKnotMcpServer(): McpServer {
   );
 
   server.registerTool(
+    'agentknot_orchestration_wait',
+    {
+      title: 'Wait for AgentKnot orchestration',
+      description:
+        'Hold one bounded tool request across durable event batches. Returns the terminal handoff or an active same-ID cursor for idempotent resume; never resubmits work.',
+      inputSchema: orchestrationWaitSchema,
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ id, afterSequence, waitMs }, context) =>
+      withErrors(async () => {
+        const client = await resolveBrokerClient();
+        const deadline = AbortSignal.timeout(waitMs);
+        const waitSignal = AbortSignal.any([context.mcpReq.signal, deadline]);
+        const initial = await client.getOrchestration(id, waitSignal);
+        if (initial === undefined) throw new Error(`Orchestration not found: ${id}`);
+        const initialSequence = lastEventSequence(initial.events);
+        if (afterSequence > initialSequence) {
+          throw new Error(
+            `Orchestration cursor ${afterSequence} is ahead of durable sequence ${initialSequence}`
+          );
+        }
+        const resumeRecord =
+          isTerminalStatus(initial.status) || afterSequence === initialSequence
+            ? initial
+            : {
+                ...initial,
+                events: initial.events.filter((event) => event.sequence <= afterSequence),
+              };
+        let progress: AgentKnotWaitProgress | undefined;
+        const pendingNotifications: Promise<void>[] = [];
+        let progressUpdates = 0;
+        const progressToken = context.mcpReq._meta?.progressToken;
+        const reportProgress = (update: AgentKnotWaitUpdate): void => {
+          if (update.connectivity === 'connected' && update.progress !== undefined) {
+            progress = update.progress;
+          }
+          if (progressToken === undefined) return;
+          let message: string;
+          if (update.connectivity === 'connected') {
+            if (update.progress === undefined) return;
+            message = waitProgressMessage(update.progress);
+          } else {
+            message = `disconnected reconnect=${update.attempt}/${update.maxAttempts}`;
+          }
+          progressUpdates += 1;
+          pendingNotifications.push(
+            context.mcpReq.notify({
+              method: 'notifications/progress',
+              params: {
+                progressToken,
+                progress: progressUpdates,
+                message,
+              },
+            }).catch(() => undefined)
+          );
+        };
+        let record = resumeRecord;
+        let nextSequence = afterSequence;
+        try {
+          record = await client.waitForOrchestration(
+            resumeRecord,
+            (update) => {
+              if (update.connectivity === 'connected') nextSequence = update.nextSequence;
+              reportProgress(update);
+            },
+            waitSignal
+          );
+          nextSequence = lastEventSequence(record.events);
+        } catch (error) {
+          if (
+            context.mcpReq.signal.aborted ||
+            !deadline.aborted ||
+            error !== waitSignal.reason
+          ) {
+            throw error;
+          }
+        }
+        await Promise.all(pendingNotifications);
+        if (isTerminalStatus(record.status)) {
+          return {
+            state: 'terminal',
+            nextSequence,
+            terminal: await buildOrchestrationHandoff(client, record),
+          };
+        }
+        return {
+          state: 'active',
+          id,
+          nextSequence,
+          ...(progress === undefined ? {} : { progress }),
+        };
+      })
+  );
+
+  server.registerTool(
     'agentknot_orchestration_follow',
     {
       title: 'Follow AgentKnot orchestration',
@@ -254,6 +369,46 @@ export function createAgentKnotMcpServer(): McpServer {
       withErrors(async () => {
         await (await resolveBrokerClient()).cancelOrchestration(id);
         return { accepted: true, orchestrationId: id };
+      })
+  );
+
+  server.registerTool(
+    'agentknot_job_control_capabilities',
+    {
+      title: 'AgentKnot job control capabilities',
+      description:
+        'Read route-neutral live-control capabilities and readiness for one exact Job attempt.',
+      inputSchema: jobControlIdSchema,
+      annotations: { readOnlyHint: true },
+    },
+    async ({ id }) =>
+      withErrors(async () => {
+        const capabilities = await (await resolveBrokerClient()).workerControlCapabilities(id);
+        if (capabilities === undefined) throw new Error(`Job not found: ${id}`);
+        return capabilities;
+      })
+  );
+
+  server.registerTool(
+    'agentknot_job_control',
+    {
+      title: 'Control one active AgentKnot job',
+      description:
+        'Send one idempotent steer or follow-up message to an exact active Job attempt. Returns only after durable receipt evidence; never replays across retry or restart.',
+      inputSchema: jobControlSchema,
+      annotations: { destructiveHint: false, idempotentHint: true },
+    },
+    async ({ id, controlId, attempt, kind, message }) =>
+      withErrors(async () => {
+        const receipt = await (await resolveBrokerClient()).controlJob(id, {
+          schemaVersion: 1,
+          controlId,
+          attempt,
+          kind,
+          message,
+        });
+        if (receipt === undefined) throw new Error(`Job not found: ${id}`);
+        return receipt;
       })
   );
 

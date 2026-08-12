@@ -1,30 +1,68 @@
 #!/usr/bin/env node
 
+import { open } from 'node:fs/promises';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { readBrokerStatus, startBroker, stopBroker, type BrokerStatus } from './broker-lifecycle.js';
+import {
+  readProfiledBrokerStatus,
+  startBroker,
+  startProfiledBroker,
+  stopBroker,
+  type BrokerStatus,
+  STARTUP_REPORT_PATH_ENV,
+} from './broker-lifecycle.js';
 import { validateTaskAssessment } from './delegation-policy.js';
 import { AgentKnotHttpClient, type AgentKnotWaitUpdate } from './http-client.js';
 import { createAgentKnotHttpServer } from './http-server.js';
+import type { JobActivityProjection } from './job-activity.js';
 import { buildJobList } from './job-list.js';
+import { assertJsonMetadata } from './metadata.js';
+import { limitTextSuffix, MAX_STARTUP_DIAGNOSTIC_BYTES } from './record-limits.js';
 import {
   createLocalDiscoveryRegistration,
   readLocalDiscovery,
   type LocalDiscoveryRegistration,
 } from './local-discovery.js';
 import { serveAgentKnotMcp } from './mcp-server.js';
-import type {
-  OrchestrationRecord,
-  OrchestrationRequest,
-  TaskAssessment,
+import {
+  isOrchestrationDelegationOverride,
+  type OrchestrationRecord,
+  type OrchestrationRequest,
+  type TaskAssessment,
 } from './orchestration-types.js';
 import { buildOrchestrationHandoff } from './orchestration-handoff.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
 import type { JobEvent, JobRequest } from './types.js';
+import { validateMaxToolCalls } from './types.js';
 import type { RouteSelectionModeUsage, UsageRate, UsageReport } from './usage-report.js';
 
 const MAX_ASSESSMENT_JSON_BYTES = 64 * 1024;
+const MAX_REQUEST_FILE_BYTES = 256 * 1024;
+const ORCHESTRATION_REQUEST_KEYS = [
+  'prompt',
+  'workspace',
+  'assessment',
+  'source',
+  'metadata',
+  'delegation',
+  'idempotencyKey',
+] as const;
+
+async function writeStartupFailureReport(error: unknown): Promise<void> {
+  const reportPath = process.env[STARTUP_REPORT_PATH_ENV];
+  if (reportPath === undefined) return;
+  let file: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    file = await open(reportPath, 'wx', 0o600);
+    const message = error instanceof Error ? error.message : String(error);
+    await file.writeFile(limitTextSuffix(message, MAX_STARTUP_DIAGNOSTIC_BYTES));
+  } catch {
+    // Startup diagnostics are best-effort and must not replace the terminal lifecycle error.
+  } finally {
+    await file?.close().catch(() => undefined);
+  }
+}
 
 function takeOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -63,14 +101,108 @@ function parseAssessmentJson(value: string): TaskAssessment {
   }
 }
 
+function parseRequestFileJson(value: string): OrchestrationRequest {
+  const bytes = Buffer.byteLength(value, 'utf8');
+  if (bytes > MAX_REQUEST_FILE_BYTES) {
+    throw new Error(`--request-file exceeds ${MAX_REQUEST_FILE_BYTES} bytes`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    throw new Error('--request-file must be valid JSON');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('--request-file must contain an OrchestrationRequest object');
+  }
+  const request = parsed as Record<string, unknown>;
+  const allowed = new Set<string>(ORCHESTRATION_REQUEST_KEYS);
+  const unknown = Object.keys(request).filter((key) => !allowed.has(key));
+  const missing = ['prompt', 'workspace', 'assessment'].filter(
+    (key) => !Object.hasOwn(request, key)
+  );
+  if (unknown.length > 0 || missing.length > 0) {
+    throw new Error(
+      '--request-file contains invalid fields' +
+        `${unknown.length > 0 ? `; unknown: ${unknown.join(', ')}` : ''}` +
+        `${missing.length > 0 ? `; missing: ${missing.join(', ')}` : ''}`
+    );
+  }
+  if (typeof request.prompt !== 'string' || request.prompt.trim() === '') {
+    throw new Error('--request-file prompt must be a non-empty string');
+  }
+  if (typeof request.workspace !== 'string' || request.workspace.trim() === '') {
+    throw new Error('--request-file workspace must be a non-empty string');
+  }
+  let assessment: TaskAssessment;
+  try {
+    assessment = validateTaskAssessment(request.assessment);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`--request-file assessment is invalid: ${message}`, { cause: error });
+  }
+  if (request.source !== undefined && typeof request.source !== 'string') {
+    throw new Error('--request-file source must be a string');
+  }
+  if (request.metadata !== undefined) assertJsonMetadata(request.metadata);
+  if (
+    request.delegation !== undefined &&
+    !isOrchestrationDelegationOverride(request.delegation)
+  ) {
+    throw new Error('--request-file delegation must be inherit, never, suggest, or force');
+  }
+  if (
+    request.idempotencyKey !== undefined &&
+    (typeof request.idempotencyKey !== 'string' || request.idempotencyKey.trim() === '')
+  ) {
+    throw new Error('--request-file idempotencyKey must be a non-empty string');
+  }
+  return {
+    prompt: request.prompt,
+    workspace: request.workspace,
+    assessment,
+    ...(request.source === undefined ? {} : { source: request.source }),
+    ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
+    ...(request.delegation === undefined
+      ? {}
+      : { delegation: request.delegation as NonNullable<OrchestrationRequest['delegation']> }),
+    ...(request.idempotencyKey === undefined
+      ? {}
+      : { idempotencyKey: request.idempotencyKey }),
+  };
+}
+
+async function readRequestFile(filePath: string): Promise<OrchestrationRequest> {
+  let file: Awaited<ReturnType<typeof open>>;
+  try {
+    file = await open(filePath, 'r');
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`--request-file could not be opened: ${message}`, { cause: error });
+  }
+  let value: string;
+  try {
+    const stats = await file.stat();
+    if (stats.size > MAX_REQUEST_FILE_BYTES) {
+      throw new Error(`--request-file exceeds ${MAX_REQUEST_FILE_BYTES} bytes`);
+    }
+    value = await file.readFile({ encoding: 'utf8' });
+  } finally {
+    await file.close();
+  }
+  return parseRequestFileJson(value);
+}
+
 function help(): string {
   return `AgentKnot — vendor-neutral coding-agent orchestration
 
 Usage:
-  agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME] [--idempotency-key KEY]
+  agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME] [--max-tool-calls N] [--idempotency-key KEY]
   agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE] [--idempotency-key KEY]
+  agentknot orchestrate --request-file PATH [--json] [--handoff-json] [--progress]
   agentknot broker run [--host HOST] [--port PORT]
   agentknot broker up [--port PORT] [--json]
+  agentknot broker start [--json]
   agentknot broker down [--json]
   agentknot broker status [--json]
   agentknot serve [--host HOST] [--port PORT]   Deprecated alias for broker run
@@ -98,6 +230,7 @@ Run options:
   --workspace PATH    Worker working directory (default: current directory)
   --source NAME       Controller identity, e.g. codex or claude
   --callback URL      POST the terminal Job record to this URL
+  --max-tool-calls N  Controller-authored Job tool-call hard limit (1-1000)
   --json              Print only the final Job record as JSON
   --events            Stream every event as JSONL
   --progress          Print compact remote wait progress to stderr
@@ -105,7 +238,8 @@ Run options:
 Orchestrate options:
   --prompt TEXT       Goal instead of positional text
   --assessment-json JSON
-                      Controller-authored TaskAssessment object (required)
+                      Controller-authored TaskAssessment object (required unless --request-file is used)
+  --request-file PATH Complete OrchestrationRequest JSON; cannot combine with request construction flags
   --workspace PATH    Target repository (default: current directory)
   --source NAME       Controller identity, e.g. codex, claude, or ci
   --delegation MODE   inherit, never, suggest, or force (default: inherit)
@@ -297,6 +431,27 @@ function formatElapsed(milliseconds: number): string {
   return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
 }
 
+function safeProgressLabel(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().slice(0, 80) || 'unknown';
+}
+
+function activityLabel(activity: JobActivityProjection): string {
+  let label: string = activity.state;
+  if (activity.state === 'tools-running' && activity.activeTools !== undefined) {
+    const visible = activity.activeTools.names.slice(0, 2).map(safeProgressLabel);
+    const hidden = activity.activeTools.count - visible.length;
+    label = `tools:${visible.join('+') || 'unknown'}${hidden > 0 ? `+${hidden}` : ''}`;
+  }
+  return activity.coverage === 'complete' ? label : `${label}/${activity.coverage}`;
+}
+
+function observedActivityLabel(activity: JobActivityProjection, now: number): string {
+  const observed = activity.lastObserved;
+  if (observed === undefined) return 'last=none';
+  const tool = observed.toolName === undefined ? '' : `:${safeProgressLabel(observed.toolName)}`;
+  return `last=${safeProgressLabel(observed.type)}${tool} age=${formatElapsed(now - Date.parse(observed.at))}`;
+}
+
 function createWaitProgressReporter(enabled: boolean): (update: AgentKnotWaitUpdate) => void {
   let previousFingerprint = '';
   let previousPrintedAt = 0;
@@ -312,6 +467,14 @@ function createWaitProgressReporter(enabled: boolean): (update: AgentKnotWaitUpd
       return;
     }
     const progress = update.progress;
+    if (progress === undefined) return;
+    const projectedActivities = progress.kind === 'job'
+      ? [progress.activity]
+      : progress.children.map((child) => child.activity);
+    const latestProjected = projectedActivities
+      .filter((activity): activity is JobActivityProjection => activity !== undefined)
+      .sort((left, right) =>
+        Date.parse(right.lastObserved?.at ?? '') - Date.parse(left.lastObserved?.at ?? ''))[0];
     const activities = progress.kind === 'job'
       ? [progress.lastActivity]
       : [progress.lastActivity, ...progress.children.map((child) => child.lastActivity)];
@@ -320,12 +483,17 @@ function createWaitProgressReporter(enabled: boolean): (update: AgentKnotWaitUpd
       .sort((left, right) => Date.parse(right.at) - Date.parse(left.at))[0];
     const phase = progress.kind === 'job' ? progress.status : progress.phase;
     const children = progress.kind === 'orchestration'
-      ? ` children=${progress.children.map((child) => `${child.status}:${child.route ?? 'unknown'}`).join(',') || 'none'}`
-      : ` route=${progress.route}`;
-    const activity = lastActivity === undefined
-      ? ' last=none'
-      : ` last=${lastActivity.type} age=${formatElapsed(now - Date.parse(lastActivity.at))}`;
-    const fingerprint = `${progress.kind}|${phase}|${children}|${lastActivity?.sequence ?? 0}`;
+      ? ` children=${progress.children.map((child) => {
+          const projected = child.activity === undefined ? '' : `[${activityLabel(child.activity)}]`;
+          return `${child.status}:${child.route ?? 'unknown'}${projected}`;
+        }).join(',') || 'none'}`
+      : ` route=${progress.route}${progress.activity === undefined ? '' : ` activity=${activityLabel(progress.activity)}`}`;
+    const activity = latestProjected === undefined
+      ? lastActivity === undefined
+        ? ' last=none'
+        : ` last=${safeProgressLabel(lastActivity.type)} age=${formatElapsed(now - Date.parse(lastActivity.at))}`
+      : ` ${observedActivityLabel(latestProjected, now)}`;
+    const fingerprint = `${progress.kind}|${phase}|${children}|${latestProjected?.lastObserved?.sequence ?? lastActivity?.sequence ?? 0}`;
     if (fingerprint === previousFingerprint && now - previousPrintedAt < 15_000) return;
     process.stderr.write(`[agentknot] connected id=${progress.id} phase=${phase}${children}${activity}\n`);
     previousFingerprint = fingerprint;
@@ -477,13 +645,18 @@ async function closeServeResources(
   if (errors.length > 1) throw new AggregateError(errors, 'AgentKnot serve cleanup failed');
 }
 
-function formatBrokerStatus(status: BrokerStatus, json: boolean): string {
-  if (json) return `${JSON.stringify(status, null, 2)}\n`;
+function formatBrokerStatus(
+  status: BrokerStatus,
+  launchConfigured: boolean,
+  json: boolean
+): string {
+  if (json) return `${JSON.stringify({ ...status, launchConfigured }, null, 2)}\n`;
+  const profile = launchConfigured ? 'launch configured' : 'launch unconfigured';
   if (status.state === 'running') {
-    return `AgentKnot broker: running (${status.url}, pid ${status.pid})\n`;
+    return `AgentKnot broker: running (${status.url}, pid ${status.pid}; ${profile})\n`;
   }
-  if (status.state === 'stopped') return 'AgentKnot broker: stopped\n';
-  return `AgentKnot broker: unavailable${status.url === undefined ? '' : ` (${status.url})`}: ${status.error}\n`;
+  if (status.state === 'stopped') return `AgentKnot broker: stopped (${profile})\n`;
+  return `AgentKnot broker: unavailable${status.url === undefined ? '' : ` (${status.url})`}: ${status.error} (${profile})\n`;
 }
 
 async function runBrokerForeground(
@@ -560,6 +733,11 @@ async function main(argv: string[]): Promise<void> {
     const workspace = takeOption(args, '--workspace') ?? process.cwd();
     const source = takeOption(args, '--source') ?? 'cli';
     const callbackUrl = takeOption(args, '--callback');
+    const maxToolCallsOption = takeOption(args, '--max-tool-calls');
+    const maxToolCalls =
+      maxToolCallsOption === undefined
+        ? undefined
+        : validateMaxToolCalls(Number(maxToolCallsOption), '--max-tool-calls');
     const idempotencyKey = takeOption(args, '--idempotency-key');
     const promptOption = takeOption(args, '--prompt');
     const json = takeFlag(args, '--json');
@@ -572,6 +750,7 @@ async function main(argv: string[]): Promise<void> {
       workspace,
       source,
       ...(route === undefined ? {} : { route }),
+      ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
       ...(callbackUrl === undefined ? {} : { callbackUrl }),
       ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
     };
@@ -610,10 +789,11 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (command === 'orchestrate') {
-    const workspace = takeOption(args, '--workspace') ?? process.cwd();
-    const source = takeOption(args, '--source') ?? 'cli';
+    const workspaceOption = takeOption(args, '--workspace');
+    const sourceOption = takeOption(args, '--source');
     const promptOption = takeOption(args, '--prompt');
     const assessmentJson = takeOption(args, '--assessment-json');
+    const requestFile = takeOption(args, '--request-file');
     const delegationOption = takeOption(args, '--delegation');
     const idempotencyKey = takeOption(args, '--idempotency-key');
     const suggest = takeFlag(args, '--suggest');
@@ -625,23 +805,48 @@ async function main(argv: string[]): Promise<void> {
       throw new Error('--suggest and --delegation cannot be used together');
     }
     const delegation = suggest ? 'suggest' : delegationOption;
-    if (delegation !== undefined && !['inherit', 'never', 'suggest', 'force'].includes(delegation)) {
+    if (delegation !== undefined && !isOrchestrationDelegationOverride(delegation)) {
       throw new Error('--delegation must be inherit, never, suggest, or force');
     }
-    if (args.some((value) => value.startsWith('--'))) throw new Error(`Unknown option: ${args.join(' ')}`);
-    if (assessmentJson === undefined) throw new Error('orchestrate requires --assessment-json');
-    const assessment = parseAssessmentJson(assessmentJson);
-    const prompt = promptOption ?? args.join(' ');
-    const request: OrchestrationRequest = {
-      prompt,
-      workspace,
-      source,
-      assessment,
-      ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-      ...(delegation === undefined
-        ? {}
-        : { delegation: delegation as 'inherit' | 'never' | 'suggest' | 'force' }),
-    };
+    let request: OrchestrationRequest;
+    if (requestFile !== undefined) {
+      const constructionFlags = [
+        workspaceOption === undefined ? undefined : '--workspace',
+        sourceOption === undefined ? undefined : '--source',
+        promptOption === undefined ? undefined : '--prompt',
+        assessmentJson === undefined ? undefined : '--assessment-json',
+        delegationOption === undefined ? undefined : '--delegation',
+        idempotencyKey === undefined ? undefined : '--idempotency-key',
+        suggest ? '--suggest' : undefined,
+      ].filter((value): value is string => value !== undefined);
+      if (constructionFlags.length > 0) {
+        throw new Error(
+          `--request-file cannot be combined with request construction flags: ${constructionFlags.join(', ')}`
+        );
+      }
+      if (args.some((value) => value.startsWith('--'))) {
+        throw new Error(`Unknown option: ${args.join(' ')}`);
+      }
+      if (args.length > 0) {
+        throw new Error('--request-file cannot be combined with positional prompts');
+      }
+      request = await readRequestFile(requestFile);
+    } else {
+      if (args.some((value) => value.startsWith('--'))) {
+        throw new Error(`Unknown option: ${args.join(' ')}`);
+      }
+      if (assessmentJson === undefined) throw new Error('orchestrate requires --assessment-json');
+      request = {
+        prompt: promptOption ?? args.join(' '),
+        workspace: workspaceOption ?? process.cwd(),
+        source: sourceOption ?? 'cli',
+        assessment: parseAssessmentJson(assessmentJson),
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        ...(delegation === undefined
+          ? {}
+          : { delegation }),
+      };
+    }
     if (remote !== undefined) {
       const initial = await remote.startOrchestration(request);
       if (progress) process.stderr.write(`[agentknot] connected id=${initial.id} phase=${initial.status}\n`);
@@ -748,6 +953,19 @@ async function main(argv: string[]): Promise<void> {
       );
       return;
     }
+    if (operation === 'start') {
+      if (configPath !== undefined) throw new Error('broker start does not accept --config');
+      if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
+      const result = await startProfiledBroker({
+        cliEntryPath: fileURLToPath(import.meta.url),
+      });
+      process.stdout.write(
+        json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : `AgentKnot broker: ${result.action} (${result.broker.url}, pid ${result.broker.pid})\n`
+      );
+      return;
+    }
     if (operation === 'down') {
       if (configPath !== undefined) throw new Error('broker down does not accept --config');
       if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
@@ -760,12 +978,12 @@ async function main(argv: string[]): Promise<void> {
     if (operation === 'status') {
       if (configPath !== undefined) throw new Error('broker status does not accept --config');
       if (args.length > 0) throw new Error(`Unknown option: ${args.join(' ')}`);
-      const status = await readBrokerStatus();
-      process.stdout.write(formatBrokerStatus(status, json));
+      const status = await readProfiledBrokerStatus();
+      process.stdout.write(formatBrokerStatus(status, status.launchConfigured, json));
       if (status.state === 'unavailable') process.exitCode = 1;
       return;
     }
-    throw new Error('broker requires run, up, down, or status');
+    throw new Error('broker requires run, up, start, down, or status');
   }
 
   if (command === 'client') {
@@ -971,7 +1189,8 @@ async function main(argv: string[]): Promise<void> {
   throw new Error(`Unknown command "${command}"\n\n${help()}`);
 }
 
-void main(process.argv.slice(2)).catch((error: unknown) => {
+void main(process.argv.slice(2)).catch(async (error: unknown) => {
+  await writeStartupFailureReport(error);
   process.stderr.write(`agentknot: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

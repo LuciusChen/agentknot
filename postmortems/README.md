@@ -182,3 +182,9 @@ Incident records should also include severity, user/controller impact, immediate
 | [0068](./0068-bounded-shared-task-context.md) | Incident / Architecture Decision | Resolved / Accepted | Bound shared task context without worker-session coupling |
 | [0069](./0069-repeated-shared-context-scope-trials.md) | Experiment / Incident | Accepted / Resolved | Repeat shared-context scope trials, remove contradictory check guidance, and settle blocked reports without retry |
 | [0070](./0070-sparse-worktree-artifact-boundary.md) | Incident / Decision | Resolved / Accepted | Preserve sparse-checkout artifact semantics and enforce read-only analysis |
+| [0071](./0071-defer-pi-durable-harness-migration.md) | Architecture Decision / Dependency Review | Accepted / Deferred | Defer Pi durable-harness migration until executable parity |
+| [0072](./0072-compact-worker-activity-and-pi-frame-coalescing.md) | Incident / Architecture Decision | Resolved / Accepted | Preserve useful worker activity under Pi text-frame floods |
+| [0073](./0073-stable-multi-session-broker-rendezvous.md) | Incident / Architecture Decision | Resolved / Accepted | Use one stable broker rendezvous across controller environments |
+| [0074](./0074-session-start-controller-entry.md) | Incident / Architecture Decision | Resolved / Accepted | Restore controller entry at session boundaries after an implicit-selection miss |
+| [0075](./0075-bounded-mcp-wait-and-resume-gate.md) | Incident / Architecture Decision | Resolved / Accepted | Bound MCP waiting without controller-session ownership |
+| [0076](./0076-durable-capacity-and-live-control-fences.md) | Incident / Architecture Decision | Resolved / Accepted | Fence shared Job capacity and live-control settlement |

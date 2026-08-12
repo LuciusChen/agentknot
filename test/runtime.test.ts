@@ -144,6 +144,42 @@ test('runtime close and shutdown track recovery before active Job registration',
   assert.equal(ownershipClosed, true);
 });
 
+test('runtime close cannot race an in-flight worker control operation', async () => {
+  let controlEntered!: () => void;
+  let finishControl!: () => void;
+  const entered = new Promise<void>((resolve) => { controlEntered = resolve; });
+  const pending = new Promise<void>((resolve) => { finishControl = resolve; });
+  const jobs = {
+    async control() {
+      controlEntered();
+      await pending;
+      return undefined;
+    },
+    hasActiveJobs: () => false,
+  } as unknown as Orchestrator;
+  const orchestrations = {} as unknown as OrchestrationService;
+  let ownershipClosed = false;
+  const ownership = {
+    assertHeld: () => undefined,
+    close: async () => { ownershipClosed = true; },
+  } as unknown as RuntimeOwnership;
+  const runtime = new AgentKnotRuntime(jobs, orchestrations, { ownership });
+
+  const control = runtime.controlJob('job_control', {
+    schemaVersion: 1,
+    controlId: 'control-close-race',
+    attempt: 1,
+    kind: 'steer',
+    message: 'Keep the runtime ownership fence held.',
+  });
+  await entered;
+  await assert.rejects(runtime.close(), /Cannot release runtime storage ownership while work is active/);
+  finishControl();
+  await control;
+  await runtime.close();
+  assert.equal(ownershipClosed, true);
+});
+
 test('exclusive createRuntime imports legacy state and fails unrecoverable historical parents explicitly', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-runtime-'));
   const storageDirectory = path.join(directory, 'jobs');

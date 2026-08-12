@@ -16,9 +16,25 @@ if (process.env.FAKE_PI_PID_FILE) {
 const WORKER_COMPLETION_REPORT_MARKER = 'AGENTKNOT_WORKER_COMPLETION_REPORT_V1';
 
 let buffer = '';
+const controls = [];
 
 function send(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+function sendTextDeltas(text) {
+  const requestedSize = Number(process.env.FAKE_PI_TEXT_DELTA_SIZE ?? text.length);
+  const size = Number.isSafeInteger(requestedSize) && requestedSize > 0 ? requestedSize : text.length;
+  for (let offset = 0; offset < text.length; offset += size) {
+    send({
+      type: 'message_update',
+      assistantMessageEvent: {
+        type: 'text_delta',
+        contentIndex: 0,
+        delta: text.slice(offset, offset + size),
+      },
+    });
+  }
 }
 
 function completionOutput(message) {
@@ -69,6 +85,25 @@ function completionOutput(message) {
 }
 
 function handle(command) {
+  if (command.type === 'steer' || command.type === 'follow_up') {
+    controls.push(command);
+    if (process.env.FAKE_PI_CONTROL_FILE) {
+      writeFileSync(process.env.FAKE_PI_CONTROL_FILE, JSON.stringify(controls));
+    }
+    const accepted = process.env.FAKE_PI_CONTROL_MODE !== 'reject';
+    const response = {
+      id: command.id,
+      type: 'response',
+      command: command.type,
+      success: accepted,
+      ...(accepted ? {} : { error: 'fixture control rejection' }),
+    };
+    const delay = Number(process.env.FAKE_PI_CONTROL_RESPONSE_DELAY_MS ?? 0);
+    if (Number.isFinite(delay) && delay > 0) setTimeout(() => send(response), delay);
+    else send(response);
+    return;
+  }
+
   if (command.type === 'get_session_stats') {
     if (process.env.FAKE_PI_STATS_REQUEST_FILE) {
       writeFileSync(process.env.FAKE_PI_STATS_REQUEST_FILE, JSON.stringify(command));
@@ -159,10 +194,7 @@ function handle(command) {
   if (emitLifecycleFixture) send({ type: 'turn_start', turnId: 'fixture-turn' });
   send({ type: 'agent_start' });
   if (emitLifecycleFixture) send({ type: 'message_start', messageId: 'fixture-message' });
-  send({
-    type: 'message_update',
-    assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: output.slice(0, splitAt) },
-  });
+  sendTextDeltas(output.slice(0, splitAt));
   if (process.env.FAKE_PI_TOOLCALL_END === 'true') {
     send({
       type: 'message_update',
@@ -185,20 +217,22 @@ function handle(command) {
     result: { ok: true },
     isError: false,
   });
-  send({
-    type: 'message_update',
-    assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: output.slice(splitAt) },
-  });
-  if (emitLifecycleFixture) send({ type: 'message_end', messageId: 'fixture-message' });
-  send({ type: 'agent_end', messages: [], willRetry: false });
-  if (emitLifecycleFixture) {
-    send({ type: 'turn_end', turnId: 'fixture-turn' });
-    send({
-      type: process.env.FAKE_PI_UNKNOWN_EVENT_TYPE ?? 'fixture_unknown_event',
-      marker: 'fixture-unknown-event',
-    });
-  }
-  send({ type: 'agent_settled' });
+  sendTextDeltas(output.slice(splitAt));
+  const settle = () => {
+    if (emitLifecycleFixture) send({ type: 'message_end', messageId: 'fixture-message' });
+    send({ type: 'agent_end', messages: [], willRetry: false });
+    if (emitLifecycleFixture) {
+      send({ type: 'turn_end', turnId: 'fixture-turn' });
+      send({
+        type: process.env.FAKE_PI_UNKNOWN_EVENT_TYPE ?? 'fixture_unknown_event',
+        marker: 'fixture-unknown-event',
+      });
+    }
+    send({ type: 'agent_settled' });
+  };
+  const settleDelay = Number(process.env.FAKE_PI_SETTLE_DELAY_MS ?? 0);
+  if (Number.isFinite(settleDelay) && settleDelay > 0) setTimeout(settle, settleDelay);
+  else settle();
 }
 
 process.stdin.on('data', (chunk) => {

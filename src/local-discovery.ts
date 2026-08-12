@@ -18,16 +18,20 @@ const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const LOCAL_URL_PATTERN = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})$/;
 
 export interface LocalDiscoveryEnvironment {
+  /** Deliberately ignored: transient runtime paths are not stable across controller sessions. */
   readonly XDG_RUNTIME_DIR?: string | undefined;
+  /** Deliberately ignored for the broker rendezvous path. */
   readonly XDG_CACHE_HOME?: string | undefined;
   readonly XDG_CONFIG_HOME?: string | undefined;
   readonly HOME?: string | undefined;
   readonly USERPROFILE?: string | undefined;
+  readonly LOCALAPPDATA?: string | undefined;
   readonly APPDATA?: string | undefined;
 }
 
 export interface LocalDiscoveryPathOptions {
   readonly environment?: LocalDiscoveryEnvironment;
+  readonly platform?: NodeJS.Platform;
 }
 
 export interface LocalDiscoveryRegistrationOptions extends LocalDiscoveryPathOptions {
@@ -95,19 +99,6 @@ function assertOwnedDirectoryStats(stats: Stats, directory: string): void {
   }
 }
 
-async function isValidRuntimeDirectory(directory: string): Promise<boolean> {
-  if (!path.isAbsolute(directory)) return false;
-  let stats: Stats;
-  try {
-    stats = await lstat(directory);
-  } catch {
-    return false;
-  }
-  if (stats.isSymbolicLink() || !stats.isDirectory()) return false;
-  if (!isOwnedByCurrentUser(stats)) return false;
-  return hasMode(stats, DISCOVERY_DIRECTORY_MODE);
-}
-
 function environmentFor(options: LocalDiscoveryPathOptions): LocalDiscoveryEnvironment {
   return options.environment ?? process.env;
 }
@@ -129,21 +120,19 @@ export async function resolveLocalDiscoveryPaths(
   options: LocalDiscoveryPathOptions = {}
 ): Promise<LocalDiscoveryPaths> {
   const environment = environmentFor(options);
-  const configuredRuntimeDirectory = environment.XDG_RUNTIME_DIR;
-  if (
-    configuredRuntimeDirectory !== undefined &&
-    path.isAbsolute(configuredRuntimeDirectory) &&
-    (await isValidRuntimeDirectory(path.resolve(configuredRuntimeDirectory)))
-  ) {
-    return pathsFor(path.join(configuredRuntimeDirectory, 'agentknot'));
+  const platform = options.platform ?? process.platform;
+  const home = homeFor(environment);
+  if (platform === 'win32') {
+    const configured = environment.LOCALAPPDATA;
+    const base = configured !== undefined && path.isAbsolute(configured)
+      ? path.resolve(configured)
+      : path.join(home, 'AppData', 'Local');
+    return pathsFor(path.join(base, 'AgentKnot', 'broker'));
   }
-
-  const configuredCacheHome = environment.XDG_CACHE_HOME;
-  const cacheHome =
-    configuredCacheHome !== undefined && path.isAbsolute(configuredCacheHome)
-      ? path.resolve(configuredCacheHome)
-      : path.join(homeFor(environment), '.cache');
-  return pathsFor(path.join(cacheHome, 'agentknot'));
+  if (platform === 'darwin') {
+    return pathsFor(path.join(home, 'Library', 'Application Support', 'AgentKnot', 'broker'));
+  }
+  return pathsFor(path.join(home, '.local', 'state', 'agentknot', 'broker'));
 }
 
 async function ensureOwnedDirectory(directory: string): Promise<void> {

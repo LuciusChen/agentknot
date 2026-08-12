@@ -9,6 +9,7 @@ import { MAX_WORKER_STDERR_BYTES, limitTextSuffix } from '../record-limits.js';
 import type {
   ResolvedRoute,
   WorkerAdapter,
+  WorkerControlKind,
   WorkerEventSink,
   WorkerHealth,
   WorkerProbeInput,
@@ -92,6 +93,9 @@ async function hasPiAuth(provider: string, environment: EffectiveEnvironment): P
 
 const SESSION_STATS_WAIT_MS = 1_000;
 const SESSION_STATS_REQUEST_ID = 'agentknot-session-stats';
+const CONTROL_RESPONSE_WAIT_MS = 5_000;
+const TEXT_DELTA_FLUSH_BYTES = 1_024;
+const PI_RPC_CONTROL_KINDS = ['steer', 'follow-up'] as const;
 const AMBIENT_DISCOVERY_DISABLE_FLAGS = [
   '--no-extensions',
   '--no-skills',
@@ -333,6 +337,10 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     return this.#doctor(route, effectiveEnvironment(this.config.environment));
   }
 
+  controlCapabilities(_route: ResolvedRoute): readonly WorkerControlKind[] {
+    return PI_RPC_CONTROL_KINDS;
+  }
+
   async #doctor(route: ResolvedRoute, environment: EffectiveEnvironment): Promise<WorkerHealth> {
     const command = this.config.command ?? 'pi';
     const resolvedCommand = await findCommand(command, environment);
@@ -572,6 +580,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
 
     let completed = false;
     let output = '';
+    let pendingTextDelta = '';
     let rawEventCount = 0;
     let assistantError: string | undefined;
     let agentEnded = false;
@@ -586,6 +595,13 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
         resolve(event);
       };
     });
+    const controlResponses = new Map<string, (event: PiRpcEvent | undefined) => void>();
+    let controlSequence = 0;
+    let unbindControl: (() => void) | undefined;
+    const resolveControlResponses = () => {
+      for (const resolve of controlResponses.values()) resolve(undefined);
+      controlResponses.clear();
+    };
     let resolveSettled!: () => void;
     let rejectSettled!: (error: Error) => void;
     const settled = new Promise<void>((resolve, reject) => {
@@ -602,12 +618,45 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     input.signal.addEventListener('abort', abort, { once: true });
     if (input.signal.aborted) abort();
 
+    const flushTextDelta = async (): Promise<void> => {
+      if (pendingTextDelta === '') return;
+      const delta = pendingTextDelta;
+      pendingTextDelta = '';
+      await emit('worker.text.delta', { delta });
+    };
+
     const handleEvent = async (event: PiRpcEvent): Promise<void> => {
       rawEventCount += 1;
+      if (
+        event.type === 'response' &&
+        event.id !== undefined &&
+        event.id.startsWith('agentknot-control-')
+      ) {
+        const resolveControl = controlResponses.get(event.id);
+        if (resolveControl !== undefined) {
+          controlResponses.delete(event.id);
+          resolveControl(event);
+        }
+        // A response can arrive after the bounded control wait expired. It still belongs to
+        // the advisory control plane and must never settle or reject the worker's main run.
+        return;
+      }
       if (event.type === 'response' && statsRequestId !== undefined && event.id === statsRequestId) {
         resolveStatsResponse(event);
         return;
       }
+      const messageDelta = event.type === 'message_update'
+        ? event.assistantMessageEvent
+        : undefined;
+      if (messageDelta?.type === 'text_delta' && typeof messageDelta.delta === 'string') {
+        output += messageDelta.delta;
+        pendingTextDelta += messageDelta.delta;
+        if (Buffer.byteLength(pendingTextDelta, 'utf8') >= TEXT_DELTA_FLUSH_BYTES) {
+          await flushTextDelta();
+        }
+        return;
+      }
+      await flushTextDelta();
       switch (event.type) {
         case 'agent_start':
           await emit('worker.started', { adapter: 'pi-rpc', attempt: input.attempt });
@@ -618,11 +667,6 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
         case 'message_end':
           break;
         case 'message_update': {
-          const delta = event.assistantMessageEvent;
-          if (delta?.type === 'text_delta' && typeof delta.delta === 'string') {
-            output += delta.delta;
-            await emit('worker.text.delta', { delta: delta.delta });
-          }
           break;
         }
         case 'tool_execution_start':
@@ -685,6 +729,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
         lineNumber += 1;
         await handleEvent(parseRpcLine(line, lineNumber));
       }
+      await flushTextDelta();
     })().catch((error: unknown) => {
       if (!completed) rejectSettled(error instanceof Error ? error : new Error(String(error)));
     });
@@ -709,10 +754,12 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     });
     child.once('error', (error) => {
       resolveStatsResponse(undefined);
+      resolveControlResponses();
       if (!completed) rejectSettled(error);
     });
     child.once('exit', (code, signal) => {
       resolveStatsResponse(undefined);
+      resolveControlResponses();
       const output = Promise.allSettled([stdoutTask, stderrTask]);
       void waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_WAIT_MS)
         .then(() => {
@@ -726,6 +773,40 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     try {
       await waitForSpawn(child);
       if (input.signal.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
+      unbindControl = input.control?.bind(async (request) => {
+        if (completed || childExited(child)) {
+          return { accepted: false, reason: 'worker-attempt-not-running' };
+        }
+        controlSequence += 1;
+        const requestId = `agentknot-control-${controlSequence}`;
+        const response = new Promise<PiRpcEvent | undefined>((resolve) => {
+          controlResponses.set(requestId, resolve);
+        });
+        const command = request.kind === 'follow-up' ? 'follow_up' : 'steer';
+        try {
+          child.stdin.write(rpcLine({
+            id: requestId,
+            type: command,
+            message: request.message,
+          }));
+        } catch {
+          controlResponses.delete(requestId);
+          return { accepted: false, reason: 'worker-control-write-failed' };
+        }
+        const result = await waitForRpcResponse(response, CONTROL_RESPONSE_WAIT_MS);
+        controlResponses.delete(requestId);
+        const event = result.response;
+        if (result.timedOut) return { accepted: false, reason: 'worker-control-response-timeout' };
+        if (
+          event?.type !== 'response' ||
+          event.id !== requestId ||
+          event.command !== command ||
+          event.success !== true
+        ) {
+          return { accepted: false, reason: 'worker-control-command-rejected' };
+        }
+        return { accepted: true };
+      });
       child.stdin.write(rpcLine({ id: 'retry', type: 'set_auto_retry', enabled: true }));
       if (input.route.thinkingLevel) {
         child.stdin.write(
@@ -755,6 +836,8 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       };
     } finally {
       completed = true;
+      unbindControl?.();
+      resolveControlResponses();
       input.signal.removeEventListener('abort', abort);
       try {
         child.stdin.end();

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,6 +48,7 @@ const delegatedAssessmentJson = JSON.stringify({
       kind: 'documentation',
       prompt: 'Create reviewed.txt with the reviewed fixture text.',
       acceptanceCriteria: ['reviewed.txt contains the reviewed fixture text'],
+      maxToolCalls: 7,
     },
   ],
 });
@@ -189,10 +191,19 @@ test('CLI exposes one read-only artifact list, verification, and preview contrac
     'Create an empty inspection artifact.',
     '--workspace',
     fixture.workspace,
+    '--max-tool-calls',
+    '7',
     '--json'
   );
-  const job = JSON.parse(run.stdout) as { id: string; artifacts: Array<{ attempt: number }> };
+  const job = JSON.parse(run.stdout) as {
+    id: string;
+    request: { maxToolCalls?: number };
+    route: { maxToolCalls?: number };
+    artifacts: Array<{ attempt: number }>;
+  };
   assert.equal(job.artifacts.length, 1);
+  assert.equal(job.request.maxToolCalls, 7);
+  assert.equal(job.route.maxToolCalls, 7);
 
   const listed = JSON.parse((await runCli(fixture.configPath, 'artifacts', job.id, '--json')).stdout) as {
     jobId: string;
@@ -334,6 +345,216 @@ test('CLI orchestrate rejects missing, malformed, and oversized assessments befo
   await assertFailure(
     ['--assessment-json', 'x'.repeat(64 * 1024 + 1)],
     /--assessment-json exceeds 65536 bytes/
+  );
+
+  const records = JSON.parse(
+    (await runCli(fixture.configPath, 'orchestrations', '--json')).stdout
+  ) as OrchestrationRecord[];
+  assert.deepEqual(records, []);
+});
+
+test('CLI orchestrate request files preserve arbitrary structured text', async () => {
+  const fixture = await createModeOffFixture();
+  const specialText = `Apostrophe: it's; quotes: "double" and 'single';\nNext line.`;
+  const assessment = {
+    ...(JSON.parse(upstreamAssessmentJson) as Record<string, unknown>),
+    reasoning: specialText,
+  };
+  const requestFile = path.join(path.dirname(fixture.configPath), 'orchestration-request.json');
+  await writeFile(
+    requestFile,
+    JSON.stringify({
+      prompt: specialText,
+      workspace: fixture.workspace,
+      assessment,
+      source: 'request-file-test',
+      metadata: { note: specialText },
+      delegation: 'never',
+      idempotencyKey: 'request-file-special-characters',
+    })
+  );
+
+  const run = await runCli(
+    fixture.configPath,
+    'orchestrate',
+    '--request-file',
+    requestFile,
+    '--json',
+    '--progress'
+  );
+  const record = JSON.parse(run.stdout) as OrchestrationRecord;
+  assert.equal(record.status, 'succeeded');
+  assert.equal(record.request.prompt, specialText);
+  assert.equal(record.request.workspace, fixture.workspace);
+  assert.equal(record.request.source, 'request-file-test');
+  assert.equal(record.request.delegation, 'never');
+  assert.equal(record.request.idempotencyKey, 'request-file-special-characters');
+  assert.equal(record.request.assessment.reasoning, specialText);
+  assert.deepEqual(record.request.metadata, { note: specialText });
+});
+
+test('CLI progress names active tools without exposing worker payloads', async () => {
+  const now = new Date().toISOString();
+  const initial = {
+    schemaVersion: 1,
+    id: 'job_cli_activity',
+    status: 'running',
+    request: { prompt: 'private prompt', workspace: '/private/workspace' },
+    route: {
+      name: 'route',
+      worker: 'worker',
+      provider: 'provider',
+      model: 'model',
+      requiredEnv: [],
+      maxAttempts: 1,
+      timeoutMs: 30_000,
+    },
+    createdAt: now,
+    updatedAt: now,
+    attempt: 1,
+    events: [
+      { sequence: 1, jobId: 'job_cli_activity', at: now, type: 'job.started' },
+    ],
+  };
+  const toolEvent = {
+    sequence: 2,
+    jobId: initial.id,
+    at: now,
+    type: 'worker.tool.started',
+    data: {
+      toolCallId: 'private-call-id',
+      toolName: 'read',
+      arguments: { path: '/private/secret' },
+    },
+  };
+  const terminal = {
+    ...initial,
+    status: 'succeeded',
+    updatedAt: now,
+    completedAt: now,
+    events: [
+      ...initial.events,
+      toolEvent,
+      { sequence: 3, jobId: initial.id, at: now, type: 'job.succeeded' },
+    ],
+  };
+  const server = createServer((request, response) => {
+    request.resume();
+    response.setHeader('content-type', 'application/json');
+    if (request.method === 'POST' && request.url === '/v1/jobs') {
+      response.writeHead(202).end(JSON.stringify({ job: initial }));
+      return;
+    }
+    if (request.url === `/v1/jobs/${initial.id}/events?after=1`) {
+      response.writeHead(202).end(JSON.stringify({
+        events: [toolEvent],
+        nextSequence: 2,
+        wait: {
+          schemaVersion: 1,
+          kind: 'job',
+          id: initial.id,
+          status: 'running',
+          updatedAt: now,
+          route: 'route',
+          attempt: 1,
+          activity: {
+            schemaVersion: 1,
+            state: 'tools-running',
+            coverage: 'complete',
+            lastObserved: {
+              sequence: 2,
+              at: now,
+              type: 'worker.tool.started',
+              toolName: 'read',
+            },
+            activeTools: { count: 1, names: ['read'], namesTruncated: false },
+          },
+        },
+      }));
+      return;
+    }
+    if (request.url === `/v1/jobs/${initial.id}/events?after=2`) {
+      response.writeHead(200).end(JSON.stringify({ nextSequence: 3, job: terminal }));
+      return;
+    }
+    response.writeHead(404).end(JSON.stringify({ error: 'Not found' }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string');
+  try {
+    const result = await execFileAsync(process.execPath, [
+      cliPath,
+      'run',
+      'bounded task',
+      '--workspace',
+      '/tmp',
+      '--server',
+      `http://127.0.0.1:${address.port}`,
+      '--progress',
+      '--json',
+    ], {
+      env: { ...process.env, AGENTKNOT_CONFIG: undefined },
+    });
+    assert.match(result.stderr, /activity=tools:read/);
+    assert.match(result.stderr, /last=worker\.tool\.started:read age=/);
+    assert.doesNotMatch(result.stderr, /private-call-id|private\/secret|private prompt/);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => error ? reject(error) : resolve())
+    );
+  }
+});
+
+test('CLI orchestrate request files reject invalid and mixed input before admission', async () => {
+  const fixture = await createModeOffFixture();
+  const requestFile = path.join(path.dirname(fixture.configPath), 'orchestration-request.json');
+  const validRequest = {
+    prompt: 'This must not be admitted.',
+    workspace: fixture.workspace,
+    assessment: JSON.parse(upstreamAssessmentJson),
+  };
+  const assertFailure = async (
+    contents: string,
+    extraArgs: string[],
+    message: RegExp
+  ): Promise<void> => {
+    await writeFile(requestFile, contents);
+    await assert.rejects(
+      runCli(
+        fixture.configPath,
+        'orchestrate',
+        '--request-file',
+        requestFile,
+        ...extraArgs,
+        '--json'
+      ),
+      (error: unknown) => {
+        assert.match(String((error as { stderr?: unknown }).stderr ?? ''), message);
+        return true;
+      }
+    );
+  };
+
+  await assertFailure('{not-json', [], /--request-file must be valid JSON/);
+  await assertFailure('x'.repeat(256 * 1024 + 1), [], /--request-file exceeds 262144 bytes/);
+  await assertFailure(
+    JSON.stringify({ ...validRequest, unexpected: true }),
+    [],
+    /--request-file contains invalid fields; unknown: unexpected/
+  );
+  await assertFailure(
+    JSON.stringify(validRequest),
+    ['--prompt', 'override'],
+    /--request-file cannot be combined with request construction flags: --prompt/
+  );
+  await assertFailure(
+    JSON.stringify(validRequest),
+    ['positional override'],
+    /--request-file cannot be combined with positional prompts/
   );
 
   const records = JSON.parse(

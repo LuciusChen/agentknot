@@ -26,22 +26,24 @@ import {
   parseQualityReview,
 } from './quality-review.js';
 import { composeDelegationPlan, validateTaskAssessment } from './delegation-policy.js';
-import type {
-  AgentKnotDelegationMetadata,
-  ArtifactValidationIdentity,
-  OrchestrationArtifactValidation,
-  OrchestrationArtifactReview,
-  OrchestrationChild,
-  OrchestrationEvent,
-  OrchestrationEventType,
-  OrchestrationRecord,
-  OrchestrationRequest,
-  OrchestrationQualityReview,
-  OrchestrationStore,
-  PlannedSubtask,
-  StartOrchestrationResult,
+import {
+  isOrchestrationDelegationOverride,
+  type AgentKnotDelegationMetadata,
+  type ArtifactValidationIdentity,
+  type OrchestrationArtifactValidation,
+  type OrchestrationArtifactReview,
+  type OrchestrationChild,
+  type OrchestrationEvent,
+  type OrchestrationEventType,
+  type OrchestrationRecord,
+  type OrchestrationRequest,
+  type OrchestrationQualityReview,
+  type OrchestrationStore,
+  type PlannedSubtask,
+  type StartOrchestrationResult,
 } from './orchestration-types.js';
 import { JobPersistenceError, type Orchestrator } from './orchestrator.js';
+import { Semaphore } from './semaphore.js';
 import type { JobRecord } from './types.js';
 
 export interface OrchestrationServiceOptions {
@@ -64,64 +66,9 @@ interface ActiveOrchestration {
   cancel: (source: string) => Promise<void>;
 }
 
-interface SemaphoreWaiter {
-  resolve: (release: () => void) => void;
-  reject: (error: unknown) => void;
-  signal: AbortSignal;
-  onAbort: () => void;
-}
-
 interface PersistedRecordMutation {
   apply: () => void;
   rollback: () => void;
-}
-
-class Semaphore {
-  #available: number;
-  readonly #waiters: SemaphoreWaiter[] = [];
-
-  constructor(capacity: number) {
-    this.#available = capacity;
-  }
-
-  acquire(signal: AbortSignal): Promise<() => void> {
-    if (signal.aborted) {
-      return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Orchestration cancelled'));
-    }
-    if (this.#available > 0) {
-      this.#available -= 1;
-      return Promise.resolve(this.#releaseHandle());
-    }
-    return new Promise((resolve, reject) => {
-      const waiter: SemaphoreWaiter = {
-        resolve,
-        reject,
-        signal,
-        onAbort: () => {
-          const index = this.#waiters.indexOf(waiter);
-          if (index !== -1) this.#waiters.splice(index, 1);
-          reject(signal.reason instanceof Error ? signal.reason : new Error('Orchestration cancelled'));
-        },
-      };
-      signal.addEventListener('abort', waiter.onAbort, { once: true });
-      this.#waiters.push(waiter);
-    });
-  }
-
-  #releaseHandle(): () => void {
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      const waiter = this.#waiters.shift();
-      if (waiter) {
-        waiter.signal.removeEventListener('abort', waiter.onAbort);
-        waiter.resolve(this.#releaseHandle());
-      } else {
-        this.#available += 1;
-      }
-    };
-  }
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -158,7 +105,7 @@ function normalizeRequest(request: OrchestrationRequest): OrchestrationRequest {
   assertTextLimit('Orchestration prompt', request.prompt, MAX_PROMPT_BYTES);
   if (
     request.delegation !== undefined &&
-    !['inherit', 'never', 'suggest', 'force'].includes(request.delegation)
+    !isOrchestrationDelegationOverride(request.delegation)
   ) {
     throw new Error('Orchestration delegation must be "inherit", "never", "suggest", or "force"');
   }
@@ -188,7 +135,6 @@ export class OrchestrationService {
   readonly #store: OrchestrationStore;
   readonly #now: () => Date;
   readonly #runtimeId = randomUUID();
-  readonly #dispatchSlots: Semaphore;
   readonly #artifactValidationSlots = new Semaphore(1);
   readonly #recordMutations = new Map<string, Promise<void>>();
   readonly #activeOrchestrations = new Map<string, ActiveOrchestration>();
@@ -213,7 +159,6 @@ export class OrchestrationService {
     this.#subscriptions = new DurableEventSubscription(this.#store, (record) =>
       isTerminalStatus(record.status)
     );
-    this.#dispatchSlots = new Semaphore(this.#config.dispatch.maxConcurrency);
   }
 
   policy(): DelegationConfig {
@@ -1072,19 +1017,6 @@ export class OrchestrationService {
       return;
     }
 
-    let releaseSlot: () => void;
-    try {
-      releaseSlot = await this.#dispatchSlots.acquire(signal);
-    } catch (error) {
-      if (!signal.aborted) throw error;
-      await this.#unavailableQualityReview(record, {
-        route: config.route,
-        childJobId: child.jobId,
-        reason: 'parent-cancelled',
-      });
-      throwIfAborted(signal);
-      return;
-    }
     let started: Awaited<ReturnType<Orchestrator['start']>>;
     try {
       started = await this.#startDelegatedJob(record, {
@@ -1106,7 +1038,6 @@ export class OrchestrationService {
         },
       });
     } catch (error) {
-      releaseSlot();
       if (error instanceof JobPersistenceError) throw error;
       await this.#unavailableQualityReview(record, {
         route: config.route,
@@ -1119,7 +1050,6 @@ export class OrchestrationService {
 
     if (pendingReview !== undefined && pendingReview.reviewerJobId !== started.job.id) {
       await Promise.allSettled([started.cancel(), started.completion]);
-      releaseSlot();
       throw new Error(`Orchestration ${record.id} resolved a different reviewer identity`);
     }
     if (pendingReview === undefined) {
@@ -1142,7 +1072,6 @@ export class OrchestrationService {
         );
       } catch (error) {
         await Promise.allSettled([started.cancel(), started.completion]);
-        releaseSlot();
         throw error;
       }
     } else if (!isTerminalStatus(started.job.status)) {
@@ -1152,12 +1081,7 @@ export class OrchestrationService {
       });
     }
 
-    let reviewerJob: JobRecord;
-    try {
-      reviewerJob = await this.#awaitJob(started, signal);
-    } finally {
-      releaseSlot();
-    }
+    const reviewerJob = await this.#awaitJob(started, signal);
     if (signal.aborted) {
       await this.#unavailableQualityReview(record, {
         route: config.route,
@@ -1285,6 +1209,7 @@ export class OrchestrationService {
       prompt: subtask.executionPrompt,
       workspace: record.request.workspace,
       route: subtask.route,
+      ...(subtask.maxToolCalls === undefined ? {} : { maxToolCalls: subtask.maxToolCalls }),
       idempotencyKey: this.#workerIdempotencyKey(record, subtask),
       ...(record.request.source === undefined ? {} : { source: record.request.source }),
       metadata: {
@@ -1350,7 +1275,6 @@ export class OrchestrationService {
         }
         return undefined;
       }
-      const releaseSlot = await this.#dispatchSlots.acquire(signal);
       try {
         const request = this.#workerRequest(record, subtask);
         let started: Awaited<ReturnType<Orchestrator['start']>> | undefined;
@@ -1430,11 +1354,9 @@ export class OrchestrationService {
             .catch((error: unknown) => ({ error }))
             .finally(() => {
               signal.removeEventListener('abort', onAbort);
-              releaseSlot();
             }),
         };
       } catch (error) {
-        releaseSlot();
         throw error;
       }
     };

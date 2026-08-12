@@ -34,6 +34,9 @@ import type {
   JobRequest,
   RouteDiagnostic,
   StartJobResult,
+  WorkerControlCapabilities,
+  WorkerControlReceipt,
+  WorkerControlRequest,
 } from './types.js';
 import { buildUsageReport, type UsageReport } from './usage-report.js';
 
@@ -106,6 +109,18 @@ export class AgentKnotRuntime {
   cancelJob(id: string, source?: string): Promise<boolean> {
     this.#assertExecutionOwner();
     return this.jobs.cancel(id, source);
+  }
+
+  workerControlCapabilities(id: string): Promise<WorkerControlCapabilities | undefined> {
+    return this.jobs.controlCapabilities(id);
+  }
+
+  controlJob(
+    id: string,
+    request: WorkerControlRequest
+  ): Promise<WorkerControlReceipt | undefined> {
+    this.#assertExecutionOwner();
+    return this.#track(this.jobs.control(id, request));
   }
 
   list(): Promise<JobRecord[]> {

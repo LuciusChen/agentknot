@@ -2,14 +2,18 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { once } from 'node:events';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { startBroker } from '../src/broker-lifecycle.js';
+import {
+  STARTUP_REPORT_PATH_ENV,
+  startBroker,
+  stopBroker,
+} from '../src/broker-lifecycle.js';
 import { readBrokerLaunchProfile } from '../src/broker-profile.js';
 import {
   readLocalDiscovery,
@@ -211,13 +215,17 @@ test('loopback serve publishes the actual port, status probes health, and gracef
     const unconfigured = await runCli(fixture, ['client', '--json']);
     assert.equal(unconfigured.code, 0, unconfigured.stderr);
     assert.deepEqual(JSON.parse(unconfigured.stdout), { status: 'unconfigured' });
+
+    const noProfile = await runCli(fixture, ['broker', 'start', '--json']);
+    assert.equal(noProfile.code, 1);
+    assert.match(noProfile.stderr, /launch is not configured.*broker up --config/);
   } finally {
     if (server !== undefined) await stopServer(server);
     await removeFixture(fixture);
   }
 });
 
-test('two selector-free CLI processes discover and share one registered server', async () => {
+test('two selector-free CLI sessions with different transient environments share one broker', async () => {
   const fixture = await createFixture();
   let server: RunningServer | undefined;
   try {
@@ -240,7 +248,20 @@ test('two selector-free CLI processes discover and share one registered server',
       ]);
     const [first, second] = await Promise.all([
       runClient('codex', 'first discovered request'),
-      runClient('claude', 'second discovered request'),
+      runCli(fixture, [
+        'orchestrate',
+        '--source',
+        'claude',
+        '--workspace',
+        fixture.workspace,
+        '--delegation',
+        'never',
+        '--assessment-json',
+        upstreamAssessmentJson,
+        '--handoff-json',
+        '--prompt',
+        'second discovered request',
+      ], { XDG_RUNTIME_DIR: undefined }),
     ]);
     assert.equal(first.code, 0, first.stderr);
     assert.equal(second.code, 0, second.stderr);
@@ -285,7 +306,10 @@ test('explicit broker lifecycle starts one detached cross-controller broker and 
 
     const status = await runCli(fixture, ['broker', 'status', '--json']);
     assert.equal(status.code, 0, status.stderr);
-    assert.deepEqual(JSON.parse(status.stdout), startResult.broker);
+    assert.deepEqual(JSON.parse(status.stdout), {
+      ...startResult.broker,
+      launchConfigured: true,
+    });
 
     const secondUp = await runCli(fixture, [
       'broker',
@@ -331,7 +355,19 @@ test('explicit broker lifecycle starts one detached cross-controller broker and 
     assert.equal(await readLocalDiscovery({ environment: fixture.environment }), undefined);
     const after = await runCli(fixture, ['broker', 'status', '--json']);
     assert.equal(after.code, 0, after.stderr);
-    assert.deepEqual(JSON.parse(after.stdout), { state: 'stopped' });
+    assert.deepEqual(JSON.parse(after.stdout), { state: 'stopped', launchConfigured: true });
+
+    const restarted = await runCli(fixture, ['broker', 'start', '--json']);
+    assert.equal(restarted.code, 0, restarted.stderr);
+    const restartResult = JSON.parse(restarted.stdout) as typeof startResult;
+    assert.equal(restartResult.action, 'started');
+    assert.notEqual(restartResult.broker.instanceId, startResult.broker.instanceId);
+    brokerPid = restartResult.broker.pid;
+
+    const finalStop = await runCli(fixture, ['broker', 'down', '--json']);
+    assert.equal(finalStop.code, 0, finalStop.stderr);
+    assert.deepEqual(JSON.parse(finalStop.stdout), { action: 'stopped' });
+    brokerPid = undefined;
   } finally {
     if (brokerPid !== undefined) {
       try {
@@ -384,6 +420,133 @@ test('broker startup reaps the exact child that misses readiness despite SIGTERM
   }
 });
 
+test('broker startup failure includes a bounded one-shot report and removes its private state', async () => {
+  const fixture = await createFixture();
+  let child: ChildProcess | undefined;
+  let reportPath: string | undefined;
+  try {
+    const configPath = await writeConfig(fixture, 'startup-diagnostics', 'startup-diagnostics');
+    const childConfigPath = await writeConfig(fixture, 'startup-child', 'other', {
+      defaultRoute: `${'startup-noise-'.repeat(400)}broker-startup-diagnostic-marker`,
+    });
+    const spawnProcess = ((
+      command: string,
+      args: readonly string[] | undefined,
+      spawnOptions: SpawnOptions = {}
+    ): ChildProcess => {
+      reportPath = (spawnOptions.env as NodeJS.ProcessEnv)[STARTUP_REPORT_PATH_ENV];
+      const childArgs = [...(args ?? [])];
+      const configIndex = childArgs.indexOf('--config');
+      assert.ok(configIndex >= 0);
+      childArgs[configIndex + 1] = childConfigPath;
+      const spawned = spawn(command, childArgs, {
+        ...spawnOptions,
+        env: { ...spawnOptions.env, ...fixture.environment },
+      });
+      child = spawned;
+      return spawned;
+    }) as unknown as typeof spawn;
+
+    await assert.rejects(
+      startBroker({
+        cliEntryPath: cliPath,
+        configPath,
+        port: 0,
+        environment: fixture.environment,
+        spawnProcess,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /broker-startup-diagnostic-marker/);
+        assert.ok(Buffer.byteLength(error.message, 'utf8') < 5 * 1024);
+        return true;
+      }
+    );
+    assert.ok(child);
+    assert.equal(child.stderr, null);
+    assert.ok(reportPath);
+    await assert.rejects(readFile(reportPath));
+    await assert.rejects(stat(path.dirname(reportPath)));
+  } finally {
+    if (child !== undefined && child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await once(child, 'exit');
+    }
+    await removeFixture(fixture);
+  }
+});
+
+test('successful broker startup owns no diagnostic pipe or retained report state', async () => {
+  const fixture = await createFixture();
+  let child: ChildProcess | undefined;
+  let reportPath: string | undefined;
+  let childEnv: NodeJS.ProcessEnv | undefined;
+  try {
+    const configPath = await writeConfig(fixture, 'startup-pipe', 'startup-pipe');
+    const spawnProcess = ((
+      command: string,
+      args: readonly string[] | undefined,
+      spawnOptions: SpawnOptions = {}
+    ): ChildProcess => {
+      childEnv = spawnOptions.env as NodeJS.ProcessEnv;
+      reportPath = childEnv[STARTUP_REPORT_PATH_ENV];
+      const spawned = spawn(command, args ?? [], spawnOptions);
+      child = spawned;
+      return spawned;
+    }) as unknown as typeof spawn;
+
+    const started = await startBroker({
+      cliEntryPath: cliPath,
+      configPath,
+      port: 0,
+      environment: fixture.environment,
+      spawnProcess,
+    });
+    assert.equal(started.action, 'started');
+    assert.ok(child);
+    assert.equal(child.stderr, null);
+    assert.equal(childEnv?.HOME, fixture.home);
+    assert.equal(childEnv?.USERPROFILE, fixture.home);
+    assert.equal(childEnv?.XDG_RUNTIME_DIR, fixture.runtime);
+    assert.ok(reportPath);
+    await assert.rejects(readFile(reportPath));
+    await assert.rejects(stat(path.dirname(reportPath)));
+    await stopBroker({ environment: fixture.environment });
+  } finally {
+    if (child !== undefined && child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM');
+      await once(child, 'exit');
+    }
+    await removeFixture(fixture);
+  }
+});
+
+test('startup failure report creation is exclusive, bounded, and mode 0600', async () => {
+  const fixture = await createFixture();
+  try {
+    const reportPath = path.join(fixture.root, 'startup-report');
+    const invalidConfig = await writeConfig(fixture, 'startup-report-invalid', 'other', {
+      defaultRoute: `${'startup-noise-'.repeat(400)}startup-report-marker`,
+    });
+    const first = await runCli(fixture, ['broker', 'run', '--config', invalidConfig], {
+      [STARTUP_REPORT_PATH_ENV]: reportPath,
+    });
+    assert.equal(first.code, 1);
+    const report = await readFile(reportPath, 'utf8');
+    assert.match(report, /startup-report-marker/);
+    assert.ok(Buffer.byteLength(report, 'utf8') <= 4 * 1024);
+    assert.equal((await stat(reportPath)).mode & 0o777, 0o600);
+
+    await writeFile(reportPath, 'sentinel');
+    await runCli(fixture, ['broker', 'run', '--config', invalidConfig], {
+      [STARTUP_REPORT_PATH_ENV]: reportPath,
+    });
+    assert.equal(await readFile(reportPath, 'utf8'), 'sentinel');
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
 test('broker down removes a stale crash record without touching an unidentified process', async () => {
   const fixture = await createFixture();
   let brokerPid: number | undefined;
@@ -410,7 +573,12 @@ test('broker down removes a stale crash record without touching an unidentified 
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(unavailable.code, 1);
-    assert.equal((JSON.parse(unavailable.stdout) as { state: string }).state, 'unavailable');
+    const unavailableReport = JSON.parse(unavailable.stdout) as {
+      state: string;
+      launchConfigured: boolean;
+    };
+    assert.equal(unavailableReport.state, 'unavailable');
+    assert.equal(unavailableReport.launchConfigured, true);
 
     const stopped = await runCli(fixture, ['broker', 'down', '--json']);
     assert.equal(stopped.code, 0, stopped.stderr);

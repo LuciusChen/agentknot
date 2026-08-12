@@ -66,43 +66,39 @@ async function writeRecord(recordPath: string, record: unknown, mode = 0o600): P
   await chmod(recordPath, mode);
 }
 
-test('local discovery chooses a valid XDG runtime path and falls back for invalid paths', async () => {
+test('local discovery uses one stable per-user path across transient session environments', async () => {
   const fixture = await createFixture();
   try {
-    const runtimePaths = await resolveLocalDiscoveryPaths({ environment: fixture.environment });
-    assert.equal(runtimePaths.directory, path.join(fixture.runtime, 'agentknot'));
-    assert.equal(runtimePaths.recordPath, path.join(runtimePaths.directory, 'server.json'));
-    assert.equal(path.isAbsolute(runtimePaths.directory), true);
-
-    const relativeRuntime = await resolveLocalDiscoveryPaths({
-      environment: { XDG_RUNTIME_DIR: 'relative-runtime', HOME: fixture.home },
+    const withTransientRuntime = await resolveLocalDiscoveryPaths({
+      environment: fixture.environment,
+      platform: 'linux',
     });
-    assert.equal(relativeRuntime.directory, path.join(fixture.home, '.cache', 'agentknot'));
-
-    const missingRuntime = await resolveLocalDiscoveryPaths({
-      environment: {
-        XDG_RUNTIME_DIR: path.join(fixture.root, 'missing-runtime'),
-        HOME: fixture.home,
-      },
+    const withoutTransientRuntime = await resolveLocalDiscoveryPaths({
+      environment: { HOME: fixture.home, USERPROFILE: fixture.home },
+      platform: 'linux',
     });
-    assert.equal(missingRuntime.directory, path.join(fixture.home, '.cache', 'agentknot'));
+    assert.deepEqual(withTransientRuntime, withoutTransientRuntime);
+    assert.equal(
+      withTransientRuntime.directory,
+      path.join(fixture.home, '.local', 'state', 'agentknot', 'broker')
+    );
+    assert.equal(withTransientRuntime.recordPath, path.join(withTransientRuntime.directory, 'server.json'));
+    assert.equal(path.isAbsolute(withTransientRuntime.directory), true);
 
-    const configuredCache = await resolveLocalDiscoveryPaths({
-      environment: {
-        XDG_RUNTIME_DIR: path.join(fixture.root, 'missing-runtime'),
-        XDG_CACHE_HOME: path.join(fixture.root, 'cache'),
-        HOME: fixture.home,
-      },
+    const mac = await resolveLocalDiscoveryPaths({
+      environment: { HOME: fixture.home },
+      platform: 'darwin',
     });
-    assert.equal(configuredCache.directory, path.join(fixture.root, 'cache', 'agentknot'));
+    assert.equal(
+      mac.directory,
+      path.join(fixture.home, 'Library', 'Application Support', 'AgentKnot', 'broker')
+    );
 
-    const insecureRuntime = path.join(fixture.root, 'insecure-runtime');
-    await mkdir(insecureRuntime, { mode: 0o755 });
-    await chmod(insecureRuntime, 0o755);
-    const insecurePaths = await resolveLocalDiscoveryPaths({
-      environment: { XDG_RUNTIME_DIR: insecureRuntime, HOME: fixture.home },
+    const windows = await resolveLocalDiscoveryPaths({
+      environment: { USERPROFILE: fixture.home },
+      platform: 'win32',
     });
-    assert.equal(insecurePaths.directory, path.join(fixture.home, '.cache', 'agentknot'));
+    assert.equal(windows.directory, path.join(fixture.home, 'AppData', 'Local', 'AgentKnot', 'broker'));
   } finally {
     await removeFixture(fixture);
   }

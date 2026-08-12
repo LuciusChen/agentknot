@@ -211,6 +211,42 @@ test('HTTP client distinguishes disconnects and reconnects only to the same admi
   }
 });
 
+test('HTTP client rejects records whose durable ID differs from the requested resource', async () => {
+  const server = createServer((request, response) => {
+    request.resume();
+    const kind = request.url?.startsWith('/v1/jobs/') ? 'job' : 'orchestration';
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({
+      [kind]: { id: `${kind}_different`, status: 'running', events: [] },
+      events: [],
+      nextSequence: 0,
+    }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string');
+  const client = new AgentKnotHttpClient(`http://127.0.0.1:${address.port}`);
+  try {
+    await assert.rejects(client.getJob('job_expected'), /does not match requested ID job_expected/);
+    await assert.rejects(client.followJob('job_expected', 0), /does not match requested ID job_expected/);
+    await assert.rejects(
+      client.getOrchestration('orchestration_expected'),
+      /does not match requested ID orchestration_expected/
+    );
+    await assert.rejects(
+      client.followOrchestration('orchestration_expected', 0),
+      /does not match requested ID orchestration_expected/
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    );
+  }
+});
+
 test('HTTP client aborts one cursor follow without reconnecting or cancelling work', async () => {
   const now = new Date().toISOString();
   const admitted: JobRecord = {
@@ -266,6 +302,248 @@ test('HTTP client aborts one cursor follow without reconnecting or cancelling wo
     controller.abort(new Error('stop observing'));
     await assert.rejects(observation, /stop observing/);
     assert.equal(follows, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    );
+  }
+});
+
+test('HTTP cursor progress exposes bounded route-neutral worker activity', async () => {
+  const now = new Date().toISOString();
+  const running: JobRecord = {
+    schemaVersion: 1,
+    id: 'job_activity_progress',
+    status: 'running',
+    request: { prompt: 'private prompt', workspace: '/private/workspace' },
+    route: {
+      name: 'route',
+      worker: 'worker',
+      provider: 'provider',
+      model: 'model',
+      requiredEnv: [],
+      maxAttempts: 1,
+      timeoutMs: 30_000,
+    },
+    createdAt: now,
+    updatedAt: now,
+    attempt: 1,
+    events: [
+      { sequence: 1, jobId: 'job_activity_progress', at: now, type: 'job.started' },
+      { sequence: 2, jobId: 'job_activity_progress', at: now, type: 'worker.started' },
+      {
+        sequence: 3,
+        jobId: 'job_activity_progress',
+        at: now,
+        type: 'worker.tool.started',
+        data: {
+          toolCallId: 'call-private',
+          toolName: 'read',
+          arguments: { path: '/private/secret' },
+        },
+      },
+    ],
+  };
+  const runtime: AgentKnotHttpRuntime = {
+    routes: () => [],
+    get: async (id) => id === running.id ? running : undefined,
+    list: async () => [running],
+    listArtifacts: async () => undefined,
+    verifyArtifacts: async () => undefined,
+    previewArtifact: async () => undefined,
+    start: async () => { throw new Error('must not start work'); },
+    eventsAfter: async () => [],
+    wait: async (id) => id === running.id ? running : undefined,
+  };
+  const http = createAgentKnotHttpServer(runtime);
+  const address = await http.listen(0);
+  const baseUrl = `http://${address.host}:${address.port}`;
+  try {
+    const batch = await new AgentKnotHttpClient(baseUrl).followJob(running.id, 3);
+    assert.equal(batch.record, undefined);
+    assert.deepEqual(batch.events, []);
+    assert.deepEqual(batch.progress?.kind === 'job' ? batch.progress.activity : undefined, {
+      schemaVersion: 1,
+      state: 'tools-running',
+      coverage: 'complete',
+      lastObserved: {
+        sequence: 3,
+        at: now,
+        type: 'worker.tool.started',
+        toolName: 'read',
+      },
+      activeTools: { count: 1, names: ['read'], namesTruncated: false },
+    });
+    const serialized = JSON.stringify(batch.progress);
+    assert.equal(serialized.includes('/private/secret'), false);
+    assert.equal(serialized.includes('call-private'), false);
+
+    running.events.push({
+      sequence: 4,
+      jobId: running.id,
+      at: now,
+      type: 'worker.tool.completed',
+      data: { toolCallId: 'call-private', toolName: 'read', result: 'private result' },
+    });
+    const completedTool = await new AgentKnotHttpClient(baseUrl).followJob(running.id, 4);
+    const completedActivity = completedTool.progress?.kind === 'job'
+      ? completedTool.progress.activity
+      : undefined;
+    assert.equal(completedActivity?.state, 'running');
+    assert.equal(completedActivity?.activeTools, undefined);
+
+    running.events.push({
+      sequence: 5,
+      jobId: running.id,
+      at: now,
+      type: 'job.worker.events.truncated',
+      data: { firstDroppedEventType: 'worker.text.delta' },
+    });
+    const truncated = await new AgentKnotHttpClient(baseUrl).followJob(running.id, 5);
+    const truncatedActivity = truncated.progress?.kind === 'job'
+      ? truncated.progress.activity
+      : undefined;
+    assert.equal(truncatedActivity?.coverage, 'truncated');
+    assert.equal(truncatedActivity?.activeTools, undefined);
+  } finally {
+    await http.close();
+  }
+});
+
+test('HTTP worker control exposes capabilities and exact durable receipts', async () => {
+  const now = new Date().toISOString();
+  const running: JobRecord = {
+    schemaVersion: 1,
+    id: 'job_http_control',
+    status: 'running',
+    request: { prompt: 'controlled task', workspace: '/tmp' },
+    route: {
+      name: 'route', worker: 'worker', provider: 'provider', model: 'model',
+      requiredEnv: [], maxAttempts: 1, timeoutMs: 30_000,
+    },
+    createdAt: now,
+    updatedAt: now,
+    attempt: 1,
+    events: [],
+  };
+  let received: unknown;
+  const runtime: AgentKnotHttpRuntime = {
+    routes: () => [],
+    get: async (id) => id === running.id ? running : undefined,
+    list: async () => [running],
+    listArtifacts: async () => undefined,
+    verifyArtifacts: async () => undefined,
+    previewArtifact: async () => undefined,
+    start: async () => { throw new Error('must not start work'); },
+    workerControlCapabilities: async (id) => id === running.id ? {
+      schemaVersion: 1,
+      jobId: running.id,
+      attempt: 1,
+      state: 'active',
+      ready: true,
+      kinds: ['steer', 'follow-up'],
+    } : undefined,
+    controlJob: async (id, request) => {
+      if (id !== running.id) return undefined;
+      received = request;
+      return {
+        schemaVersion: 1,
+        jobId: running.id,
+        controlId: request.controlId,
+        attempt: request.attempt,
+        kind: request.kind,
+        status: 'accepted',
+        durable: true,
+        requestedAt: now,
+        settledAt: now,
+      };
+    },
+  };
+  const http = createAgentKnotHttpServer(runtime);
+  const address = await http.listen(0);
+  const client = new AgentKnotHttpClient(`http://${address.host}:${address.port}`);
+  try {
+    assert.deepEqual(await client.workerControlCapabilities(running.id), {
+      schemaVersion: 1,
+      jobId: running.id,
+      attempt: 1,
+      state: 'active',
+      ready: true,
+      kinds: ['steer', 'follow-up'],
+    });
+    const request = {
+      schemaVersion: 1 as const,
+      controlId: 'http-control-1',
+      attempt: 1,
+      kind: 'steer' as const,
+      message: 'Use only the bounded seam.',
+    };
+    assert.equal((await client.controlJob(running.id, request))?.status, 'accepted');
+    assert.deepEqual(received, request);
+    assert.equal(await client.workerControlCapabilities('job_missing'), undefined);
+    assert.equal(await client.controlJob('job_missing', request), undefined);
+  } finally {
+    await http.close();
+  }
+});
+
+test('HTTP client rejects worker-control responses with mismatched request identity', async () => {
+  const now = new Date().toISOString();
+  const request = {
+    schemaVersion: 1 as const,
+    controlId: 'control-expected',
+    attempt: 2,
+    kind: 'follow-up' as const,
+    message: 'Continue within the admitted scope.',
+  };
+  const receipt = {
+    schemaVersion: 1 as const,
+    jobId: 'job_expected',
+    controlId: request.controlId,
+    attempt: request.attempt,
+    kind: request.kind,
+    status: 'accepted' as const,
+    durable: true,
+    requestedAt: now,
+    settledAt: now,
+  };
+  const mismatches = [
+    { ...receipt, jobId: 'job_different' },
+    { ...receipt, controlId: 'control-different' },
+    { ...receipt, attempt: 3 },
+    { ...receipt, kind: 'steer' as const },
+  ];
+  let responseIndex = 0;
+  const server = createServer((incoming, response) => {
+    incoming.resume();
+    response.writeHead(200, { 'content-type': 'application/json' });
+    if (incoming.method === 'GET') {
+      response.end(JSON.stringify({
+        capabilities: {
+          schemaVersion: 1,
+          jobId: 'job_different',
+          attempt: 2,
+          state: 'active',
+          ready: true,
+          kinds: ['steer', 'follow-up'],
+        },
+      }));
+      return;
+    }
+    response.end(JSON.stringify({ receipt: mismatches[responseIndex++] }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string');
+  const client = new AgentKnotHttpClient(`http://127.0.0.1:${address.port}`);
+  try {
+    await assert.rejects(client.workerControlCapabilities('job_expected'), /is invalid/);
+    for (const _mismatch of mismatches) {
+      await assert.rejects(client.controlJob('job_expected', request), /is invalid/);
+    }
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve()))
@@ -334,12 +612,29 @@ test('HTTP API accepts work from a vendor-neutral controller and exposes the res
     const createdResponse = await fetch(`${baseUrl}/v1/jobs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: 'http task', workspace, source: 'codex' }),
+      body: JSON.stringify({
+        prompt: 'http task',
+        workspace,
+        source: 'codex',
+        maxToolCalls: 7,
+      }),
     });
     assert.equal(createdResponse.status, 202);
     const created = (await createdResponse.json()) as { job: JobRecord };
     const terminal = await new AgentKnotHttpClient(baseUrl).waitForJob(created.job);
     assert.equal(terminal.status, 'succeeded');
+    assert.equal(terminal.request.maxToolCalls, 7);
+    assert.equal(terminal.route.maxToolCalls, 7);
+    const invalidBudget = await fetch(`${baseUrl}/v1/jobs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'invalid budget', workspace, maxToolCalls: 0 }),
+    });
+    assert.equal(invalidBudget.status, 400);
+    assert.match(
+      String((await invalidBudget.json() as { error: string }).error),
+      /maxToolCalls must be an integer between 1 and 1000/
+    );
     assert.equal((await fetch(`${baseUrl}/v1/jobs/${created.job.id}/wait`)).status, 404);
     const eventPaths = requestedPaths.filter((requestedPath) =>
       requestedPath.startsWith(`/v1/jobs/${created.job.id}/events?after=`)
@@ -472,6 +767,191 @@ test('HTTP close cancels and awaits active jobs before returning', async () => {
     if (http.server.listening) await http.close();
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test('HTTP drain preserves health and broker identity while rejecting new admissions', async () => {
+  const now = new Date().toISOString();
+  const admittedJob: JobRecord = {
+    schemaVersion: 1,
+    id: 'job_drain_visibility',
+    status: 'running',
+    request: { prompt: 'drain visibility', workspace: '/tmp/drain-visibility' },
+    route: {
+      name: 'mock',
+      worker: 'mock',
+      provider: 'mock',
+      model: 'mock',
+      requiredEnv: [],
+      maxAttempts: 1,
+      timeoutMs: 30_000,
+    },
+    createdAt: now,
+    updatedAt: now,
+    attempt: 1,
+    events: [],
+  };
+  let admissionStarted!: () => void;
+  const admissionStartedPromise = new Promise<void>((resolve) => {
+    admissionStarted = resolve;
+  });
+  let releaseAdmission!: () => void;
+  const admissionReleased = new Promise<void>((resolve) => {
+    releaseAdmission = resolve;
+  });
+  let shutdownStarted!: () => void;
+  const shutdownStartedPromise = new Promise<void>((resolve) => {
+    shutdownStarted = resolve;
+  });
+  let releaseShutdown!: () => void;
+  const shutdownReleased = new Promise<void>((resolve) => {
+    releaseShutdown = resolve;
+  });
+  let shutdownCalls = 0;
+  const runtime: AgentKnotHttpRuntime = {
+    routes: () => [],
+    get: async () => undefined,
+    list: async () => [],
+    listArtifacts: async () => undefined,
+    verifyArtifacts: async () => undefined,
+    previewArtifact: async () => undefined,
+    start: async () => {
+      admissionStarted();
+      await admissionReleased;
+      return {
+        job: admittedJob,
+        completion: Promise.resolve(admittedJob),
+        cancel: async () => undefined,
+      };
+    },
+    startOrchestration: async () => {
+      throw new Error('orchestration admission must be rejected during drain');
+    },
+    shutdown: async () => {
+      shutdownCalls += 1;
+      shutdownStarted();
+      await shutdownReleased;
+    },
+  };
+  const identity = {
+    schemaVersion: 1 as const,
+    service: 'agentknot-broker' as const,
+    instanceId: 'drain-visibility-instance',
+    pid: process.pid,
+    startedAt: now,
+  };
+  const http = createAgentKnotHttpServer(runtime, { brokerIdentity: identity });
+  const address = await http.listen(0);
+  const baseUrl = `http://${address.host}:${address.port}`;
+  let admission: Promise<Response> | undefined;
+  let draining: Promise<void> | undefined;
+  try {
+    admission = fetch(`${baseUrl}/v1/jobs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'admit before drain', workspace: '/tmp/drain-visibility' }),
+    });
+    await admissionStartedPromise;
+
+    draining = http.drain();
+    assert.equal(draining, http.drain(), 'drain must be idempotent');
+
+    releaseAdmission();
+    const admitted = await admission;
+    assert.equal(admitted.status, 202);
+    await shutdownStartedPromise;
+
+    const [health, broker, refusedJob, refusedOrchestration] = await Promise.all([
+      fetch(`${baseUrl}/health/live`),
+      fetch(`${baseUrl}/v1/broker`),
+      fetch(`${baseUrl}/v1/jobs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'reject during drain', workspace: '/tmp/drain-visibility' }),
+      }),
+      fetch(`${baseUrl}/v1/orchestrations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'reject during drain', workspace: '/tmp/drain-visibility' }),
+      }),
+    ]);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), {
+      ok: true,
+      service: 'agentknot',
+      status: 'live',
+      checks: {
+        storage: 'not-checked',
+        routes: 'not-checked',
+        inference: 'not-checked',
+      },
+    });
+    assert.equal(broker.status, 200);
+    assert.deepEqual(await broker.json(), identity);
+    assert.equal(refusedJob.status, 503);
+    assert.deepEqual(await refusedJob.json(), { error: 'AgentKnot server is shutting down' });
+    assert.equal(refusedOrchestration.status, 503);
+    assert.deepEqual(await refusedOrchestration.json(), {
+      error: 'AgentKnot server is shutting down',
+    });
+    assert.equal(http.server.listening, true);
+
+    releaseShutdown();
+    await draining;
+    assert.equal(shutdownCalls, 1);
+    const closing = http.close();
+    assert.equal(closing, http.close(), 'close must reuse the completed drain');
+    await closing;
+    assert.equal(http.server.listening, false);
+  } finally {
+    releaseAdmission();
+    releaseShutdown();
+    await admission?.catch(() => undefined);
+    await draining?.catch(() => undefined);
+    if (http.server.listening) await http.close().catch(() => undefined);
+  }
+});
+
+test('HTTP close releases the listener even when runtime drain fails', async () => {
+  const now = new Date().toISOString();
+  const admittedJob: JobRecord = {
+    schemaVersion: 1,
+    id: 'job_failed_drain',
+    status: 'running',
+    request: { prompt: 'failed drain', workspace: '/tmp/failed-drain' },
+    route: {
+      name: 'mock', worker: 'mock', provider: 'mock', model: 'mock',
+      requiredEnv: [], maxAttempts: 1, timeoutMs: 30_000,
+    },
+    createdAt: now,
+    updatedAt: now,
+    attempt: 1,
+    events: [],
+  };
+  const runtime: AgentKnotHttpRuntime = {
+    routes: () => [],
+    get: async () => undefined,
+    list: async () => [],
+    listArtifacts: async () => undefined,
+    verifyArtifacts: async () => undefined,
+    previewArtifact: async () => undefined,
+    start: async () => ({
+      job: admittedJob,
+      completion: Promise.resolve(admittedJob),
+      cancel: async () => undefined,
+    }),
+    shutdown: async () => {
+      throw new Error('forced drain failure');
+    },
+  };
+  const http = createAgentKnotHttpServer(runtime);
+  const address = await http.listen(0);
+  await fetch(`http://${address.host}:${address.port}/v1/jobs`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt: 'admit work', workspace: '/tmp/failed-drain' }),
+  });
+  await assert.rejects(http.close(), /forced drain failure/);
+  assert.equal(http.server.listening, false);
 });
 
 test('HTTP job listing returns bounded summaries instead of cumulative full records', async () => {

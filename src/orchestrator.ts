@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import type { AgentKnotConfig, ArtifactValidationConfig } from './config.js';
 import { canonicalJsonSha256 } from './canonical-json.js';
-import { resolveRoute } from './config.js';
+import { resolveDelegationConfig, resolveRoute } from './config.js';
 import type { ArtifactValidationExecution } from './artifact-validation.js';
 import {
   CancellationRequestedError,
@@ -12,6 +12,11 @@ import {
 import { DurableExecutionCoordinator } from './durable-execution.js';
 import { isTerminalStatus } from './execution-status.js';
 import { DurableEventSubscription } from './durable-subscription.js';
+import {
+  AttemptWorkerControlChannel,
+  normalizeWorkerControlKinds,
+  validateWorkerControlRequest,
+} from './worker-control.js';
 import {
   capturedChangedFilesSummary,
   validateWorkerCompletionReport,
@@ -38,6 +43,7 @@ import {
   type IsolatedWorkspace,
   type WorkspaceInspection,
 } from './workspace-isolation.js';
+import { validateMaxToolCalls } from './types.js';
 import type {
   JobArtifactList,
   JobArtifactPreview,
@@ -53,6 +59,9 @@ import type {
   RouteDiagnostic,
   StartJobResult,
   WorkerAdapter,
+  WorkerControlCapabilities,
+  WorkerControlReceipt,
+  WorkerControlRequest,
   WorkerEventSink,
 } from './types.js';
 
@@ -76,6 +85,18 @@ export class JobPersistenceError extends Error {
   }
 }
 
+export class JobControlPersistenceError extends Error {
+  readonly name = 'JobControlPersistenceError';
+
+  constructor(
+    readonly delivery: 'not-started' | 'uncertain',
+    cause: unknown
+  ) {
+    const details = limitErrorDetails(cause);
+    super(`Worker control persistence failed (${delivery}): ${details.message}`, { cause });
+  }
+}
+
 class WorkerToolCallLimitError extends Error {
   readonly name = 'WorkerToolCallLimitError';
 }
@@ -89,6 +110,36 @@ class WorkerReadOnlyTaskViolationError extends Error {
 }
 
 export const ROUTE_DIAGNOSTIC_TIMEOUT_MS = 30_000;
+const MAX_ACTIVITY_ID_BYTES = 256;
+const MAX_ACTIVITY_NAME_BYTES = 128;
+
+function limitedJobEventData(
+  type: JobEventType,
+  data: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (data === undefined) return undefined;
+  const limited = limitEventData(data);
+  if (
+    !('agentknotRecordLimit' in limited) ||
+    (type !== 'worker.tool.started' &&
+      type !== 'worker.tool.updated' &&
+      type !== 'worker.tool.completed')
+  ) {
+    return limited;
+  }
+  const toolCallId = typeof data.toolCallId === 'string'
+    ? limitText(data.toolCallId, MAX_ACTIVITY_ID_BYTES).value
+    : undefined;
+  const toolName = typeof data.toolName === 'string'
+    ? limitText(data.toolName, MAX_ACTIVITY_NAME_BYTES).value
+    : undefined;
+  return {
+    ...(toolCallId === undefined ? {} : { toolCallId }),
+    ...(toolName === undefined ? {} : { toolName }),
+    ...(typeof data.isError === 'boolean' ? { isError: data.isError } : {}),
+    ...limited,
+  };
+}
 
 export interface RouteDiagnosticOptions {
   live?: boolean;
@@ -110,6 +161,14 @@ interface RouteReservation {
 interface ActiveJob {
   completion: Promise<JobRecord>;
   cancel: () => void;
+}
+
+interface ActiveWorkerAttempt {
+  job: JobRecord;
+  attempt: number;
+  channel: AttemptWorkerControlChannel;
+  controlTail: Promise<void>;
+  closing: boolean;
 }
 
 function delayWithSignal(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -164,6 +223,7 @@ function normalizeRequest(request: JobRequest): JobRequest {
   if (typeof request.workspace !== 'string' || request.workspace.trim() === '') {
     throw new Error('Job workspace must be a non-empty string');
   }
+  const maxToolCalls = validateMaxToolCalls(request.maxToolCalls, 'Job maxToolCalls');
   assertTextLimit('Job prompt', request.prompt, MAX_PROMPT_BYTES);
   if (request.callbackUrl !== undefined) {
     const callback = new URL(request.callbackUrl);
@@ -182,6 +242,7 @@ function normalizeRequest(request: JobRequest): JobRequest {
     prompt: request.prompt,
     workspace: path.resolve(request.workspace),
     ...(request.route === undefined ? {} : { route: request.route }),
+    ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
     ...(request.source === undefined ? {} : { source: request.source }),
     ...(request.callbackUrl === undefined ? {} : { callbackUrl: request.callbackUrl }),
     ...(request.metadata === undefined ? {} : { metadata: structuredClone(request.metadata) }),
@@ -189,6 +250,15 @@ function normalizeRequest(request: JobRequest): JobRequest {
       ? {}
       : { idempotencyKey: request.idempotencyKey }),
   };
+}
+
+function effectiveRoute(
+  route: ReturnType<typeof resolveRoute>,
+  taskMaxToolCalls: number | undefined
+): ReturnType<typeof resolveRoute> {
+  if (taskMaxToolCalls === undefined) return route;
+  if (route.maxToolCalls !== undefined && route.maxToolCalls <= taskMaxToolCalls) return route;
+  return { ...route, maxToolCalls: taskMaxToolCalls };
 }
 
 export class Orchestrator {
@@ -205,7 +275,10 @@ export class Orchestrator {
   readonly #routeActivity = new Map<string, number>();
   readonly #routePoolCursor = new Map<string, number>();
   readonly #activeJobs = new Map<string, ActiveJob>();
+  readonly #activeAttempts = new Map<string, ActiveWorkerAttempt>();
+  readonly #controlOperations = new Map<string, Promise<WorkerControlReceipt>>();
   readonly #durability: DurableExecutionCoordinator<JobRecord>;
+  readonly #capacityLimit: number;
   readonly #subscriptions: DurableEventSubscription<JobEvent, JobRecord>;
 
   constructor(options: OrchestratorOptions) {
@@ -226,8 +299,10 @@ export class Orchestrator {
         `diagnosticTimeoutMs must be an integer between 1 and ${ROUTE_DIAGNOSTIC_TIMEOUT_MS}`
       );
     }
+    this.#capacityLimit = resolveDelegationConfig(this.#config).dispatch.maxConcurrency;
     this.#durability = new DurableExecutionCoordinator(this.#store, {
       now: this.#now,
+      capacityLimit: this.#capacityLimit,
       ...(options.leaseTtlMs === undefined ? {} : { leaseTtlMs: options.leaseTtlMs }),
       ...(options.leaseHeartbeatMs === undefined
         ? {}
@@ -464,6 +539,272 @@ export class Orchestrator {
     return true;
   }
 
+  async controlCapabilities(id: string): Promise<WorkerControlCapabilities | undefined> {
+    const active = this.#activeAttempts.get(id);
+    const job = active?.job ?? await this.#store.get(id);
+    if (job === undefined) return undefined;
+    const adapter = this.#adapters.get(job.route.worker);
+    const kinds = adapter?.controlCapabilities === undefined
+      ? []
+      : normalizeWorkerControlKinds(adapter.controlCapabilities(job.route));
+    const current = active !== undefined && !active.closing && active.attempt === job.attempt;
+    return {
+      schemaVersion: 1,
+      jobId: job.id,
+      attempt: job.attempt,
+      state: current ? 'active' : 'inactive',
+      ready: current && active.channel.ready,
+      kinds,
+    };
+  }
+
+  async control(
+    id: string,
+    value: WorkerControlRequest
+  ): Promise<WorkerControlReceipt | undefined> {
+    const request = validateWorkerControlRequest(value);
+    const active = this.#activeAttempts.get(id);
+    const job = active?.job ?? await this.#store.get(id);
+    if (job === undefined) return undefined;
+    const operationKey = `${id}\u0000${request.controlId}`;
+    const inFlight = this.#controlOperations.get(operationKey);
+    if (inFlight !== undefined) return inFlight;
+
+    const requested = job.events.find((event) =>
+      event.type === 'job.control.requested' && event.data?.controlId === request.controlId
+    );
+    if (requested !== undefined) {
+      if (
+        requested.data?.attempt !== request.attempt ||
+        requested.data?.kind !== request.kind ||
+        requested.data?.message !== request.message
+      ) {
+        throw new Error(`Worker control ID ${request.controlId} was reused with a different request`);
+      }
+      const settled = job.events.find((event) =>
+        event.sequence > requested.sequence &&
+        (event.type === 'job.control.accepted' ||
+          event.type === 'job.control.rejected' ||
+          event.type === 'job.control.lost') &&
+        event.data?.controlId === request.controlId
+      );
+      if (settled !== undefined) {
+        const status = settled.type === 'job.control.accepted'
+          ? 'accepted'
+          : settled.type === 'job.control.lost'
+            ? 'lost'
+            : this.#controlRejectionStatus(settled.data?.status);
+        return this.#controlReceipt(job.id, request, status, true, requested.at, settled.at,
+          typeof settled.data?.reason === 'string' ? settled.data.reason : undefined);
+      }
+      if (active === undefined || active.closing || active.attempt !== request.attempt) {
+        return this.#controlReceipt(
+          job.id,
+          request,
+          'lost',
+          false,
+          requested.at,
+          this.#now().toISOString(),
+          'control-delivery-unsettled'
+        );
+      }
+      return this.#queueControl(
+        active,
+        operationKey,
+        () => this.#settleUntrackedControl(active, request, requested.at)
+      );
+    }
+
+    if (active === undefined || active.closing) {
+      const now = this.#now().toISOString();
+      return this.#controlReceipt(
+        job.id,
+        request,
+        'stale-attempt',
+        false,
+        now,
+        now,
+        'worker-attempt-not-active'
+      );
+    }
+
+    return this.#queueControl(active, operationKey, () => this.#deliverControl(active, request));
+  }
+
+  #queueControl(
+    active: ActiveWorkerAttempt,
+    operationKey: string,
+    run: () => Promise<WorkerControlReceipt>
+  ): Promise<WorkerControlReceipt> {
+    const operation = active.controlTail.then(run);
+    active.controlTail = operation.then(() => undefined, () => undefined);
+    this.#controlOperations.set(operationKey, operation);
+    const cleanup = () => {
+      this.#controlOperations.delete(operationKey);
+    };
+    void operation.then(cleanup, cleanup);
+    return operation;
+  }
+
+  #controlRejectionStatus(value: unknown): 'unsupported' | 'stale-attempt' | 'adapter-rejected' {
+    return value === 'unsupported' || value === 'stale-attempt' ? value : 'adapter-rejected';
+  }
+
+  #controlReceipt(
+    jobId: string,
+    request: WorkerControlRequest,
+    status: WorkerControlReceipt['status'],
+    durable: boolean,
+    requestedAt: string,
+    settledAt: string,
+    reason?: string
+  ): WorkerControlReceipt {
+    return {
+      schemaVersion: 1,
+      jobId,
+      controlId: request.controlId,
+      attempt: request.attempt,
+      kind: request.kind,
+      status,
+      durable,
+      requestedAt,
+      settledAt,
+      ...(reason === undefined ? {} : { reason }),
+    };
+  }
+
+  async #settleUntrackedControl(
+    active: ActiveWorkerAttempt,
+    request: WorkerControlRequest,
+    requestedAt: string
+  ): Promise<WorkerControlReceipt> {
+    const settledAt = this.#now().toISOString();
+    try {
+      await this.#emit(active.job, 'job.control.lost', {
+        controlId: request.controlId,
+        attempt: request.attempt,
+        kind: request.kind,
+        status: 'lost',
+        reason: 'control-delivery-unsettled',
+      }, settledAt);
+    } catch (error) {
+      throw new JobControlPersistenceError('uncertain', error);
+    }
+    return this.#controlReceipt(
+      active.job.id,
+      request,
+      'lost',
+      true,
+      requestedAt,
+      settledAt,
+      'control-delivery-unsettled'
+    );
+  }
+
+  async #deliverControl(
+    active: ActiveWorkerAttempt,
+    request: WorkerControlRequest
+  ): Promise<WorkerControlReceipt> {
+    const requestedAt = this.#now().toISOString();
+    try {
+      await this.#emit(active.job, 'job.control.requested', {
+        controlId: request.controlId,
+        attempt: request.attempt,
+        kind: request.kind,
+        message: request.message,
+      }, requestedAt);
+    } catch (error) {
+      throw new JobControlPersistenceError('not-started', error);
+    }
+
+    let status: WorkerControlReceipt['status'];
+    let reason: string | undefined;
+    let delivered = false;
+    if (
+      request.attempt !== active.attempt ||
+      active.closing ||
+      this.#activeAttempts.get(active.job.id) !== active
+    ) {
+      status = 'stale-attempt';
+      reason = request.attempt === active.attempt
+        ? 'worker-attempt-closing'
+        : `active-attempt-is-${active.attempt}`;
+    } else {
+      const adapter = this.#adapters.get(active.job.route.worker);
+      const kinds = adapter?.controlCapabilities === undefined
+        ? []
+        : normalizeWorkerControlKinds(adapter.controlCapabilities(active.job.route));
+      if (!kinds.includes(request.kind)) {
+        status = 'unsupported';
+        reason = 'worker-control-kind-unsupported';
+      } else {
+        const delivery = await active.channel.deliver({
+          controlId: request.controlId,
+          kind: request.kind,
+          message: request.message,
+        });
+        delivered = delivery.delivered;
+        status = delivery.uncertain
+          ? 'lost'
+          : delivery.result.accepted
+            ? 'accepted'
+            : 'adapter-rejected';
+        if (!delivery.result.accepted) reason = delivery.result.reason;
+      }
+    }
+
+    const settledAt = this.#now().toISOString();
+    const eventType = status === 'accepted'
+      ? 'job.control.accepted'
+      : status === 'lost'
+        ? 'job.control.lost'
+        : 'job.control.rejected';
+    try {
+      await this.#emit(active.job, eventType, {
+        controlId: request.controlId,
+        attempt: request.attempt,
+        kind: request.kind,
+        status,
+        ...(reason === undefined ? {} : { reason }),
+      }, settledAt);
+    } catch (error) {
+      if (!delivered) throw new JobControlPersistenceError('not-started', error);
+      const lostAt = this.#now().toISOString();
+      try {
+        await this.#emit(active.job, 'job.control.lost', {
+          controlId: request.controlId,
+          attempt: request.attempt,
+          kind: request.kind,
+          status: 'lost',
+          reason: 'control-receipt-persistence-failed',
+        }, lostAt);
+      } catch (lostError) {
+        throw new JobControlPersistenceError(
+          'uncertain',
+          new AggregateError([error, lostError], 'Control receipt and lost evidence both failed')
+        );
+      }
+      return this.#controlReceipt(
+        active.job.id,
+        request,
+        'lost',
+        true,
+        requestedAt,
+        lostAt,
+        'control-receipt-persistence-failed'
+      );
+    }
+    return this.#controlReceipt(
+      active.job.id,
+      request,
+      status,
+      true,
+      requestedAt,
+      settledAt,
+      reason
+    );
+  }
+
   async shutdown(): Promise<void> {
     const active = [...this.#activeJobs.entries()];
     await Promise.allSettled(active.map(([id]) => this.cancel(id, 'kernel-shutdown')));
@@ -610,6 +951,9 @@ export class Orchestrator {
         throw new Error(`Job ${current.id} has unsupported recovery status ${current.status}`);
       }
       job = current;
+      if (job.status === 'running') {
+        await this.#markPendingControlsLost(job, job.attempt);
+      }
       const cancellation = await this.#durability.getCancellation(job.id);
       if (cancellation !== undefined) {
         await this.#settleRecoveredJob(job, 'cancelled', {
@@ -776,6 +1120,36 @@ export class Orchestrator {
       job.completedAt
     );
     await this.#deliverCallback(job);
+  }
+
+  async #markPendingControlsLost(
+    job: JobRecord,
+    attempt: number,
+    reason = 'execution-owner-lost'
+  ): Promise<void> {
+    const requested = job.events.filter((event) =>
+      event.type === 'job.control.requested' && event.data?.attempt === attempt
+    );
+    for (const requestEvent of requested) {
+      const controlId = requestEvent.data?.controlId;
+      const kind = requestEvent.data?.kind;
+      if (typeof controlId !== 'string' || (kind !== 'steer' && kind !== 'follow-up')) continue;
+      const settled = job.events.some((event) =>
+        event.sequence > requestEvent.sequence &&
+        (event.type === 'job.control.accepted' ||
+          event.type === 'job.control.rejected' ||
+          event.type === 'job.control.lost') &&
+        event.data?.controlId === controlId
+      );
+      if (settled) continue;
+      await this.#emit(job, 'job.control.lost', {
+        controlId,
+        attempt,
+        kind,
+        status: 'lost',
+        reason,
+      });
+    }
   }
 
   async run(request: JobRequest): Promise<JobRecord> {
@@ -1069,7 +1443,7 @@ export class Orchestrator {
       schemaVersion: 1,
       status: 'queued',
       request,
-      route: reservation.route,
+      route: effectiveRoute(reservation.route, request.maxToolCalls),
       ...(reservation.selection === undefined
         ? {}
         : { routePoolSelection: structuredClone(reservation.selection) }),
@@ -1181,6 +1555,11 @@ export class Orchestrator {
     inspection: WorkspaceInspection | undefined,
     startAttempt: number
   ): Promise<void> {
+    await this.#durability.waitForCapacity(job.id, jobSignal, async () => {
+      await this.#emit(job, 'job.capacity.waiting', {
+        maxConcurrency: this.#capacityLimit,
+      });
+    });
     if (job.status === 'queued') {
       const previousAttempt = job.attempt;
       job.attempt = startAttempt;
@@ -1213,6 +1592,15 @@ export class Orchestrator {
         () => attemptController.abort(new Error(`Worker timed out after ${job.route.timeoutMs}ms`)),
         job.route.timeoutMs
       );
+      const controlChannel = new AttemptWorkerControlChannel();
+      const activeAttempt: ActiveWorkerAttempt = {
+        job,
+        attempt,
+        channel: controlChannel,
+        controlTail: Promise.resolve(),
+        closing: false,
+      };
+      this.#activeAttempts.set(job.id, activeAttempt);
       let attemptActive = true;
       let toolCalls = 0;
       const workerEmit: WorkerEventSink = async (type, data) => {
@@ -1221,7 +1609,7 @@ export class Orchestrator {
           toolCalls += 1;
           if (toolCalls > job.route.maxToolCalls) {
             const error = new WorkerToolCallLimitError(
-              `Worker exceeded route ${job.route.name} tool-call limit of ${job.route.maxToolCalls}`
+              `Worker exceeded effective Job tool-call limit of ${job.route.maxToolCalls}`
             );
             attemptController.abort(error);
             throw error;
@@ -1232,6 +1620,7 @@ export class Orchestrator {
       let isolated: IsolatedWorkspace | undefined;
       let result: Awaited<ReturnType<WorkerAdapter['run']>> | undefined;
       let failure: unknown;
+      let controlSettlementFailure: unknown;
 
       try {
         if (inspection) isolated = await this.#workspaceIsolation.create(inspection, job.id, attempt);
@@ -1248,6 +1637,7 @@ export class Orchestrator {
             route: job.route,
             attempt,
             signal: attemptController.signal,
+            control: controlChannel,
           },
           workerEmit
         );
@@ -1260,6 +1650,19 @@ export class Orchestrator {
         failure = error;
       } finally {
         attemptActive = false;
+        activeAttempt.closing = true;
+        controlChannel.close();
+        await activeAttempt.controlTail;
+        try {
+          await this.#markPendingControlsLost(
+            job,
+            attempt,
+            'worker-attempt-closed-before-control-settlement'
+          );
+        } catch (error) {
+          controlSettlementFailure = error;
+        }
+        if (this.#activeAttempts.get(job.id) === activeAttempt) this.#activeAttempts.delete(job.id);
         clearTimeout(timeout);
         jobSignal.removeEventListener('abort', onJobAbort);
         if (isolated) {
@@ -1295,6 +1698,7 @@ export class Orchestrator {
             }
           }
         }
+        if (controlSettlementFailure !== undefined) failure = controlSettlementFailure;
       }
 
       if (
@@ -1428,12 +1832,15 @@ export class Orchestrator {
         }
       }
       const previousUpdatedAt = job.updatedAt;
+      const persistedData = appendedData === undefined
+        ? undefined
+        : limitedJobEventData(appendedType, appendedData);
       const event: JobEvent = {
         sequence: job.events.length + 1,
         jobId: job.id,
         at,
         type: appendedType,
-        ...(appendedData === undefined ? {} : { data: limitEventData(appendedData) }),
+        ...(persistedData === undefined ? {} : { data: persistedData }),
       };
       appended = event;
       job.events.push(event);

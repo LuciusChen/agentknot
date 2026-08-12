@@ -93,6 +93,24 @@ export const ROUTE_POOL_STRATEGIES = ['least-active'] as const;
 
 export type RoutePoolStrategy = (typeof ROUTE_POOL_STRATEGIES)[number];
 
+export const MAX_TOOL_CALLS = 1_000;
+
+export function validateMaxToolCalls(
+  value: unknown,
+  label = 'maxToolCalls'
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > MAX_TOOL_CALLS
+  ) {
+    throw new Error(`${label} must be an integer between 1 and ${MAX_TOOL_CALLS}`);
+  }
+  return value;
+}
+
 /** Immutable admission evidence for a logical pool target resolved to one concrete route. */
 export interface JobRoutePoolSelection {
   pool: string;
@@ -109,6 +127,8 @@ export interface JobRequest {
   prompt: string;
   workspace: string;
   route?: string;
+  /** Optional controller-authored hard stop for normalized tool executions in this Job. */
+  maxToolCalls?: number;
   /** Free-form caller identity. No controller vendor is privileged by the protocol. */
   source?: string;
   callbackUrl?: string;
@@ -153,6 +173,7 @@ export interface JobError {
 
 export type JobEventType =
   | 'job.queued'
+  | 'job.capacity.waiting'
   | 'job.started'
   | 'job.attempt.lost'
   | 'job.recovery.started'
@@ -163,6 +184,10 @@ export type JobEventType =
   | 'job.artifact'
   | 'job.observer.failed'
   | 'job.worker.events.truncated'
+  | 'job.control.requested'
+  | 'job.control.accepted'
+  | 'job.control.rejected'
+  | 'job.control.lost'
   | 'worker.started'
   | 'worker.text.delta'
   | 'worker.tool.started'
@@ -309,6 +334,71 @@ export interface WorkerRunInput {
   route: ResolvedRoute;
   attempt: number;
   signal: AbortSignal;
+  /** Attempt-scoped live control. Omitted when the caller does not provide a control channel. */
+  control?: WorkerControlPort;
+}
+
+export const WORKER_CONTROL_KINDS = ['steer', 'follow-up'] as const;
+
+export type WorkerControlKind = (typeof WORKER_CONTROL_KINDS)[number];
+
+export interface WorkerControlRequest {
+  schemaVersion: 1;
+  controlId: string;
+  attempt: number;
+  kind: WorkerControlKind;
+  message: string;
+}
+
+export const WORKER_CONTROL_RECEIPT_STATUSES = [
+  'accepted',
+  'unsupported',
+  'stale-attempt',
+  'adapter-rejected',
+  'lost',
+] as const;
+
+export type WorkerControlReceiptStatus = (typeof WORKER_CONTROL_RECEIPT_STATUSES)[number];
+
+export interface WorkerControlReceipt {
+  schemaVersion: 1;
+  jobId: string;
+  controlId: string;
+  attempt: number;
+  kind: WorkerControlKind;
+  status: WorkerControlReceiptStatus;
+  durable: boolean;
+  requestedAt: string;
+  settledAt: string;
+  reason?: string;
+}
+
+export interface WorkerControlCapabilities {
+  schemaVersion: 1;
+  jobId: string;
+  attempt: number;
+  state: 'active' | 'inactive';
+  ready: boolean;
+  kinds: WorkerControlKind[];
+}
+
+export interface WorkerControlAdapterRequest {
+  controlId: string;
+  kind: WorkerControlKind;
+  message: string;
+}
+
+export type WorkerControlAdapterResult =
+  | { accepted: true }
+  | { accepted: false; reason: string };
+
+export type WorkerControlHandler = (
+  request: WorkerControlAdapterRequest
+) => Promise<WorkerControlAdapterResult>;
+
+/** Input-scoped binding; implementations must not keep a global Job-to-process registry. */
+export interface WorkerControlPort {
+  bind(handler: WorkerControlHandler): () => void;
 }
 
 export interface WorkerRunResult {
@@ -365,6 +455,8 @@ export type WorkerEventSink = (
 export interface WorkerAdapter {
   readonly name: string;
   doctor(route: ResolvedRoute): Promise<WorkerHealth>;
+  /** Optional route-dependent live-control capabilities. Omission means unsupported. */
+  controlCapabilities?(route: ResolvedRoute): readonly WorkerControlKind[];
   /**
    * Optional one-shot live inference capability used by route diagnostics only.
    * Implementations must honor signal and settle after abort.

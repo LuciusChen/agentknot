@@ -25,7 +25,7 @@ import type {
   TaskAssessment,
 } from '../src/orchestration-types.js';
 import { JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
-import { MemoryJobStore } from '../src/store.js';
+import { MemoryJobStore, SqliteJobStore } from '../src/store.js';
 import type {
   ResolvedRoute,
   WorkerAdapter,
@@ -69,9 +69,10 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 async function waitFor(condition: () => Promise<boolean>, message: string): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
     if (await condition()) return;
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`Timed out waiting for ${message}`);
 }
@@ -518,21 +519,27 @@ function createServices(
 
 test('OrchestrationService persists a plan before dispatching bounded child jobs', async () => {
   const workspace = await createGitWorkspace('agentknot-orchestration-');
-  const adapter = new PlannerAndWorkerAdapter(assessment);
+  const boundedAssessment: TaskAssessment = {
+    ...assessment,
+    subtasks: assessment.subtasks.map((subtask, index) =>
+      index === 0 ? { ...subtask, maxToolCalls: 7 } : subtask
+    ),
+  };
+  const adapter = new PlannerAndWorkerAdapter(boundedAssessment);
   const { jobStore, orchestrations, orchestrationStore } = createServices(adapter);
 
   const record = await orchestrations.run({
     prompt: 'Review the tests and update the documentation.',
     workspace,
-    assessment,
+    assessment: boundedAssessment,
     source: 'claude',
   });
 
   assert.equal(record.status, 'succeeded');
   assert.equal(record.plan?.decision, 'split');
   assert.equal(record.plan?.willDispatch, true);
-  assert.deepEqual(record.request.assessment, assessment);
-  assert.notEqual(record.request.assessment, assessment);
+  assert.deepEqual(record.request.assessment, boundedAssessment);
+  assert.notEqual(record.request.assessment, boundedAssessment);
   assert.equal(record.children.length, 2);
   assert.equal(record.children.every((child) => child.status === 'succeeded'), true);
   assert.equal(record.children.every((child) => child.planHash === record.plan?.planHash), true);
@@ -568,6 +575,14 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
       (job) => (job.request.metadata?.agentknotDelegation as Record<string, unknown> | undefined)?.role === 'worker'
     ),
     true
+  );
+  assert.deepEqual(
+    jobs.map((job) => job.request.maxToolCalls).sort(),
+    [7, undefined]
+  );
+  assert.deepEqual(
+    jobs.map((job) => job.route.maxToolCalls).sort(),
+    [7, undefined]
   );
   for (const child of jobs) {
     const provenance = child.request.metadata?.agentknotDelegation as Record<string, unknown>;
@@ -1480,36 +1495,58 @@ test('OrchestrationService cancellation stops active child jobs and does not lau
   assert.equal(record.events.at(-1)?.type, 'orchestration.cancelled');
 });
 
-test('OrchestrationService cancellation removes a child blocked on the shared dispatch semaphore', async () => {
+test('direct and delegated Jobs share capacity and cancellation removes a durable waiter', async () => {
   const workspace = await createGitWorkspace('agentknot-orchestration-blocked-cancel-');
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-global-capacity-store-'));
   const adapter = new BlockingWorkerAdapter();
-  const { jobStore, orchestrations, orchestrationStore } = createServices(adapter, 1);
+  const config = testConfig(1);
+  const jobStore = await SqliteJobStore.open(directory);
+  const jobs = new Orchestrator({
+    config,
+    store: jobStore,
+    adapters: new Map([[adapter.name, adapter]]),
+    leaseTtlMs: 500,
+    leaseHeartbeatMs: 100,
+  });
+  const orchestrations = new OrchestrationService({
+    config: config.delegation!,
+    jobs,
+    store: new MemoryOrchestrationStore(),
+  });
 
-  const first = await orchestrations.start({ prompt: 'Hold the worker slot.', workspace, assessment });
+  const first = await jobs.start({ prompt: 'Hold the shared Job slot.', workspace });
   await adapter.workerStarted;
 
   const second = await orchestrations.start({ prompt: 'Wait for the worker slot.', workspace, assessment });
   await waitFor(
     async () => {
-      const record = await orchestrationStore.get(second.orchestration.id);
-      return record?.events.some((event) => event.type === 'orchestration.handoff.accepted') === true;
+      const records = await jobStore.list();
+      return records.some(
+        (job) =>
+          job.request.metadata?.agentknotDelegation !== undefined &&
+          job.events.some((event) => event.type === 'job.capacity.waiting')
+      );
     },
-    'the second orchestration to accept the handoff'
+    'the delegated child to enter the shared capacity queue'
   );
-  assert.equal((await jobStore.list()).length, 1, 'the blocked child must not be admitted');
+  assert.equal((await jobStore.list()).length, 2, 'the blocked child must be durably admitted');
+  assert.equal(adapter.workerRuns, 1, 'the queued child must not invoke the adapter');
+  assert.equal(adapter.activeRuns, 1, 'the direct Job remains the only active execution');
 
   await second.cancel();
   const cancelled = await second.completion;
   assert.equal(cancelled.status, 'cancelled');
-  assert.equal(cancelled.children.length, 0);
+  assert.equal(cancelled.children.length, 1);
+  assert.equal(cancelled.children[0]?.status, 'cancelled');
   assert.equal(cancelled.events.at(-1)?.type, 'orchestration.cancelled');
-  assert.equal((await jobStore.list()).length, 1, 'cancelling a semaphore waiter must not start a job');
+  assert.equal((await jobStore.list()).length, 2, 'the cancelled waiter remains durable evidence');
+  assert.equal(adapter.workerRuns, 1, 'cancelling a capacity waiter must not start its adapter');
   assert.equal(adapter.activeRuns, 1, 'the first child remains the only active execution');
 
   await first.cancel();
-  const firstCancelled = await first.completion;
-  assert.equal(firstCancelled.status, 'cancelled');
+  assert.equal((await first.completion).status, 'cancelled');
   assert.equal(adapter.activeRuns, 0, 'all admitted work must settle after cancellation');
+  await jobStore.close();
 });
 
 test('OrchestrationService aggregates failed children while preserving child retries', async () => {
@@ -1788,9 +1825,12 @@ test('OrchestrationService propagates child control-plane persistence failure wi
   const child = (await jobStore.list()).find(
     (job) => (job.request.metadata?.agentknotDelegation as Record<string, unknown>)?.role === 'worker'
   );
-
   assert.equal(parent.status, 'dispatching');
-  assert.equal(parent.children[0]?.status, 'running');
+  assert.equal(
+    parent.children[0]?.status,
+    'queued',
+    'the parent keeps its last durable child-admission evidence after the control-plane failure'
+  );
   assert.equal(parent.events.some((event) => event.type === 'orchestration.child.completed'), false);
   assert.equal(child?.status, 'running');
   assert.equal(child?.error, undefined);
