@@ -65,6 +65,8 @@ test('optional controller packages expose one common MCP client without per-prom
     assert.match(body, /upstream controller owns intent, planning, decomposition, acceptance/);
     assert.match(body, /agentknot_broker_status/);
     assert.match(body, /agentknot_broker_start/);
+    assert.match(body, /identity-matching crash-stale discovery/);
+    assert.match(body, /without local-runtime, worker, provider, or model fallback/);
     assert.match(body, /agentknot_delegation_policy/);
     assert.match(body, /agentknot_orchestration_start/);
     assert.match(body, /agentknot_orchestration_status/);
@@ -111,7 +113,7 @@ test('controller packages load one stateless contract on start, resume, clear, a
     assert.equal(hooks.hooks.SessionStart?.[0]?.matcher, 'startup|resume|clear|compact');
     assert.equal(hooks.hooks.SessionStart?.[0]?.hooks[0]?.type, 'command');
     assert.equal(hooks.hooks.SessionStart?.[0]?.hooks[0]?.timeout, 2);
-    assert.equal(hooks.hooks.SessionStart?.[0]?.hooks[0]?.additionalContextLimit, 1200);
+    assert.equal(hooks.hooks.SessionStart?.[0]?.hooks[0]?.additionalContextLimit, 800);
     assert.doesNotMatch(hooksSource, /UserPromptSubmit|PostToolUse|SessionEnd/);
 
     const scriptPath = path.join(repositoryRoot, integration.sessionStart);
@@ -131,6 +133,7 @@ test('controller packages load one stateless contract on start, resume, clear, a
       assert.match(output.hookSpecificOutput.additionalContext, /controller-neutral middleware/);
       assert.match(output.hookSpecificOutput.additionalContext, /must load and follow/);
       assert.match(output.hookSpecificOutput.additionalContext, /controller retains intent, planning/);
+      assert.ok(output.hookSpecificOutput.additionalContext.length <= 800);
       assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /must not be read/);
     }
     for (const input of [
