@@ -472,7 +472,7 @@ function testConfig(maxConcurrency = 1, workerMaxAttempts = 1, maxChildren = 2):
       mode: 'auto',
       dispatch: { defaultRoute: 'worker', maxChildren, maxDepth: 1, maxConcurrency },
       policy: {
-        delegate: ['test-gap-analysis', 'documentation'],
+        delegate: ['test-gap-analysis', 'documentation', 'repository-analysis'],
         keepUpstream: ['product-decision', 'artifact-integration', 'commit', 'push'],
       },
     },
@@ -574,6 +574,70 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
     assert.equal(provenance.planHash, record.plan?.planHash);
     assert.equal(provenance.policyVersion, 1);
   }
+});
+
+test('delegated repository analysis fails once when its isolated worktree contains changes', async () => {
+  const workspace = await createGitWorkspace('agentknot-read-only-analysis-');
+  let runs = 0;
+  const readOnlyAssessment: TaskAssessment = {
+    schemaVersion: 1,
+    recommendation: 'delegate',
+    complexity: 'low',
+    parallelizable: false,
+    taskKinds: ['repository-analysis'],
+    reasoning: 'One bounded read-only repository analysis has objective evidence criteria.',
+    subtasks: [
+      {
+        title: 'Inspect one file',
+        kind: 'repository-analysis',
+        prompt: 'Inspect README.md without modifying the repository.',
+        acceptanceCriteria: ['Return one concise finding with path evidence'],
+      },
+    ],
+  };
+  const adapter: WorkerAdapter = {
+    name: 'test',
+    async doctor() {
+      return { ok: true, message: 'read-only violation fixture ready' };
+    },
+    async run(input) {
+      runs += 1;
+      await writeFile(path.join(input.workspace, 'unexpected.txt'), 'must remain an artifact only\n');
+      return {
+        output: 'analysis claimed complete',
+        completionReport: {
+          schemaVersion: 1,
+          taskOutcome: 'completed',
+          changedFiles: [],
+          checksRun: [],
+          remainingRisks: [],
+          notes: [],
+        },
+      };
+    },
+  };
+  const { jobStore, orchestrations } = createServices(adapter, 1, 2);
+
+  const record = await orchestrations.run({
+    prompt: 'Inspect one repository file without making changes.',
+    workspace,
+    assessment: readOnlyAssessment,
+    source: 'codex',
+  });
+  const [child] = await jobStore.list();
+
+  assert.equal(record.status, 'failed');
+  assert.equal(child?.status, 'failed');
+  assert.equal(child?.attempt, 1);
+  assert.equal(child?.error?.name, 'WorkerReadOnlyTaskViolationError');
+  assert.equal(child?.error?.retryable, false);
+  assert.deepEqual(child?.artifacts?.[0]?.changedFiles, ['unexpected.txt']);
+  assert.equal(child?.events.some((event) => event.type === 'job.retrying'), false);
+  assert.equal(runs, 1);
+  assert.equal(await gitStatus(workspace), '');
+  await assert.rejects(readFile(path.join(workspace, 'unexpected.txt')));
+
+  await rm(workspace, { recursive: true, force: true });
 });
 
 test('OrchestrationService persists one shared task context and projects it into child execution', async () => {

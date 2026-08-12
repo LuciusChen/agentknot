@@ -84,6 +84,10 @@ class WorkerTaskBlockedError extends Error {
   readonly name = 'WorkerTaskBlockedError';
 }
 
+class WorkerReadOnlyTaskViolationError extends Error {
+  readonly name = 'WorkerReadOnlyTaskViolationError';
+}
+
 export const ROUTE_DIAGNOSTIC_TIMEOUT_MS = 30_000;
 
 export interface RouteDiagnosticOptions {
@@ -144,6 +148,13 @@ function abortError(signal: AbortSignal): Error {
   if (signal.reason instanceof Error) return signal.reason;
   if (typeof signal.reason === 'string' && signal.reason !== '') return new Error(signal.reason);
   return new Error('Operation aborted');
+}
+
+function delegationMetadata(job: JobRecord): Record<string, unknown> | undefined {
+  const delegated = job.request.metadata?.agentknotDelegation;
+  return typeof delegated === 'object' && delegated !== null && !Array.isArray(delegated)
+    ? (delegated as Record<string, unknown>)
+    : undefined;
 }
 
 function normalizeRequest(request: JobRequest): JobRequest {
@@ -709,13 +720,19 @@ export class Orchestrator {
   }
 
   #delegatedParentId(job: JobRecord): string | undefined {
-    const delegated = job.request.metadata?.agentknotDelegation;
-    if (typeof delegated !== 'object' || delegated === null || Array.isArray(delegated)) return undefined;
-    const value = delegated as Record<string, unknown>;
+    const value = delegationMetadata(job);
+    if (value === undefined) return undefined;
     return value.depth === 1 &&
       (value.role === 'worker' || value.role === 'reviewer') &&
       typeof value.orchestrationId === 'string'
       ? value.orchestrationId
+      : undefined;
+  }
+
+  #delegatedWorkerTaskKind(job: JobRecord): string | undefined {
+    const value = delegationMetadata(job);
+    return value?.depth === 1 && value.role === 'worker' && typeof value.taskKind === 'string'
+      ? value.taskKind
       : undefined;
   }
 
@@ -1280,6 +1297,20 @@ export class Orchestrator {
         }
       }
 
+      if (
+        failure === undefined &&
+        result !== undefined &&
+        this.#delegatedWorkerTaskKind(job) === 'repository-analysis'
+      ) {
+        const artifact = job.artifacts?.find((candidate) => candidate.attempt === attempt);
+        const changedPathCount = artifact?.changedFiles?.length ?? 0;
+        if (changedPathCount > 0) {
+          failure = new WorkerReadOnlyTaskViolationError(
+            `Read-only delegated repository analysis produced ${changedPathCount} changed path${changedPathCount === 1 ? '' : 's'}`
+          );
+        }
+      }
+
       if (failure === undefined && result !== undefined) {
         const completionReport = validateWorkerCompletionReport(result.completionReport);
         if (completionReport?.taskOutcome === 'blocked') {
@@ -1327,6 +1358,7 @@ export class Orchestrator {
       const retryable =
         !(failure instanceof ArtifactSizeLimitError) &&
         !(failure instanceof WorkerToolCallLimitError) &&
+        !(failure instanceof WorkerReadOnlyTaskViolationError) &&
         !jobSignal.aborted &&
         attempt < job.route.maxAttempts;
       job.error = { ...details, attempt, retryable };

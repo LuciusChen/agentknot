@@ -108,6 +108,21 @@ function nulDelimitedPaths(value: Buffer | string): string[] {
   return paths;
 }
 
+function skipWorktreePathInput(value: Buffer | string): Buffer {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  const selected: Buffer[] = [];
+  let start = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] !== 0) continue;
+    if (bytes[start] === 0x53 && bytes[start + 1] === 0x20) {
+      selected.push(bytes.subarray(start + 2, index), Buffer.from([0]));
+    }
+    start = index + 1;
+  }
+  if (start !== bytes.length) throw new Error('Git index flag output was not NUL terminated');
+  return Buffer.concat(selected);
+}
+
 async function git(
   args: string[],
   cwd: string,
@@ -167,6 +182,23 @@ async function gitWithInput(
     });
     child.stdin.end(input);
   });
+}
+
+async function sparseSkipWorktreePaths(cwd: string): Promise<Buffer> {
+  const enabled = outputText(
+    (
+      await git(
+        ['config', '--type=bool', '--default=false', '--get', 'core.sparseCheckout'],
+        cwd,
+        false,
+        READ_ONLY_GIT_ENV
+      )
+    ).stdout
+  ).trim();
+  if (enabled !== 'true') return Buffer.alloc(0);
+  return skipWorktreePathInput(
+    (await git(['ls-files', '-v', '-z'], cwd, true, READ_ONLY_GIT_ENV)).stdout
+  );
 }
 
 function resolvedIsolation(config: AgentKnotConfig): WorkspaceIsolationConfig {
@@ -726,6 +758,7 @@ export class WorkspaceIsolationManager {
     jobId: string,
     attempt: number
   ): Promise<JobArtifact> {
+    const skippedPaths = await sparseSkipWorktreePaths(isolated.managedPath);
     const captured = await this.#withTemporaryGitState(
       isolated.managedPath,
       async (environment) => {
@@ -735,6 +768,14 @@ export class WorkspaceIsolationManager {
             ['apply', '--cached', '--binary', '-'],
             isolated.managedPath,
             isolated.snapshotPatch,
+            environment
+          );
+        }
+        if (skippedPaths.byteLength > 0) {
+          await gitWithInput(
+            ['update-index', '--skip-worktree', '-z', '--stdin'],
+            isolated.managedPath,
+            skippedPaths,
             environment
           );
         }

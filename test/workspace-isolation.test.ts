@@ -117,6 +117,46 @@ test('worktree jobs leave the source unchanged and capture tracked/untracked/bin
   assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
 });
 
+test('sparse-checkout jobs ignore unmaterialized tracked files and capture only worker deltas', async () => {
+  const paths = await repository();
+  await mkdir(path.join(paths.root, 'outside'));
+  await writeFile(path.join(paths.root, 'outside', 'omitted.txt'), 'omitted from sparse checkout\n');
+  await git(paths.root, 'add', '--', 'outside/omitted.txt');
+  await git(paths.root, 'commit', '-qm', 'add sparse fixture');
+  await git(paths.root, 'sparse-checkout', 'init', '--cone');
+  await git(paths.root, 'sparse-checkout', 'set', 'nested');
+  await assert.rejects(readFile(path.join(paths.root, 'outside', 'omitted.txt')));
+
+  const adapter = new (class extends TestAdapter {
+    async run(input: WorkerRunInput): Promise<WorkerRunResult> {
+      if (input.prompt === 'edit sparse path') {
+        await writeFile(path.join(input.workspace, 'nested', 'nested.txt'), 'worker sparse change\n');
+      }
+      return { output: 'ok' };
+    }
+  })();
+  const orchestrator = new Orchestrator({
+    config: config(paths.storage, paths.worktreeDirectory),
+    store: new MemoryJobStore(),
+    adapters: new Map([['test', adapter]]),
+  });
+
+  const unchanged = await orchestrator.run({ prompt: 'inspect sparse checkout', workspace: paths.root });
+  assert.equal(unchanged.status, 'succeeded');
+  assert.equal(unchanged.artifacts?.[0]?.size, 0);
+  assert.deepEqual(unchanged.artifacts?.[0]?.changedFiles, []);
+
+  const changed = await orchestrator.run({ prompt: 'edit sparse path', workspace: paths.root });
+  assert.equal(changed.status, 'succeeded');
+  assert.deepEqual(changed.artifacts?.[0]?.changedFiles, ['nested/nested.txt']);
+  const patch = await readFile(changed.artifacts?.[0]?.path ?? '', 'utf8');
+  assert.match(patch, /worker sparse change/);
+  assert.doesNotMatch(patch, /outside\/omitted\.txt/);
+  assert.equal((await orchestrator.verifyArtifacts(changed.id))?.valid, true);
+  assert.equal(await status(paths.root), '');
+  assert.deepEqual(await managedEntries(paths.worktreeDirectory), []);
+});
+
 test('changed-file evidence preserves newline-containing repository-relative names', async () => {
   const paths = await repository();
   const filename = 'worker-line\nbreak.txt';
