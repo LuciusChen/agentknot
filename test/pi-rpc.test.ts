@@ -424,6 +424,7 @@ test('Pi normal runs append the report instruction after prompt-injection text',
     assert.ok(sentPrompt.startsWith(injectedPrompt));
     assert.ok(sentPrompt.endsWith(WORKER_COMPLETION_REPORT_INSTRUCTION));
     assert.match(sentPrompt, /taskOutcome.*changedFiles.*checksRun.*remainingRisks.*notes/);
+    assert.match(sentPrompt, /completed review may report completed while requesting changes/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

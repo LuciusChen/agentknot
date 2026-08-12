@@ -191,3 +191,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0077](./0077-task-context-reference-manifest.md) | Architecture Decision | Accepted / Implemented | Extend the bounded task context with metadata-only references |
 | [0078](./0078-exact-artifact-read-grant.md) | Architecture Decision | Accepted / Implemented | Authorize one exact artifact read without turning references into capabilities |
 | [0079](./0079-external-worktree-ancestor-isolation.md) | Incident / Architecture Decision | Resolved / Accepted | Keep external target worktrees outside the host project ancestry |
+| [0080](./0080-artifact-read-review-ab.md) | Experiment / Incident | Accepted / Resolved | Keep exact artifact reads without claiming measured review efficiency |
