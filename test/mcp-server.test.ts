@@ -282,6 +282,16 @@ test('MCP explicitly starts and follows a broker without owning its runtime', as
             summary: 'The transport fixture requires no repository discovery.',
             relevantPaths: ['package.json'],
             constraints: ['Do not inspect unrelated files.'],
+            references: [
+              {
+                id: 'transport-fixture',
+                kind: 'artifact',
+                locator: 'artifact:transport-fixture',
+                source: 'controller',
+                trust: 'unverified',
+                revision: 'v1',
+              },
+            ],
           },
           subtasks: [
             {

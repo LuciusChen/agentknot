@@ -18,12 +18,25 @@ import { MAX_TOOL_CALLS } from './types.js';
 
 const text = z.string().min(1).max(64 * 1024);
 const shortText = z.string().min(1).max(1_000);
+const contextReferenceSchema = z
+  .object({
+    id: z.string().min(1).max(200),
+    kind: z.string().min(1).max(100),
+    locator: z.string().min(1).max(500),
+    source: z.string().min(1).max(200),
+    trust: z.literal('unverified'),
+    revision: z.string().min(1).max(200).optional(),
+    digest: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
+    summary: z.string().min(1).max(500).optional(),
+  })
+  .strict();
 const taskContextSchema = z
   .object({
     schemaVersion: z.literal(1),
     summary: z.string().min(1).max(1_000),
     relevantPaths: z.array(z.string().min(1).max(500)).max(20),
     constraints: z.array(z.string().min(1).max(500)).max(20),
+    references: z.array(contextReferenceSchema).max(20).optional(),
   })
   .strict();
 const assessmentSchema = z

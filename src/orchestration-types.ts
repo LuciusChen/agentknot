@@ -78,13 +78,30 @@ export interface AssessedSubtask {
   maxToolCalls?: number;
 }
 
+/** Bounded metadata for one controller-known context source; never verified by admission alone. */
+export interface ContextReference {
+  id: string;
+  kind: string;
+  locator: string;
+  source: string;
+  trust: 'unverified';
+  revision?: string;
+  digest?: string;
+  summary?: string;
+}
+
 /** Bounded controller-authored navigation context shared by every child in one handoff. */
-export interface TaskContext {
+export interface ContextManifest {
   schemaVersion: 1;
   summary: string;
   relevantPaths: string[];
   constraints: string[];
+  /** Optional metadata pointers. This schema does not authorize or implement dereferencing. */
+  references?: ContextReference[];
 }
+
+/** Compatibility name retained for the original schemaVersion 1 handoff. */
+export type TaskContext = ContextManifest;
 
 export interface TaskAssessment {
   schemaVersion: 1;

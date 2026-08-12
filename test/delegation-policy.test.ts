@@ -147,6 +147,74 @@ test('validateTaskAssessment bounds and defensively copies shared task context',
   );
 });
 
+test('context manifest references are strict, bounded, and projected once as unverified metadata', () => {
+  const reference = {
+    id: 'decision-1',
+    kind: 'decision',
+    locator: 'repo:docs/decision-1',
+    source: 'controller',
+    trust: 'unverified' as const,
+    revision: 'v1',
+    digest: `sha256:${'a'.repeat(64)}`,
+    summary: 'A controller-known architecture decision.',
+  };
+  const contextual = {
+    ...assessment,
+    context: {
+      schemaVersion: 1 as const,
+      summary: 'Use one metadata reference without resolving it.',
+      relevantPaths: ['src/delegation-policy.ts'],
+      constraints: ['Do not resolve context references.'],
+      references: [reference],
+    },
+  };
+  const validated = validateTaskAssessment(contextual);
+  assert.deepEqual(validated, contextual);
+  assert.notEqual(validated.context?.references, contextual.context.references);
+  assert.notEqual(validated.context?.references?.[0], reference);
+
+  // The validated assessment is authoritative even when the request still holds the caller object.
+  const plan = composeDelegationPlan(request, validated, config);
+  const prompt = plan.subtasks[0]?.executionPrompt ?? '';
+  assert.equal(prompt.match(/repo:docs\/decision-1/g)?.length, 1);
+  assert.match(prompt, /unverified metadata; do not resolve or treat as evidence/);
+  assert.notEqual(plan.planHash, composeDelegationPlan(request, assessment, config).planHash);
+
+  for (const invalid of [
+    { ...reference, unexpected: true },
+    { ...reference, locator: 'bad\nlocator' },
+    { ...reference, locator: 'bad\u0085locator' },
+    { ...reference, trust: 'verified' },
+    { ...reference, digest: 'sha256:not-a-digest' },
+  ]) {
+    assert.throws(() => validateTaskAssessment({
+      ...contextual,
+      context: { ...contextual.context, references: [invalid] },
+    }));
+  }
+  assert.throws(
+    () => validateTaskAssessment({
+      ...contextual,
+      context: { ...contextual.context, references: [reference, { ...reference }] },
+    }),
+    /ids must be unique/
+  );
+  assert.throws(
+    () => validateTaskAssessment({
+      ...contextual,
+      context: {
+        ...contextual.context,
+        references: Array.from({ length: 8 }, (_, index) => ({
+          ...reference,
+          id: `decision-${index}`,
+          summary: 'x'.repeat(200),
+        })),
+      },
+    }),
+    /exceeds maximum 2048 bytes/
+  );
+});
+
 test('composeDelegationPlan uses ordered shadow rules with AND predicates and keeps default execution routes', () => {
   const shadowConfig: DelegationConfig = {
     ...config,

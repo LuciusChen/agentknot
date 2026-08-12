@@ -4,6 +4,7 @@ import type { DelegationConfig, DelegationMode, RouteSelectionConfig } from './c
 import { validateMaxToolCalls } from './types.js';
 import type {
   AssessedSubtask,
+  ContextReference,
   DelegationPlan,
   OrchestrationRequest,
   RouteSelectionEvidence,
@@ -13,6 +14,7 @@ import type {
 } from './orchestration-types.js';
 
 export const MAX_TASK_CONTEXT_BYTES = 2 * 1024;
+const MAX_TASK_CONTEXT_REFERENCES = 20;
 
 function assertRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -68,9 +70,76 @@ function boundedStringArray(
   return items;
 }
 
+function contextReferenceString(value: unknown, label: string, maximum: number): string {
+  const result = boundedString(value, label, maximum);
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(result)) {
+    throw new Error(`${label} must not contain control characters`);
+  }
+  return result;
+}
+
+function validateContextReference(value: unknown, label: string): ContextReference {
+  assertRecord(value, label);
+  assertExactKeys(value, [
+    'id',
+    'kind',
+    'locator',
+    'source',
+    'trust',
+    ...(Object.hasOwn(value, 'revision') ? ['revision'] : []),
+    ...(Object.hasOwn(value, 'digest') ? ['digest'] : []),
+    ...(Object.hasOwn(value, 'summary') ? ['summary'] : []),
+  ], label);
+  if (value.trust !== 'unverified') {
+    throw new Error(`${label}.trust must be "unverified"`);
+  }
+  const revision = Object.hasOwn(value, 'revision')
+    ? contextReferenceString(value.revision, `${label}.revision`, 200)
+    : undefined;
+  const digest = Object.hasOwn(value, 'digest')
+    ? contextReferenceString(value.digest, `${label}.digest`, 71)
+    : undefined;
+  if (digest !== undefined && !/^sha256:[a-f0-9]{64}$/u.test(digest)) {
+    throw new Error(`${label}.digest must be a lowercase sha256:<hex> digest`);
+  }
+  const summary = Object.hasOwn(value, 'summary')
+    ? contextReferenceString(value.summary, `${label}.summary`, 500)
+    : undefined;
+  return {
+    id: contextReferenceString(value.id, `${label}.id`, 200),
+    kind: contextReferenceString(value.kind, `${label}.kind`, 100),
+    locator: contextReferenceString(value.locator, `${label}.locator`, 500),
+    source: contextReferenceString(value.source, `${label}.source`, 200),
+    trust: 'unverified',
+    ...(revision === undefined ? {} : { revision }),
+    ...(digest === undefined ? {} : { digest }),
+    ...(summary === undefined ? {} : { summary }),
+  };
+}
+
+function validateContextReferences(value: unknown, label: string): ContextReference[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  if (value.length > MAX_TASK_CONTEXT_REFERENCES) {
+    throw new Error(`${label} must contain at most ${MAX_TASK_CONTEXT_REFERENCES} entries`);
+  }
+  const references = value.map((item, index) =>
+    validateContextReference(item, `${label}[${index}]`)
+  );
+  if (new Set(references.map((reference) => reference.id)).size !== references.length) {
+    throw new Error(`${label} ids must be unique`);
+  }
+  return references;
+}
+
 function validateTaskContext(value: unknown, label: string): TaskContext {
   assertRecord(value, label);
-  assertExactKeys(value, ['schemaVersion', 'summary', 'relevantPaths', 'constraints'], label);
+  assertExactKeys(value, [
+    'schemaVersion',
+    'summary',
+    'relevantPaths',
+    'constraints',
+    ...(Object.hasOwn(value, 'references') ? ['references'] : []),
+  ], label);
   if (value.schemaVersion !== 1) throw new Error(`${label} schemaVersion must be 1`);
   const relevantPaths = boundedStringArray(value.relevantPaths, `${label}.relevantPaths`, 20, 500);
   if (
@@ -84,11 +153,15 @@ function validateTaskContext(value: unknown, label: string): TaskContext {
   ) {
     throw new Error(`${label}.relevantPaths entries must be repository-relative paths`);
   }
+  const references = Object.hasOwn(value, 'references')
+    ? validateContextReferences(value.references, `${label}.references`)
+    : undefined;
   const context: TaskContext = {
     schemaVersion: 1,
     summary: boundedString(value.summary, `${label}.summary`, 1_000),
     relevantPaths,
     constraints: boundedStringArray(value.constraints, `${label}.constraints`, 20, 500),
+    ...(references === undefined ? {} : { references }),
   };
   if (Buffer.byteLength(JSON.stringify(context), 'utf8') > MAX_TASK_CONTEXT_BYTES) {
     throw new Error(`${label} exceeds maximum ${MAX_TASK_CONTEXT_BYTES} bytes`);
@@ -186,8 +259,12 @@ export function validateTaskAssessment(value: unknown): TaskAssessment {
   };
 }
 
-function executionPrompt(request: OrchestrationRequest, subtask: AssessedSubtask): string {
-  const taskContext = request.assessment.context;
+function executionPrompt(
+  request: OrchestrationRequest,
+  assessment: TaskAssessment,
+  subtask: AssessedSubtask
+): string {
+  const taskContext = assessment.context;
   const contextBoundary = taskContext === undefined
     ? []
     : [
@@ -203,6 +280,12 @@ function executionPrompt(request: OrchestrationRequest, subtask: AssessedSubtask
         ...(taskContext.constraints.length === 0
           ? []
           : ['Constraints:', ...taskContext.constraints.map((item) => `- ${item}`)]),
+        ...(taskContext.references === undefined || taskContext.references.length === 0
+          ? []
+          : [
+              'Context references (unverified metadata; do not resolve or treat as evidence):',
+              ...taskContext.references.map((reference) => `- ${JSON.stringify(reference)}`),
+            ]),
         'Begin with this working set. Verify only facts needed for the acceptance criteria; do not inventory the repository or read unrelated architecture/history files. If the context is insufficient or conflicts with the admitted workspace, finish with the available evidence and report the missing or stale context instead of broadening scope.',
       ];
   const repositoryAnalysisBoundary = subtask.kind === 'repository-analysis'
@@ -365,7 +448,7 @@ export function composeDelegationPlan(
           selectionEvidence?.mode === 'active'
             ? selectionEvidence.selectedRoute
             : config.dispatch.defaultRoute,
-        executionPrompt: executionPrompt(request, subtask),
+        executionPrompt: executionPrompt(request, assessment, subtask),
         ...(selectionEvidence === undefined ? {} : { routeSelection: selectionEvidence }),
       };
     });

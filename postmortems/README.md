@@ -188,3 +188,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0074](./0074-session-start-controller-entry.md) | Incident / Architecture Decision | Resolved / Accepted | Restore controller entry at session boundaries after an implicit-selection miss |
 | [0075](./0075-bounded-mcp-wait-and-resume-gate.md) | Incident / Architecture Decision | Resolved / Accepted | Bound MCP waiting without controller-session ownership |
 | [0076](./0076-durable-capacity-and-live-control-fences.md) | Incident / Architecture Decision | Resolved / Accepted | Fence shared Job capacity and live-control settlement |
+| [0077](./0077-task-context-reference-manifest.md) | Architecture Decision | Accepted / Implemented | Extend the bounded task context with metadata-only references |
