@@ -96,7 +96,7 @@ export interface ContextManifest {
   summary: string;
   relevantPaths: string[];
   constraints: string[];
-  /** Optional metadata pointers. This schema does not authorize or implement dereferencing. */
+  /** Optional metadata pointers. Only workspace-file locators may be read with existing workspace tools. */
   references?: ContextReference[];
 }
 

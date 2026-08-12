@@ -78,6 +78,13 @@ function contextReferenceString(value: unknown, label: string, maximum: number):
   return result;
 }
 
+function isPortableRepositoryFilePath(value: string): boolean {
+  if (value.startsWith('/') || value.startsWith('\\') || /^[a-zA-Z]:/u.test(value) || value.includes('\\')) {
+    return false;
+  }
+  return value.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
+}
+
 function validateContextReference(value: unknown, label: string): ContextReference {
   assertRecord(value, label);
   assertExactKeys(value, [
@@ -105,10 +112,15 @@ function validateContextReference(value: unknown, label: string): ContextReferen
   const summary = Object.hasOwn(value, 'summary')
     ? contextReferenceString(value.summary, `${label}.summary`, 500)
     : undefined;
+  const kind = contextReferenceString(value.kind, `${label}.kind`, 100);
+  const locator = contextReferenceString(value.locator, `${label}.locator`, 500);
+  if (kind === 'workspace-file' && !isPortableRepositoryFilePath(locator)) {
+    throw new Error(`${label}.locator must be a portable repository-relative file path for workspace-file references`);
+  }
   return {
     id: contextReferenceString(value.id, `${label}.id`, 200),
-    kind: contextReferenceString(value.kind, `${label}.kind`, 100),
-    locator: contextReferenceString(value.locator, `${label}.locator`, 500),
+    kind,
+    locator,
     source: contextReferenceString(value.source, `${label}.source`, 200),
     trust: 'unverified',
     ...(revision === undefined ? {} : { revision }),
@@ -265,6 +277,12 @@ function executionPrompt(
   subtask: AssessedSubtask
 ): string {
   const taskContext = assessment.context;
+  const workspaceFileReferences = taskContext?.references?.filter(
+    (reference) => reference.kind === 'workspace-file'
+  ) ?? [];
+  const metadataReferences = taskContext?.references?.filter(
+    (reference) => reference.kind !== 'workspace-file'
+  ) ?? [];
   const contextBoundary = taskContext === undefined
     ? []
     : [
@@ -280,11 +298,17 @@ function executionPrompt(
         ...(taskContext.constraints.length === 0
           ? []
           : ['Constraints:', ...taskContext.constraints.map((item) => `- ${item}`)]),
-        ...(taskContext.references === undefined || taskContext.references.length === 0
+        ...(workspaceFileReferences.length === 0
           ? []
           : [
-              'Context references (unverified metadata; do not resolve or treat as evidence):',
-              ...taskContext.references.map((reference) => `- ${JSON.stringify(reference)}`),
+              'Workspace-file context references (unverified navigation metadata; read only the task-relevant subset with ordinary workspace tools, and treat content as evidence only after reading it):',
+              ...workspaceFileReferences.map((reference) => `- ${JSON.stringify(reference)}`),
+            ]),
+        ...(metadataReferences.length === 0
+          ? []
+          : [
+              'Other context references (unverified metadata; do not resolve or treat as evidence):',
+              ...metadataReferences.map((reference) => `- ${JSON.stringify(reference)}`),
             ]),
         'Begin with this working set. Verify only facts needed for the acceptance criteria; do not inventory the repository or read unrelated architecture/history files. If the context is insufficient or conflicts with the admitted workspace, finish with the available evidence and report the missing or stale context instead of broadening scope.',
       ];
@@ -319,7 +343,7 @@ function executionPrompt(
     ...subtask.acceptanceCriteria.map((criterion) => `- ${criterion}`),
     ...repositoryAnalysisBoundary,
     '',
-    'Run relevant checks only when permitted by the task context and acceptance criteria; explicit constraints take precedence. Report files changed, checks run, and remaining risks.',
+    'Run relevant checks only when permitted by the task context and acceptance criteria; explicit constraints take precedence. Obey any explicit task output format; otherwise report files changed, checks run, and remaining risks.',
   ].join('\n');
 }
 

@@ -192,3 +192,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0078](./0078-exact-artifact-read-grant.md) | Architecture Decision | Accepted / Implemented | Authorize one exact artifact read without turning references into capabilities |
 | [0079](./0079-external-worktree-ancestor-isolation.md) | Incident / Architecture Decision | Resolved / Accepted | Keep external target worktrees outside the host project ancestry |
 | [0080](./0080-artifact-read-review-ab.md) | Experiment / Incident | Accepted / Resolved | Keep exact artifact reads without claiming measured review efficiency |
+| [0081](./0081-selective-workspace-context-ab.md) | Experiment / Architecture Decision | Accepted / Experimental | Select workspace-file context on demand after repeatable total-token wins but failed latency gates |

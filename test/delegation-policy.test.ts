@@ -178,6 +178,7 @@ test('context manifest references are strict, bounded, and projected once as unv
   const prompt = plan.subtasks[0]?.executionPrompt ?? '';
   assert.equal(prompt.match(/repo:docs\/decision-1/g)?.length, 1);
   assert.match(prompt, /unverified metadata; do not resolve or treat as evidence/);
+  assert.doesNotMatch(prompt, /Workspace-file context references/);
   assert.notEqual(plan.planHash, composeDelegationPlan(request, assessment, config).planHash);
 
   for (const invalid of [
@@ -213,6 +214,64 @@ test('context manifest references are strict, bounded, and projected once as unv
     }),
     /exceeds maximum 2048 bytes/
   );
+});
+
+test('workspace-file context references permit selective ordinary reads without authorizing other locators', () => {
+  const workspaceReference = {
+    id: 'policy-billing',
+    kind: 'workspace-file',
+    locator: 'docs/policies/billing.md',
+    source: 'controller',
+    trust: 'unverified' as const,
+    summary: 'Billing policy candidate.',
+  };
+  const opaqueReference = {
+    id: 'external-policy',
+    kind: 'url',
+    locator: 'https://example.invalid/policy',
+    source: 'controller',
+    trust: 'unverified' as const,
+  };
+  const contextual = validateTaskAssessment({
+    ...assessment,
+    context: {
+      schemaVersion: 1,
+      summary: 'Select only the policy needed for the task.',
+      relevantPaths: [],
+      constraints: ['Do not inspect unrelated candidate files.'],
+      references: [workspaceReference, opaqueReference],
+    },
+  });
+  const prompt = composeDelegationPlan(request, contextual, config).subtasks[0]?.executionPrompt ?? '';
+  assert.match(prompt, /Workspace-file context references.*read only the task-relevant subset/su);
+  assert.match(prompt, /docs\/policies\/billing\.md/);
+  assert.match(prompt, /Other context references.*do not resolve or treat as evidence/su);
+  assert.match(prompt, /Obey any explicit task output format; otherwise report files changed/);
+  assert.equal(prompt.match(/docs\/policies\/billing\.md/g)?.length, 1);
+  assert.equal(prompt.match(/https:\/\/example\.invalid\/policy/g)?.length, 1);
+  const workspaceOnly = validateTaskAssessment({
+    ...contextual,
+    context: { ...contextual.context, references: [workspaceReference] },
+  });
+  const workspaceOnlyPrompt = composeDelegationPlan(
+    request,
+    workspaceOnly,
+    config
+  ).subtasks[0]?.executionPrompt ?? '';
+  assert.doesNotMatch(workspaceOnlyPrompt, /Other context references/);
+
+  for (const locator of ['/absolute.md', '../outside.md', 'docs/../outside.md', 'C:/policy.md', 'docs\\policy.md', 'docs//policy.md', './policy.md']) {
+    assert.throws(
+      () => validateTaskAssessment({
+        ...assessment,
+        context: {
+          ...contextual.context,
+          references: [{ ...workspaceReference, locator }],
+        },
+      }),
+      /portable repository-relative file path/
+    );
+  }
 });
 
 test('composeDelegationPlan uses ordered shadow rules with AND predicates and keeps default execution routes', () => {
