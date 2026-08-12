@@ -309,13 +309,12 @@ A route snapshot contains:
 - required environment-variable names;
 - maximum attempts;
 - per-attempt timeout;
-- optional maximum normalized tool executions per attempt.
 
 The resolved snapshot is stored with the job. Configuration changes after admission do not mutate it.
 
 The current provider/model fields describe how the selected worker should run. They do not prove that AgentKnot has a provider adapter, validates the provider catalog, or can move a live job between providers. Shadow `suggestedRoute` is evidence rather than a resolved route; active `selectedRoute` is resolved through the ordinary Job route before execution, after which the immutable Job snapshot is authoritative.
 
-When `maxToolCalls` is configured, it must be an integer from 1 through 1000. The orchestrator counts persisted `worker.tool.started` events independently for each attempt. The next start beyond the configured limit aborts that exact attempt and fails it with `WorkerToolCallLimitError` without retry; the excess start is not persisted. Omission preserves timeout-only execution. This is a deterministic route safety bound, not semantic planning, model ranking, provider fallback, or a substitute for adapter-correct event normalization ([decision 0067](../postmortems/0067-route-tool-execution-budget.md)).
+No request, assessment, route, worker prompt, or runtime path accepts a tool-execution count as task scope. Semantic scope is the admitted context, relevant paths, constraints, task prompt, non-goals, and acceptance criteria. Timeout, cancellation, bounded event/output/record retention, isolation, and required completion evidence remain route-neutral operational boundaries; they do not estimate task difficulty or prescribe how many tools a replaceable worker may need. New inputs containing the retired `maxToolCalls` field fail before admission, while historical records remain read-only evidence ([decision 0083](../postmortems/0083-remove-tool-count-task-boundaries.md)).
 
 ### `WorkerAdapter`
 

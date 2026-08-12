@@ -14,7 +14,6 @@ import {
 import { readLocalDiscovery } from './local-discovery.js';
 import { buildOrchestrationHandoff } from './orchestration-handoff.js';
 import { MAX_WORKER_CONTROL_MESSAGE_BYTES } from './record-limits.js';
-import { MAX_TOOL_CALLS } from './types.js';
 
 const text = z.string().min(1).max(64 * 1024);
 const shortText = z.string().min(1).max(1_000);
@@ -56,7 +55,6 @@ const assessmentSchema = z
             kind: shortText,
             prompt: text,
             acceptanceCriteria: z.array(text).min(1).max(20),
-            maxToolCalls: z.number().int().min(1).max(MAX_TOOL_CALLS).optional(),
           })
           .strict()
       )

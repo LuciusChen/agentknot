@@ -15,7 +15,6 @@ import {
   type OrchestrationRequest,
   type StartOrchestrationResult,
 } from './orchestration-types.js';
-import { validateMaxToolCalls } from './types.js';
 import type {
   JobArtifactList,
   JobArtifactPreview,
@@ -177,6 +176,11 @@ function asJobRequest(value: unknown): JobRequest {
     throw new Error('Request body must be an object');
   }
   const body = value as Record<string, unknown>;
+  if (Object.hasOwn(body, 'maxToolCalls')) {
+    throw new Error(
+      'maxToolCalls is no longer supported; bound work with task context and acceptance criteria'
+    );
+  }
   if (typeof body.prompt !== 'string') throw new Error('prompt must be a string');
   if (typeof body.workspace !== 'string') throw new Error('workspace must be a string');
   if (body.route !== undefined && typeof body.route !== 'string') throw new Error('route must be a string');
@@ -184,7 +188,6 @@ function asJobRequest(value: unknown): JobRequest {
   if (body.callbackUrl !== undefined && typeof body.callbackUrl !== 'string') {
     throw new Error('callbackUrl must be a string');
   }
-  const maxToolCalls = validateMaxToolCalls(body.maxToolCalls);
   if (body.idempotencyKey !== undefined && typeof body.idempotencyKey !== 'string') {
     throw new Error('idempotencyKey must be a string');
   }
@@ -194,7 +197,6 @@ function asJobRequest(value: unknown): JobRequest {
     prompt: body.prompt,
     workspace: body.workspace,
     ...(body.route === undefined ? {} : { route: body.route as string }),
-    ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
     ...(body.source === undefined ? {} : { source: body.source as string }),
     ...(body.callbackUrl === undefined ? {} : { callbackUrl: body.callbackUrl as string }),
     ...(metadata === undefined ? {} : { metadata }),

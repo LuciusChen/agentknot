@@ -48,7 +48,6 @@ import {
   type IsolatedWorkspace,
   type WorkspaceInspection,
 } from './workspace-isolation.js';
-import { validateMaxToolCalls } from './types.js';
 import type {
   JobArtifactList,
   JobArtifactPreview,
@@ -101,10 +100,6 @@ export class JobControlPersistenceError extends Error {
     const details = limitErrorDetails(cause);
     super(`Worker control persistence failed (${delivery}): ${details.message}`, { cause });
   }
-}
-
-class WorkerToolCallLimitError extends Error {
-  readonly name = 'WorkerToolCallLimitError';
 }
 
 class WorkerTaskBlockedError extends Error {
@@ -231,13 +226,17 @@ function delegationMetadata(job: JobRecord): Record<string, unknown> | undefined
 }
 
 function normalizeRequest(request: JobRequest): JobRequest {
+  if (Object.hasOwn(request, 'maxToolCalls')) {
+    throw new Error(
+      'Job maxToolCalls is no longer supported; bound work with task context and acceptance criteria'
+    );
+  }
   if (typeof request.prompt !== 'string' || request.prompt.trim() === '') {
     throw new Error('Job prompt must be a non-empty string');
   }
   if (typeof request.workspace !== 'string' || request.workspace.trim() === '') {
     throw new Error('Job workspace must be a non-empty string');
   }
-  const maxToolCalls = validateMaxToolCalls(request.maxToolCalls, 'Job maxToolCalls');
   assertTextLimit('Job prompt', request.prompt, MAX_PROMPT_BYTES);
   if (request.callbackUrl !== undefined) {
     const callback = new URL(request.callbackUrl);
@@ -259,7 +258,6 @@ function normalizeRequest(request: JobRequest): JobRequest {
     prompt: request.prompt,
     workspace: path.resolve(request.workspace),
     ...(request.route === undefined ? {} : { route: request.route }),
-    ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
     ...(request.source === undefined ? {} : { source: request.source }),
     ...(request.callbackUrl === undefined ? {} : { callbackUrl: request.callbackUrl }),
     ...(request.metadata === undefined ? {} : { metadata: structuredClone(request.metadata) }),
@@ -268,15 +266,6 @@ function normalizeRequest(request: JobRequest): JobRequest {
       ? {}
       : { idempotencyKey: request.idempotencyKey }),
   };
-}
-
-function effectiveRoute(
-  route: ReturnType<typeof resolveRoute>,
-  taskMaxToolCalls: number | undefined
-): ReturnType<typeof resolveRoute> {
-  if (taskMaxToolCalls === undefined) return route;
-  if (route.maxToolCalls !== undefined && route.maxToolCalls <= taskMaxToolCalls) return route;
-  return { ...route, maxToolCalls: taskMaxToolCalls };
 }
 
 export class Orchestrator {
@@ -1534,7 +1523,7 @@ export class Orchestrator {
       schemaVersion: 1,
       status: 'queued',
       request,
-      route: effectiveRoute(reservation.route, request.maxToolCalls),
+      route: reservation.route,
       ...(reservation.selection === undefined
         ? {}
         : { routePoolSelection: structuredClone(reservation.selection) }),
@@ -1693,19 +1682,8 @@ export class Orchestrator {
       };
       this.#activeAttempts.set(job.id, activeAttempt);
       let attemptActive = true;
-      let toolCalls = 0;
       const workerEmit: WorkerEventSink = async (type, data) => {
         if (!attemptActive) return;
-        if (type === 'worker.tool.started' && job.route.maxToolCalls !== undefined) {
-          toolCalls += 1;
-          if (toolCalls > job.route.maxToolCalls) {
-            const error = new WorkerToolCallLimitError(
-              `Worker exceeded effective Job tool-call limit of ${job.route.maxToolCalls}`
-            );
-            attemptController.abort(error);
-            throw error;
-          }
-        }
         await this.#emit(job, type, data);
       };
       let isolated: IsolatedWorkspace | undefined;
@@ -1867,7 +1845,6 @@ export class Orchestrator {
       const details = limitErrorDetails(failure ?? new Error('Worker returned no result'));
       const retryable =
         !(failure instanceof ArtifactSizeLimitError) &&
-        !(failure instanceof WorkerToolCallLimitError) &&
         !(failure instanceof WorkerReadOnlyTaskViolationError) &&
         !(failure instanceof WorkerArtifactReadError) &&
         !(failure instanceof WorkerArtifactReadUnusedError) &&

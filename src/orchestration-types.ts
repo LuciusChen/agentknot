@@ -74,8 +74,6 @@ export interface AssessedSubtask {
   kind: string;
   prompt: string;
   acceptanceCriteria: string[];
-  /** Optional controller-authored hard stop for normalized tool executions in this subtask. */
-  maxToolCalls?: number;
 }
 
 /** Bounded metadata for one controller-known context source; never verified by admission alone. */

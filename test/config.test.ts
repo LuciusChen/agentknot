@@ -18,7 +18,6 @@ test('parseConfig keeps worker and provider as independent routing dimensions', 
         model: 'gpt-5.6-luna',
         thinkingLevel: 'high',
         requiredEnv: ['OPENCODE_API_KEY'],
-        maxToolCalls: 96,
       },
     },
   });
@@ -38,7 +37,6 @@ test('parseConfig keeps worker and provider as independent routing dimensions', 
     requiredEnv: ['OPENCODE_API_KEY'],
     maxAttempts: 1,
     timeoutMs: 1_800_000,
-    maxToolCalls: 96,
   });
 });
 
@@ -131,7 +129,7 @@ test('parseConfig rejects routes pointing to a missing worker', () => {
   );
 });
 
-test('parseConfig bounds optional route tool-call limits', () => {
+test('parseConfig rejects legacy route tool-call counts in favor of semantic task boundaries', () => {
   const base = {
     version: 1,
     defaultRoute: 'mock',
@@ -139,17 +137,7 @@ test('parseConfig bounds optional route tool-call limits', () => {
     workers: { mock: { adapter: 'mock' } },
     routes: { mock: { worker: 'mock', provider: 'mock', model: 'mock', maxToolCalls: 12 } },
   };
-  assert.equal(resolveRoute(parseConfig(base)).maxToolCalls, 12);
-  for (const maxToolCalls of [0, 1.5, 1_001]) {
-    assert.throws(
-      () =>
-        parseConfig({
-          ...base,
-          routes: { mock: { ...base.routes.mock, maxToolCalls } },
-        }),
-      /maxToolCalls must be an integer between 1 and 1000/
-    );
-  }
+  assert.throws(() => parseConfig(base), /maxToolCalls is no longer supported/);
 });
 
 test('parseConfig normalizes bounded automatic delegation without coupling it to a controller', () => {

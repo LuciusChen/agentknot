@@ -34,7 +34,6 @@ import {
 import { buildOrchestrationHandoff } from './orchestration-handoff.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
 import type { JobEvent, JobRequest } from './types.js';
-import { validateMaxToolCalls } from './types.js';
 import type { RouteSelectionModeUsage, UsageRate, UsageReport } from './usage-report.js';
 
 const MAX_ASSESSMENT_JSON_BYTES = 64 * 1024;
@@ -197,7 +196,7 @@ function help(): string {
   return `AgentKnot — vendor-neutral coding-agent orchestration
 
 Usage:
-  agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME] [--max-tool-calls N] [--idempotency-key KEY]
+  agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME] [--idempotency-key KEY]
   agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE] [--idempotency-key KEY]
   agentknot orchestrate --request-file PATH [--json] [--handoff-json] [--progress]
   agentknot broker run [--host HOST] [--port PORT]
@@ -230,7 +229,6 @@ Run options:
   --workspace PATH    Worker working directory (default: current directory)
   --source NAME       Controller identity, e.g. codex or claude
   --callback URL      POST the terminal Job record to this URL
-  --max-tool-calls N  Controller-authored Job tool-call hard limit (1-1000)
   --json              Print only the final Job record as JSON
   --events            Stream every event as JSONL
   --progress          Print compact remote wait progress to stderr
@@ -733,11 +731,6 @@ async function main(argv: string[]): Promise<void> {
     const workspace = takeOption(args, '--workspace') ?? process.cwd();
     const source = takeOption(args, '--source') ?? 'cli';
     const callbackUrl = takeOption(args, '--callback');
-    const maxToolCallsOption = takeOption(args, '--max-tool-calls');
-    const maxToolCalls =
-      maxToolCallsOption === undefined
-        ? undefined
-        : validateMaxToolCalls(Number(maxToolCallsOption), '--max-tool-calls');
     const idempotencyKey = takeOption(args, '--idempotency-key');
     const promptOption = takeOption(args, '--prompt');
     const json = takeFlag(args, '--json');
@@ -750,7 +743,6 @@ async function main(argv: string[]): Promise<void> {
       workspace,
       source,
       ...(route === undefined ? {} : { route }),
-      ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
       ...(callbackUrl === undefined ? {} : { callbackUrl }),
       ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
     };

@@ -1202,7 +1202,6 @@ export class OrchestrationService {
       prompt: subtask.executionPrompt,
       workspace: record.request.workspace,
       route: subtask.route,
-      ...(subtask.maxToolCalls === undefined ? {} : { maxToolCalls: subtask.maxToolCalls }),
       idempotencyKey: this.#workerIdempotencyKey(record, subtask),
       ...(record.request.source === undefined ? {} : { source: record.request.source }),
       metadata: {

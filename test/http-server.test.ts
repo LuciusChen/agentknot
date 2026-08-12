@@ -616,24 +616,23 @@ test('HTTP API accepts work from a vendor-neutral controller and exposes the res
         prompt: 'http task',
         workspace,
         source: 'codex',
-        maxToolCalls: 7,
       }),
     });
     assert.equal(createdResponse.status, 202);
     const created = (await createdResponse.json()) as { job: JobRecord };
     const terminal = await new AgentKnotHttpClient(baseUrl).waitForJob(created.job);
     assert.equal(terminal.status, 'succeeded');
-    assert.equal(terminal.request.maxToolCalls, 7);
-    assert.equal(terminal.route.maxToolCalls, 7);
-    const invalidBudget = await fetch(`${baseUrl}/v1/jobs`, {
+    assert.equal('maxToolCalls' in terminal.request, false);
+    assert.equal('maxToolCalls' in terminal.route, false);
+    const legacyBudget = await fetch(`${baseUrl}/v1/jobs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: 'invalid budget', workspace, maxToolCalls: 0 }),
     });
-    assert.equal(invalidBudget.status, 400);
+    assert.equal(legacyBudget.status, 400);
     assert.match(
-      String((await invalidBudget.json() as { error: string }).error),
-      /maxToolCalls must be an integer between 1 and 1000/
+      String((await legacyBudget.json() as { error: string }).error),
+      /maxToolCalls is no longer supported/
     );
     assert.equal((await fetch(`${baseUrl}/v1/jobs/${created.job.id}/wait`)).status, 404);
     const eventPaths = requestedPaths.filter((requestedPath) =>

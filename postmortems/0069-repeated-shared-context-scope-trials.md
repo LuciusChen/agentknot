@@ -19,7 +19,7 @@ The correction is intentionally small: insufficient/stale context now produces a
 
 ## Protocol
 
-Six independent read-only repository analyses ran through the ordinary broker after the correction in two concurrent batches. Two used Pi/OpenCode Go/Luna/max at medium complexity; four used Pi/OpenCode Go/DeepSeek V4 Flash/max through the configured low-complexity rule. They covered prompt construction, broker lifecycle, blocked-report retry analysis, dirty-workspace isolation, HTTP cursor following, and usage-report aggregation. Each assessment supplied a 533–672 byte context, exact repository-relative paths, prohibited build/test/package/inventory or broader commands, capped requested tool use, required actual-access reporting, and permitted no patch. Evidence comes from durable normalized tool starts, exact arguments, terminal attempts, Pi session statistics, completion envelopes, and unchanged empty artifacts.
+Six independent read-only repository analyses ran through the ordinary broker after the correction in two concurrent batches. Two used Pi/OpenCode Go/Luna/max at medium complexity; four used Pi/OpenCode Go/DeepSeek V4 Flash/max through the configured low-complexity rule. They covered prompt construction, broker lifecycle, blocked-report retry analysis, dirty-workspace isolation, HTTP cursor following, and usage-report aggregation. Each assessment supplied a 533–672 byte context, exact repository-relative paths, prohibited build/test/package/inventory or broader commands, required actual-access reporting, and permitted no patch. These historical trials also carried now-retired requested tool-count caps; decision 0083 treats those counts as a confound rather than a valid scope mechanism. Evidence comes from durable normalized tool starts, exact arguments, terminal attempts, Pi session statistics, completion envelopes, and unchanged empty artifacts.
 
 ## Results
 
@@ -36,9 +36,9 @@ The six runs reported 444,744 downstream tokens in aggregate and provider-report
 
 ## Interpretation
 
-Six different tasks across both configured models obeyed every post-correction path and command boundary and completed once. Five stayed below their requested call caps; the Luna workspace-isolation audit used exactly its eight-call cap without exceeding it. This is repeated positive evidence that compact explicit working sets can constrain ordinary worker exploration across different repository surfaces. It is not a controlled same-task A/B, a token-savings measurement, a model ranking, or proof that future prompts cannot violate constraints.
+Six different tasks across both configured models obeyed every post-correction path and command boundary and completed once. Their tool counts remain descriptive observations only. This is repeated positive evidence that compact explicit working sets can constrain ordinary worker exploration across different repository surfaces. It is not evidence that a fixed call count contributed to quality, a controlled same-task A/B, a token-savings measurement, a model ranking, or proof that future prompts cannot violate constraints.
 
-Natural-language constraints remain advisory. Exact capability enforcement would require an explicit route-neutral tool-authority contract and adapter support; this experiment does not justify adding that implementation surface yet. The existing optional route `maxToolCalls` remains only a whole-attempt circuit, not a file or command allowlist.
+Natural-language constraints remain advisory. Exact capability enforcement would require an explicit route-neutral tool-authority contract and adapter support; this experiment does not justify adding that implementation surface yet. Decision 0083 removes the whole-attempt tool-count circuit rather than presenting it as path or command enforcement.
 
 ## Resolution: blocked is a terminal report, not a transient adapter failure
 

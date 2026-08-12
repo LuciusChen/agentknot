@@ -93,24 +93,6 @@ export const ROUTE_POOL_STRATEGIES = ['least-active'] as const;
 
 export type RoutePoolStrategy = (typeof ROUTE_POOL_STRATEGIES)[number];
 
-export const MAX_TOOL_CALLS = 1_000;
-
-export function validateMaxToolCalls(
-  value: unknown,
-  label = 'maxToolCalls'
-): number | undefined {
-  if (value === undefined) return undefined;
-  if (
-    typeof value !== 'number' ||
-    !Number.isInteger(value) ||
-    value < 1 ||
-    value > MAX_TOOL_CALLS
-  ) {
-    throw new Error(`${label} must be an integer between 1 and ${MAX_TOOL_CALLS}`);
-  }
-  return value;
-}
-
 /** Immutable admission evidence for a logical pool target resolved to one concrete route. */
 export interface JobRoutePoolSelection {
   pool: string;
@@ -127,8 +109,6 @@ export interface JobRequest {
   prompt: string;
   workspace: string;
   route?: string;
-  /** Optional controller-authored hard stop for normalized tool executions in this Job. */
-  maxToolCalls?: number;
   /** Free-form caller identity. No controller vendor is privileged by the protocol. */
   source?: string;
   callbackUrl?: string;
@@ -164,8 +144,6 @@ export interface ResolvedRoute {
   requiredEnv: string[];
   maxAttempts: number;
   timeoutMs: number;
-  /** Omission leaves tool-call execution bounded only by timeout and adapter settlement. */
-  maxToolCalls?: number;
 }
 
 export interface JobResult {

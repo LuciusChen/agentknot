@@ -72,6 +72,8 @@ A corrected high-complexity, four-path review used a task-specific 16-call budge
 
 Final pre-commit review `orchestration_f534c496-ffb1-4b52-9476-b46edc89224d` then found that deadline expiry could derive `nextSequence` from newer initial-snapshot events that had not passed through the resumed follow loop, and that the catch path distinguished only the time of abort rather than the actual composed-signal reason. The HTTP wait update now exposes its completed-batch cursor, MCP begins at the caller cursor, and only the exact wait-signal timeout becomes an active response. Public stdio coverage holds a follow past the deadline with newer snapshot events and proves the returned cursor does not skip them.
 
+Decision 0083 retires both task-specific tool-count budgets. They remain historical evidence of the mistaken boundary and must not be copied into future reviews; the MCP wait result stands on its transport and cursor verification instead.
+
 ## Privacy and security review
 
 The wait result and progress notification contain only existing bounded durable status/activity projections, record identity, and sequence state. They add no prompt, transcript, worker text, credentials, tool arguments/results, controller-session identity, or artifact content.

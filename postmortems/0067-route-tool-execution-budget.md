@@ -1,8 +1,8 @@
 # 0067: Add an optional route tool-execution budget
 
 - Type: Incident / Architecture Decision
-- Status: Accepted
-- Implementation: Delivered in this slice
+- Status: Superseded by [decision 0083](./0083-remove-tool-count-task-boundaries.md)
+- Implementation: Removed before release
 - Date: 2026-08-11
 - Owners: AgentKnot maintainers
 - Related: [decision 0052](./0052-bounded-analysis-and-observable-waiting.md), [incident 0066](./0066-pi-duplicate-tool-start-events.md), [SPEC](../docs/SPEC.md), [ROADMAP](../docs/ROADMAP.md)
@@ -41,3 +41,7 @@ The budget does not guarantee latency, token savings, completion quality, or an 
 - **Hard-code limits by model or task complexity:** couples core to current downstreams and moves policy judgment into middleware.
 - **Set Luna to 96 based only on recent audits:** would reject multiple known successful Luna Jobs, including 100–146-call runs, before comparable quality evidence justified that tradeoff.
 - **Leave timeout as the only stop:** permits an already-out-of-scope worker to continue tools for the full hour.
+
+## Supersession
+
+Decision 0083 removes this pre-release feature from route configuration, resolved routes, direct Jobs, controller assessments, prompts, and runtime enforcement. The original evidence remains factual, but a fixed count cannot distinguish necessary task work from scope expansion and became a controller-authored normal-task budget. AgentKnot now relies on admitted context and acceptance criteria for semantic scope, with timeout, cancellation, bounded evidence, isolation, and completion envelopes as operational failure boundaries.

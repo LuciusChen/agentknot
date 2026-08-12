@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 
 import type { DelegationConfig, DelegationMode, RouteSelectionConfig } from './config.js';
-import { validateMaxToolCalls } from './types.js';
 import type {
   AssessedSubtask,
   ContextReference,
@@ -218,21 +217,7 @@ export function validateTaskAssessment(value: unknown): TaskAssessment {
   const subtasks: AssessedSubtask[] = value.subtasks.map((item, index) => {
     const subtaskLabel = `${label} subtasks[${index}]`;
     assertRecord(item, subtaskLabel);
-    assertExactKeys(
-      item,
-      [
-        'title',
-        'kind',
-        'prompt',
-        'acceptanceCriteria',
-        ...(Object.hasOwn(item, 'maxToolCalls') ? ['maxToolCalls'] : []),
-      ],
-      subtaskLabel
-    );
-    const maxToolCalls = validateMaxToolCalls(
-      item.maxToolCalls,
-      `${subtaskLabel}.maxToolCalls`
-    );
+    assertExactKeys(item, ['title', 'kind', 'prompt', 'acceptanceCriteria'], subtaskLabel);
     const acceptanceCriteria = stringArray(
       item.acceptanceCriteria,
       `${subtaskLabel}.acceptanceCriteria`
@@ -248,7 +233,6 @@ export function validateTaskAssessment(value: unknown): TaskAssessment {
       kind: boundedString(item.kind, `${subtaskLabel}.kind`, 100),
       prompt: boundedString(item.prompt, `${subtaskLabel}.prompt`, 8_000),
       acceptanceCriteria,
-      ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
     };
   });
 
@@ -335,9 +319,6 @@ function executionPrompt(
     '',
     `Subtask: ${subtask.title}`,
     subtask.prompt,
-    ...(subtask.maxToolCalls === undefined
-      ? []
-      : [`Hard execution budget: at most ${subtask.maxToolCalls} normalized tool calls.`]),
     '',
     'Acceptance criteria:',
     ...subtask.acceptanceCriteria.map((criterion) => `- ${criterion}`),

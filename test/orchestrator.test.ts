@@ -450,107 +450,64 @@ test('Orchestrator cannot persist success while delivered control lacks settleme
   }
 });
 
-test('Orchestrator stops one attempt at its configured normalized tool-call limit', async () => {
-  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-tool-budget-'));
+test('Orchestrator does not turn normalized tool counts into a semantic task boundary', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-context-bounded-tools-'));
   let runs = 0;
-  let attemptAborted = false;
   const adapter: WorkerAdapter = {
-    name: 'budgeted',
+    name: 'context-bounded',
     async doctor() {
       return { ok: true, message: 'ready' };
     },
-    async run(input, emit) {
+    async run(_input, emit) {
       runs += 1;
-      try {
-        for (let index = 1; index <= 3; index += 1) {
-          await emit('worker.tool.started', { toolCallId: `tool-${index}` });
-        }
-      } catch (error) {
-        attemptAborted = input.signal.aborted;
-        throw error;
+      for (let index = 1; index <= 12; index += 1) {
+        await emit('worker.tool.started', { toolCallId: `tool-${index}` });
       }
-      return { output: 'must not pass the budget' };
+      return { output: 'completed within the semantic task boundary' };
     },
   };
-  const budgetedConfig: AgentKnotConfig = {
+  const contextBoundedConfig: AgentKnotConfig = {
     ...config,
-    workers: { budgeted: { adapter: 'mock' } },
+    workers: { contextBounded: { adapter: 'mock' } },
     routes: {
-      budgeted: {
-        worker: 'budgeted',
+      contextBounded: {
+        worker: 'contextBounded',
         provider: 'mock-provider',
         model: 'mock-model',
         maxAttempts: 2,
-        maxToolCalls: 5,
       },
     },
-    defaultRoute: 'budgeted',
+    defaultRoute: 'contextBounded',
   };
   const job = await new Orchestrator({
-    config: budgetedConfig,
+    config: contextBoundedConfig,
     store: new MemoryJobStore(),
-    adapters: new Map([['budgeted', adapter]]),
-  }).run({ prompt: 'respect the tool budget', workspace, maxToolCalls: 2 });
+    adapters: new Map([['contextBounded', adapter]]),
+  }).run({ prompt: 'respect the admitted context and acceptance criteria', workspace });
 
-  assert.equal(job.status, 'failed');
+  assert.equal(job.status, 'succeeded');
   assert.equal(job.attempt, 1);
-  assert.equal(job.error?.name, 'WorkerToolCallLimitError');
-  assert.match(job.error?.message ?? '', /effective Job tool-call limit of 2/);
-  assert.equal(job.error?.retryable, false);
   assert.equal(runs, 1);
-  assert.equal(attemptAborted, true);
-  assert.equal(job.route.maxToolCalls, 2);
   assert.equal(
     job.events.filter((event) => event.type === 'worker.tool.started').length,
-    2
+    12
   );
 });
 
-test('Job admission persists the minimum of task and route tool-call budgets', async () => {
-  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-effective-tool-budget-'));
-  const cases = [
-    { route: 5, task: 2, expected: 2 },
-    { route: 2, task: 5, expected: 2 },
-    { task: 3, expected: 3 },
-    { route: 4, expected: 4 },
-    {},
-  ];
+test('Job admission rejects the removed controller tool-count override before persistence', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-removed-tool-budget-'));
   try {
-    const invalidStore = new MemoryJobStore();
-    const invalidOrchestrator = new Orchestrator({
+    const store = new MemoryJobStore();
+    const orchestrator = new Orchestrator({
       config,
-      store: invalidStore,
+      store,
       adapters: createAdapters(config),
     });
-    for (const maxToolCalls of [0, 1.5, 1_001]) {
-      await assert.rejects(
-        invalidOrchestrator.start({ prompt: 'invalid budget', workspace, maxToolCalls }),
-        /Job maxToolCalls must be an integer between 1 and 1000/
-      );
-    }
-    assert.deepEqual(await invalidStore.list(), []);
-
-    for (const candidate of cases) {
-      const budgetedConfig: AgentKnotConfig = {
-        ...config,
-        routes: {
-          mock: {
-            ...config.routes.mock!,
-            ...(candidate.route === undefined ? {} : { maxToolCalls: candidate.route }),
-          },
-        },
-      };
-      const job = await new Orchestrator({
-        config: budgetedConfig,
-        store: new MemoryJobStore(),
-        adapters: createAdapters(budgetedConfig),
-      }).run({
-        prompt: 'effective budget',
-        workspace,
-        ...(candidate.task === undefined ? {} : { maxToolCalls: candidate.task }),
-      });
-      assert.equal(job.route.maxToolCalls, candidate.expected);
-    }
+    await assert.rejects(
+      orchestrator.start({ prompt: 'legacy budget', workspace, maxToolCalls: 2 } as never),
+      /maxToolCalls is no longer supported/
+    );
+    assert.deepEqual(await store.list(), []);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

@@ -34,14 +34,14 @@ A fresh non-interactive Codex A arm was attempted before changing the installed 
 
 On 2026-08-13, the comparison was rerun with two fresh isolated temporary Codex homes and marketplace snapshots: old commit `e12329a` / plugin `0.1.0+codex.20260812080026` and compact commit `489d6e2` / plugin `0.1.0+codex.20260812155752`. Both used `gpt-5.6-sol`, reasoning effort `low`, the same auth, prompt, current `489d6e2` workspace clone, and shared broker. Exact values below are the official `turn.completed.usage` fields.
 
-The real delegated pair produced correct equivalent answers through Pi / OpenCode Go / DeepSeek V4 Flash / `thinkingLevel=max`, but was not behaviorally isomorphic:
+The attempted delegated pair produced correct equivalent answers through Pi / OpenCode Go / DeepSeek V4 Flash / `thinkingLevel=max`, but is invalid as an A/B comparison:
 
 | Arm | Controller path after Skill read | Input | Cached input | Output | Reasoning output |
 | --- | --- | ---: | ---: | ---: | ---: |
 | Old | one terminal wait, then one targeted upstream source read; controller set `maxToolCalls: 10` | 178,923 | 155,392 | 1,347 | 295 |
 | Compact | one active wait plus one terminal reattach, no upstream source read; controller omitted the child override, resolving to 64 | 181,047 (+1.19%) | 144,128 | 1,191 | 278 |
 
-The compact arm's downstream report was also longer. Those assessment, wait, verification, cache, and result-size differences dominate the fixed payload, so this pair is valid end-to-end behavior evidence but not a causal token comparison. Durable downstream evidence is in Orchestrations `orchestration_1cf59588-970f-4435-9a29-4f70adb65b04` and `orchestration_6a384069-acc1-4b24-99e6-2c2bf7682c9d`, with Jobs `job_54ab2f40-8fb8-495f-a639-42555e513902` and `job_d91a6137-80c3-4350-981d-af5500a65646`.
+The old arm introduced a task-specific `maxToolCalls: 10`, while the compact arm did not; the compact arm's downstream report was also longer and its wait path returned through an extra active controller turn. Tool-count limits are not a valid semantic scope mechanism and were later removed entirely by decision 0083. The pair therefore supplies two successful dogfood records but **no A/B token, latency, or end-to-end efficiency evidence**. Durable records remain in Orchestrations `orchestration_1cf59588-970f-4435-9a29-4f70adb65b04` and `orchestration_6a384069-acc1-4b24-99e6-2c2bf7682c9d`, with Jobs `job_54ab2f40-8fb8-495f-a639-42555e513902` and `job_d91a6137-80c3-4350-981d-af5500a65646`; their usage delta must not be cited as a comparison.
 
 A second controlled pair isolated fixed input. Each fresh session read its installed Skill once, called no AgentKnot or repository tool, returned exactly `READY`, and reported zero reasoning output:
 
@@ -65,4 +65,4 @@ As a separate deterministic upstream fixed-input reduction, compact the behavior
 - Codex and Claude Skill bodies remain normalized-equivalent and retain strict assessment, broker activation, wait/reattach, evidence review, and no-auto-promotion semantics.
 - Their `SessionStart` hooks remain identical, stateless, and limited to `startup|resume|clear|compact`, with no `UserPromptSubmit` path.
 - Full deterministic tests and plugin validation must pass before the compact payload is installed.
-- Fresh external exact usage now covers one controlled explicit Skill-load pair and one non-isomorphic real delegation pair. Implicit selection and repeated end-to-end efficiency remain separate promotion gates; current-session or byte-count evidence cannot substitute for them.
+- Fresh external exact usage now covers one controlled explicit Skill-load pair. The attempted delegated pair is invalid because its execution-count and controller paths differ. A future end-to-end pair must use equivalent context boundaries with no tool-count field; implicit selection and repeated efficiency remain separate promotion gates.

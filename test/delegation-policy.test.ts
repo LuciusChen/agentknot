@@ -62,28 +62,17 @@ test('validateTaskAssessment accepts a strict controller handoff and returns a d
   );
 });
 
-test('subtask tool budgets are strict, prompt-visible, and covered by the plan hash', () => {
-  const bounded = validateTaskAssessment({
-    ...assessment,
-    subtasks: assessment.subtasks.map((subtask) => ({ ...subtask, maxToolCalls: 7 })),
-  });
-  const basePlan = composeDelegationPlan(request, assessment, config);
-  const boundedPlan = composeDelegationPlan(
-    { ...request, assessment: bounded },
-    bounded,
-    config
+test('subtask scope is semantic and rejects legacy tool-count fields', () => {
+  const plan = composeDelegationPlan(request, assessment, config);
+  assert.doesNotMatch(plan.subtasks[0]?.executionPrompt ?? '', /tool calls|tool-call budget/i);
+  assert.match(plan.subtasks[0]?.executionPrompt ?? '', /Acceptance criteria:/);
+  assert.throws(
+    () => validateTaskAssessment({
+      ...assessment,
+      subtasks: [{ ...assessment.subtasks[0], maxToolCalls: 7 }],
+    }),
+    /unknown: maxToolCalls/
   );
-  assert.notEqual(boundedPlan.planHash, basePlan.planHash);
-  assert.match(boundedPlan.subtasks[0]?.executionPrompt ?? '', /at most 7 normalized tool calls/);
-  for (const maxToolCalls of [0, 1.5, 1_001]) {
-    assert.throws(
-      () => validateTaskAssessment({
-        ...assessment,
-        subtasks: [{ ...assessment.subtasks[0], maxToolCalls }],
-      }),
-      /maxToolCalls must be an integer between 1 and 1000/
-    );
-  }
 });
 
 test('validateTaskAssessment strictly rejects a subtask that omits acceptanceCriteria', () => {

@@ -48,7 +48,6 @@ const delegatedAssessmentJson = JSON.stringify({
       kind: 'documentation',
       prompt: 'Create reviewed.txt with the reviewed fixture text.',
       acceptanceCriteria: ['reviewed.txt contains the reviewed fixture text'],
-      maxToolCalls: 7,
     },
   ],
 });
@@ -192,19 +191,17 @@ test('CLI exposes one read-only artifact list, verification, and preview contrac
     'Create an empty inspection artifact.',
     '--workspace',
     fixture.workspace,
-    '--max-tool-calls',
-    '7',
     '--json'
   );
   const job = JSON.parse(run.stdout) as {
     id: string;
-    request: { maxToolCalls?: number };
-    route: { maxToolCalls?: number };
+    request: Record<string, unknown>;
+    route: Record<string, unknown>;
     artifacts: Array<{ attempt: number }>;
   };
   assert.equal(job.artifacts.length, 1);
-  assert.equal(job.request.maxToolCalls, 7);
-  assert.equal(job.route.maxToolCalls, 7);
+  assert.equal('maxToolCalls' in job.request, false);
+  assert.equal('maxToolCalls' in job.route, false);
 
   const listed = JSON.parse((await runCli(fixture.configPath, 'artifacts', job.id, '--json')).stdout) as {
     jobId: string;

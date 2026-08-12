@@ -523,12 +523,7 @@ function createServices(
 
 test('OrchestrationService persists a plan before dispatching bounded child jobs', async () => {
   const workspace = await createGitWorkspace('agentknot-orchestration-');
-  const boundedAssessment: TaskAssessment = {
-    ...assessment,
-    subtasks: assessment.subtasks.map((subtask, index) =>
-      index === 0 ? { ...subtask, maxToolCalls: 7 } : subtask
-    ),
-  };
+  const boundedAssessment: TaskAssessment = structuredClone(assessment);
   const adapter = new PlannerAndWorkerAdapter(boundedAssessment);
   const { jobStore, orchestrations, orchestrationStore } = createServices(adapter);
 
@@ -580,14 +575,9 @@ test('OrchestrationService persists a plan before dispatching bounded child jobs
     ),
     true
   );
-  assert.deepEqual(
-    jobs.map((job) => job.request.maxToolCalls).sort(),
-    [7, undefined]
-  );
-  assert.deepEqual(
-    jobs.map((job) => job.route.maxToolCalls).sort(),
-    [7, undefined]
-  );
+  assert.equal(jobs.every((job) => !('maxToolCalls' in job.request)), true);
+  assert.equal(jobs.every((job) => !('maxToolCalls' in job.route)), true);
+  assert.equal(jobs.every((job) => !/tool-call budget|at most \d+ normalized tool calls/iu.test(job.request.prompt)), true);
   for (const child of jobs) {
     const provenance = child.request.metadata?.agentknotDelegation as Record<string, unknown>;
     assert.equal(provenance.planHash, record.plan?.planHash);

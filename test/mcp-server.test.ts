@@ -299,7 +299,6 @@ test('MCP explicitly starts and follows a broker without owning its runtime', as
               kind: 'documentation',
               prompt: 'Describe the transport budget fixture.',
               acceptanceCriteria: ['The transport budget fixture is described'],
-              maxToolCalls: 7,
             },
           ],
         },
