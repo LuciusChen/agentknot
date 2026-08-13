@@ -6,8 +6,6 @@ import type { ArtifactValidationCommandEvidence } from './orchestration-types.js
 
 const CHILD_SIGTERM_GRACE_MS = 100;
 
-export const MAX_ARTIFACT_VALIDATION_PATCH_BYTES = 32 * 1024;
-
 export type ArtifactValidationExecution =
   | {
       status: 'completed';

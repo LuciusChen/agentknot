@@ -239,7 +239,6 @@ export const QUALITY_REVIEW_SKIPPED_REASONS = [
   'artifact-count-not-one',
   'artifact-invalid',
   'artifact-empty',
-  'artifact-too-large',
   'artifact-truncated',
   'handoff-too-large',
 ] as const;
@@ -324,7 +323,6 @@ export const ARTIFACT_VALIDATION_SKIPPED_REASONS = [
   'artifact-count-not-one',
   'artifact-invalid',
   'artifact-empty',
-  'artifact-too-large',
 ] as const;
 export type ArtifactValidationSkippedReason =
   (typeof ARTIFACT_VALIDATION_SKIPPED_REASONS)[number];

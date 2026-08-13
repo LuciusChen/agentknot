@@ -6,7 +6,6 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import {
-  MAX_ARTIFACT_VALIDATION_PATCH_BYTES,
   runArtifactValidationCommand,
   type ArtifactValidationExecution,
 } from './artifact-validation.js';
@@ -414,7 +413,7 @@ export class WorkspaceIsolationManager {
     config: ArtifactValidationConfig,
     signal: AbortSignal
   ): Promise<ArtifactValidationExecution> {
-    if (artifact.size < 1 || artifact.size > MAX_ARTIFACT_VALIDATION_PATCH_BYTES) {
+    if (artifact.size < 1) {
       return {
         status: 'unavailable',
         reason: 'artifact-invalid',

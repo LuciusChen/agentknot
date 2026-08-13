@@ -140,7 +140,8 @@ class ArtifactWritingAdapter implements WorkerAdapter {
       verdict: 'accept',
       summary: 'The patch is correct for the bounded task.',
       findings: [],
-    })
+    }),
+    readonly contentByPath: Map<string, string> = new Map()
   ) {}
 
   async doctor(_route: ResolvedRoute): Promise<WorkerHealth> {
@@ -157,7 +158,11 @@ class ArtifactWritingAdapter implements WorkerAdapter {
     for (const [prompt, changedPaths] of this.pathsByPrompt) {
       if (!input.prompt.includes(prompt)) continue;
       for (const changedPath of changedPaths) {
-        await writeFile(path.join(input.workspace, changedPath), `${prompt}\n`);
+        const content = this.contentByPath.get(changedPath);
+        await writeFile(
+          path.join(input.workspace, changedPath),
+          content === undefined ? `${prompt}\n` : content
+        );
       }
     }
     return { output: `completed ${input.route.name}` };
@@ -938,6 +943,55 @@ test('OrchestrationService runs one advisory reviewer after one valid low-comple
   assert.equal(provenance.depth, 1);
   assert.equal(provenance.childJobId, record.children[0]?.jobId);
   assert.deepEqual(await orchestrationStore.get(record.id), record);
+  assert.equal(await gitStatus(workspace), '');
+});
+
+test('OrchestrationService reviews and validates a patch above the former byte gate', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-quality-review-large-patch-');
+  const lowAssessment = singleQualityReviewAssessment('Produce the large reviewed file.');
+  const adapter = new ArtifactWritingAdapter(
+    lowAssessment,
+    new Map([['Produce the large reviewed file.', ['large-reviewed.ts']]]),
+    undefined,
+    new Map([['large-reviewed.ts', `export const payload = '${'x'.repeat(40 * 1024)}';\n`]])
+  );
+  const { jobStore, orchestrations } = createServices(adapter, 2, 1, 1, undefined, true, {
+    argv: [process.execPath, '-e', 'process.exit(0)'],
+    timeoutMs: 2_000,
+    maxOutputBytes: 1_024,
+  });
+
+  const record = await orchestrations.run({
+    prompt: 'Add the large reviewed file.',
+    workspace,
+    assessment: lowAssessment,
+  });
+
+  assert.equal(record.status, 'succeeded');
+  assert.equal(adapter.reviewerRuns, 1);
+  const review = record.qualityReview;
+  if (review?.status !== 'completed') assert.fail('quality review should complete');
+  assert.equal(review.verdict, 'accept');
+  assert.deepEqual(review.findings, []);
+  assert.equal(record.artifactValidation?.status, 'completed');
+  if (record.artifactValidation?.status !== 'completed') {
+    assert.fail('artifact validation should complete');
+  }
+  assert.equal(record.artifactValidation.outcome, 'passed');
+  assert.equal(record.artifactValidation.command.outcome, 'passed');
+  assert.equal(record.artifactValidation.cleanup, 'cleaned');
+  const jobs = await jobStore.list();
+  const childArtifact = jobs
+    .find((job) => job.id === record.children[0]?.jobId)
+    ?.artifacts?.[0];
+  assert.ok(childArtifact, 'child artifact should exist');
+  assert.ok(
+    childArtifact.size > 32 * 1024,
+    'artifact size should exceed the former 32 KiB eligibility gate'
+  );
+  const reviewer = jobs.find((job) => job.id === review.reviewerJobId);
+  assert.ok(reviewer);
+  assert.equal(reviewer.request.artifactReadGrant?.artifact.size, childArtifact.size);
   assert.equal(await gitStatus(workspace), '');
 });
 

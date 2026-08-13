@@ -17,6 +17,8 @@
 - Inspect the relevant code, tests, configuration, and documentation before changing behavior. Answer questions from local evidence before asking the user.
 - Find and name the root cause before patching timing, retries, caching, parsing, or control flow. Fix the layer that owns the problem.
 - Keep experiments to the smallest slice that proves the direction. Do not expand scope before the slice demonstrates value.
+- Do not claim or pursue quality, token, latency, or completion-rate optimization by imposing arbitrary fixed quotas on tool calls, files, patch bytes, context entries, worker messages, or similar task-semantic parameters. Bound the work with its objective, controller-known context, relevant paths, constraints, non-goals, and acceptance criteria. Numeric limits are permitted only at an explicitly named safety, storage, transport, timeout, or resource-protection boundary; they must not substitute for task classification, review eligibility, or semantic completion.
+- An optimization comparison is invalid when one arm narrows task authority or available evidence through such a quota. Remove a superseded semantic limit instead of increasing it or replacing it with another heuristic, and verify the intended outcome directly.
 - Prefer direct, boring code over speculative abstractions. Three clear lines are better than a one-use wrapper or premature framework.
 - Add a module only for a stable responsibility, external boundary, or resource lifecycle. Do not create vague `common`, `utils`, or `helpers` dumping grounds.
 - Move whole responsibilities together: state, validation, operations, cleanup, and formatting that enforce one invariant should have one owner.

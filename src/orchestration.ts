@@ -10,7 +10,6 @@ import {
 import { DurableExecutionCoordinator } from './durable-execution.js';
 import { isTerminalStatus } from './execution-status.js';
 import { DurableEventSubscription } from './durable-subscription.js';
-import { MAX_ARTIFACT_VALIDATION_PATCH_BYTES } from './artifact-validation.js';
 import { artifactReadIdentity } from './artifact-read.js';
 import { assertJsonMetadata } from './metadata.js';
 import {
@@ -21,11 +20,7 @@ import {
   limitEventData,
   utf8Bytes,
 } from './record-limits.js';
-import {
-  MAX_QUALITY_REVIEW_PATCH_BYTES,
-  buildQualityReviewPrompt,
-  parseQualityReview,
-} from './quality-review.js';
+import { buildQualityReviewPrompt, parseQualityReview } from './quality-review.js';
 import { composeDelegationPlan, validateTaskAssessment } from './delegation-policy.js';
 import {
   isOrchestrationDelegationOverride,
@@ -805,11 +800,6 @@ export class OrchestrationService {
       await this.#skipArtifactValidation(record, 'artifact-empty');
       return;
     }
-    if (verified.artifact.size > MAX_ARTIFACT_VALIDATION_PATCH_BYTES) {
-      await this.#skipArtifactValidation(record, 'artifact-too-large');
-      return;
-    }
-
     const artifact: ArtifactValidationIdentity = {
       attempt: verified.artifact.attempt,
       size: verified.artifact.size,
@@ -988,10 +978,6 @@ export class OrchestrationService {
     }
     if (verified.artifact.size === 0) {
       await this.#skipQualityReview(record, 'artifact-empty');
-      return;
-    }
-    if (verified.artifact.size > MAX_QUALITY_REVIEW_PATCH_BYTES) {
-      await this.#skipQualityReview(record, 'artifact-too-large');
       return;
     }
     const prompt = buildQualityReviewPrompt({

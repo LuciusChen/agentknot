@@ -7,7 +7,6 @@ import { QUALITY_REVIEW_FINDING_SEVERITIES, QUALITY_REVIEW_VERDICTS } from './or
 import { utf8Bytes } from './record-limits.js';
 import type { JobArtifact, JobRecord } from './types.js';
 
-export const MAX_QUALITY_REVIEW_PATCH_BYTES = 32 * 1024;
 export const MAX_QUALITY_REVIEW_OUTPUT_BYTES = 8 * 1024;
 const MAX_QUALITY_REVIEW_SUMMARY_BYTES = 2 * 1024;
 const MAX_QUALITY_REVIEW_FINDINGS = 10;
