@@ -435,10 +435,11 @@ function safeProgressLabel(value: string): string {
 
 function activityLabel(activity: JobActivityProjection): string {
   let label: string = activity.state;
-  if (activity.state === 'retrying' && activity.lastObserved?.retryScope === 'downstream') {
+  if (activity.state === 'retrying' && activity.lastObserved?.retryScope !== undefined) {
+    const scope = activity.lastObserved.retryScope;
     const attempt = activity.lastObserved.retryAttempt;
     const maximum = activity.lastObserved.retryMaxAttempts;
-    label = `retrying:downstream${attempt === undefined ? '' : `:${attempt}${maximum === undefined ? '' : `/${maximum}`}`}`;
+    label = `retrying:${scope}${attempt === undefined ? '' : `:${attempt}${maximum === undefined ? '' : `/${maximum}`}`}`;
   }
   if (activity.state === 'tools-running' && activity.activeTools !== undefined) {
     const visible = activity.activeTools.names.slice(0, 2).map(safeProgressLabel);

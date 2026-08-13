@@ -204,7 +204,7 @@ async function handle(command) {
     return;
   }
 
-  if (process.env.FAKE_PI_PROMPT_FILE) {
+  if (command.id === 'prompt' && process.env.FAKE_PI_PROMPT_FILE) {
     writeFileSync(process.env.FAKE_PI_PROMPT_FILE, command.message);
   }
   if (

@@ -146,6 +146,10 @@ export interface ResolvedRoute {
   timeoutMs: number;
 }
 
+export const WORKER_RETRY_SCOPES = ['downstream', 'completion-envelope'] as const;
+
+export type WorkerRetryScope = (typeof WORKER_RETRY_SCOPES)[number];
+
 export interface JobResult {
   output: string;
   /** Present when AgentKnot retained only the bounded UTF-8 prefix of worker output. */
@@ -422,7 +426,7 @@ export interface WorkerRunResult {
 }
 
 /**
- * The worker session reached its own terminal error. Its adapter owns any downstream retry policy.
+ * The worker session reached a terminal error after its adapter exhausted any in-session recovery it owns.
  * Replaying a fresh worker session inside the same Job would duplicate completed work.
  */
 export class WorkerSettledError extends Error {

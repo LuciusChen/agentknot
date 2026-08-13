@@ -51,6 +51,11 @@ async function readFixtureArgv(file: string): Promise<string[]> {
   return args;
 }
 
+async function readCommandLog(file: string): Promise<Record<string, unknown>[]> {
+  const text = (await readFile(file, 'utf8')).trim();
+  return text === '' ? [] : text.split('\n').map((line) => recordValue(JSON.parse(line)));
+}
+
 function recordValue(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('Expected a metadata record');
@@ -418,7 +423,7 @@ test('Pi normal runs append the report instruction after prompt-injection text',
       },
       () => undefined
     );
-    await assert.rejects(run, /missing required completion report/);
+    await assert.rejects(run, /without a valid completion report/);
 
     const sentPrompt = await readFile(promptFile, 'utf8');
     assert.ok(sentPrompt.startsWith(injectedPrompt));
@@ -467,9 +472,9 @@ test('Pi normal runs preserve valid completed and blocked envelopes for shared s
 
 test('Pi normal runs reject missing, inferred, and trailing completion reports', async () => {
   const cases = [
-    { mode: 'missing', error: /missing required completion report/ },
-    { mode: 'prose', error: /missing required completion report/ },
-    { mode: 'trailing', error: /missing required completion report/ },
+    { mode: 'missing', error: /without a valid completion report/ },
+    { mode: 'prose', error: /without a valid completion report/ },
+    { mode: 'trailing', error: /without a valid completion report/ },
   ] as const;
   for (const { mode, error } of cases) {
     const directory = await mkdtemp(path.join(os.tmpdir(), `agentknot-pi-completion-${mode}-`));
@@ -531,7 +536,7 @@ test('Pi normal runs reject malformed and unsupported completion envelopes', asy
           },
           () => undefined
         ),
-        /malformed required completion report/,
+        /without a valid completion report/,
         mode
       );
     } finally {
@@ -568,7 +573,7 @@ test('Pi normal completion reports propagate while blocked and invalid reports f
         });
       } else {
         assert.equal(job.status, 'failed');
-        assert.match(job.error?.message ?? '', new RegExp(`${mode} required completion report`));
+        assert.match(job.error?.message ?? '', /without a valid completion report/);
         assert.deepEqual(job.completionSummary?.workerReported, {
           status: 'unavailable',
           reason: 'not-retained',
@@ -1193,6 +1198,132 @@ test('PiRpcWorkerAdapter reports malformed JSONL before settlement with line con
       return true;
     }
   );
+});
+
+test('PiRpcWorkerAdapter recovers a missing completion envelope in the same session', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-completion-recovery-'));
+  const pidLog = path.join(directory, 'children.pids');
+  const commandLog = path.join(directory, 'commands.jsonl');
+  const orchestrator = createConformanceOrchestrator(
+    {
+      FAKE_PI_MODE: 'completion-recovery-success',
+      FAKE_PI_PID_LOG: pidLog,
+      FAKE_PI_COMMAND_LOG: commandLog,
+    },
+    10_000,
+    2
+  );
+  try {
+    const job = await orchestrator.run({ prompt: 'recover the completion envelope', workspace: directory });
+    const pids = (await readFile(pidLog, 'utf8')).trim().split('\n').filter(Boolean).map(Number);
+    const commands = await readCommandLog(commandLog);
+    const recoveryPrompts = commands.filter(
+      (command) => command.id === 'agentknot-completion-envelope-recovery-1'
+    );
+    const recoveryEvents = job.events.filter(
+      (event) => event.type === 'worker.retry.started' || event.type === 'worker.retry.completed'
+    );
+
+    assert.equal(job.status, 'succeeded');
+    assert.equal(job.attempt, 1);
+    assert.equal(job.result?.attempt, 1);
+    assert.deepEqual(job.completionSummary?.workerReported.status, 'reported');
+    assert.equal(recoveryPrompts.length, 1);
+    assert.equal(recoveryPrompts[0]?.type, 'prompt');
+    assert.equal(pids.length, 1);
+    assertProcessGone(pids[0]!);
+    assert.equal(job.events.some((event) => event.type === 'job.retrying'), false);
+    assert.deepEqual(recoveryEvents.map((event) => ({ type: event.type, data: event.data })), [
+      {
+        type: 'worker.retry.started',
+        data: { scope: 'completion-envelope', attempt: 1, maxAttempts: 1 },
+      },
+      {
+        type: 'worker.retry.completed',
+        data: { scope: 'completion-envelope', attempt: 1, success: true },
+      },
+    ]);
+    assert.equal(JSON.stringify(recoveryEvents).includes('Protocol recovery'), false);
+    assert.equal(JSON.stringify(recoveryEvents).includes('recover the completion envelope'), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter fails a second settled turn without an envelope without Job retry', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-completion-recovery-failed-'));
+  const pidLog = path.join(directory, 'children.pids');
+  const commandLog = path.join(directory, 'commands.jsonl');
+  const orchestrator = createConformanceOrchestrator(
+    {
+      FAKE_PI_MODE: 'completion-recovery-failure',
+      FAKE_PI_PID_LOG: pidLog,
+      FAKE_PI_COMMAND_LOG: commandLog,
+    },
+    10_000,
+    2
+  );
+  try {
+    const job = await orchestrator.run({ prompt: 'fail the bounded recovery', workspace: directory });
+    const pids = (await readFile(pidLog, 'utf8')).trim().split('\n').filter(Boolean).map(Number);
+    const commands = await readCommandLog(commandLog);
+    const recoveryPrompts = commands.filter(
+      (command) => command.id === 'agentknot-completion-envelope-recovery-1'
+    );
+    const recoveryEvents = job.events.filter(
+      (event) => event.type === 'worker.retry.started' || event.type === 'worker.retry.completed'
+    );
+
+    assert.equal(job.status, 'failed');
+    assert.equal(job.attempt, 1);
+    assert.equal(job.error?.name, 'WorkerSettledError');
+    assert.equal(job.error?.retryable, false);
+    assert.match(job.error?.message ?? '', /without a valid completion report/);
+    assert.equal(job.events.some((event) => event.type === 'job.retrying'), false);
+    assert.equal(recoveryPrompts.length, 1);
+    assert.equal(recoveryPrompts[0]?.type, 'prompt');
+    assert.equal(pids.length, 1);
+    assertProcessGone(pids[0]!);
+    assert.deepEqual(recoveryEvents.at(-1)?.data, {
+      scope: 'completion-envelope',
+      attempt: 1,
+      success: false,
+      reason: 'completion-envelope-recovery-failed',
+    });
+    assert.equal(JSON.stringify(recoveryEvents).includes('Protocol recovery'), false);
+    assert.equal(JSON.stringify(recoveryEvents).includes('second turn still without its envelope'), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PiRpcWorkerAdapter does not recover an assistant terminal error', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-pi-completion-recovery-error-'));
+  const commandLog = path.join(directory, 'commands.jsonl');
+  const orchestrator = createConformanceOrchestrator(
+    {
+      FAKE_PI_MODE: 'settled-assistant-error',
+      FAKE_PI_COMMAND_LOG: commandLog,
+    },
+    10_000,
+    2
+  );
+  try {
+    const job = await orchestrator.run({ prompt: 'preserve assistant errors', workspace: directory });
+    const commands = await readCommandLog(commandLog);
+
+    assert.equal(job.status, 'failed');
+    assert.equal(job.attempt, 1);
+    assert.equal(job.error?.name, 'WorkerSettledError');
+    assert.match(job.error?.message ?? '', /fixture assistant terminal error/);
+    assert.equal(
+      commands.filter((command) => command.id === 'agentknot-completion-envelope-recovery-1').length,
+      0
+    );
+    assert.equal(job.events.some((event) => event.data?.scope === 'completion-envelope'), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('PiRpcWorkerAdapter reports process exit before agent_settled', async () => {

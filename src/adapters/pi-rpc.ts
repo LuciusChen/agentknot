@@ -102,6 +102,8 @@ const SESSION_STATS_WAIT_MS = 1_000;
 const SESSION_STATS_REQUEST_ID = 'agentknot-session-stats';
 const CONTROL_RESPONSE_WAIT_MS = 5_000;
 const TEXT_DELTA_FLUSH_BYTES = 1_024;
+const COMPLETION_ENVELOPE_RECOVERY_PROMPT =
+  'Protocol recovery only: the previous turn settled without a valid AgentKnot completion envelope. Do not use tools or perform task work; reply now with exactly the required marked JSON envelope and no prose.';
 const PI_RPC_CONTROL_KINDS = ['steer', 'follow-up'] as const;
 const AMBIENT_DISCOVERY_DISABLE_FLAGS = [
   '--no-extensions',
@@ -729,11 +731,38 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     const exit = waitForExit(child);
 
     let completed = false;
+    let completionRecoveryInProgress = false;
     let output = '';
     let pendingTextDelta = '';
     let rawEventCount = 0;
     let assistantError: string | undefined;
     let agentEnded = false;
+    let turnSettled = false;
+    let resolveTurnSettled!: () => void;
+    let rejectTurnSettled!: (error: Error) => void;
+    let turnSettlement!: Promise<void>;
+    const beginTurn = (): void => {
+      turnSettled = false;
+      assistantError = undefined;
+      agentEnded = false;
+      turnSettlement = new Promise<void>((resolve, reject) => {
+        resolveTurnSettled = resolve;
+        rejectTurnSettled = reject;
+      });
+      // Abort or a transport failure can reject before the next await reaches this promise.
+      void turnSettlement.catch(() => undefined);
+    };
+    const settleTurn = (): void => {
+      if (turnSettled) return;
+      turnSettled = true;
+      resolveTurnSettled();
+    };
+    const failTurn = (error: Error): void => {
+      if (turnSettled) return;
+      turnSettled = true;
+      rejectTurnSettled(error);
+    };
+    beginTurn();
     let stderr = '';
     let statsRequestId: string | undefined;
     let statsResponseResolved = false;
@@ -752,23 +781,16 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       for (const resolve of controlResponses.values()) resolve(undefined);
       controlResponses.clear();
     };
-    let resolveSettled!: () => void;
-    let rejectSettled!: (error: Error) => void;
-    const settled = new Promise<void>((resolve, reject) => {
-      resolveSettled = resolve;
-      rejectSettled = reject;
-    });
-    // Abort or spawn failure can reject before the startup path reaches its await. Keep that
-    // rejection observed while preserving it for the normal await path.
-    void settled.catch(() => undefined);
     const artifactProtocol = input.artifactReader === undefined
       ? undefined
       : bindArtifactReader(child, input.artifactReader, (error) => {
-          if (!completed) rejectSettled(error);
+          if (!completed) failTurn(error);
         });
 
     const abort = () => {
-      if (!completed) rejectSettled(input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted'));
+      if (!completed) {
+        failTurn(input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted'));
+      }
     };
     input.signal.addEventListener('abort', abort, { once: true });
     if (input.signal.aborted) abort();
@@ -872,13 +894,12 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           assistantError = extractAssistantError(event.messages) ?? assistantError;
           break;
         case 'agent_settled':
-          completed = true;
-          resolveSettled();
+          settleTurn();
           break;
         case 'response':
           if (event.success === false) {
             completed = true;
-            rejectSettled(new Error(event.error ?? `Pi RPC command ${event.command ?? 'unknown'} failed`));
+            failTurn(new Error(event.error ?? `Pi RPC command ${event.command ?? 'unknown'} failed`));
           }
           break;
         default:
@@ -901,7 +922,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       }
       await flushTextDelta();
     })().catch((error: unknown) => {
-      if (!completed) rejectSettled(error instanceof Error ? error : new Error(String(error)));
+      if (!completed) failTurn(error instanceof Error ? error : new Error(String(error)));
     });
 
     const stderrTask = (async () => {
@@ -916,16 +937,16 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       }
       await recordStderr(decoder.end());
     })().catch((error: unknown) => {
-      if (!completed) rejectSettled(error instanceof Error ? error : new Error(String(error)));
+      if (!completed) failTurn(error instanceof Error ? error : new Error(String(error)));
     });
 
     child.stdin.on('error', (error) => {
-      if (!completed) rejectSettled(error);
+      if (!completed) failTurn(error);
     });
     child.once('error', (error) => {
       resolveStatsResponse(undefined);
       resolveControlResponses();
-      if (!completed) rejectSettled(error);
+      if (!completed) failTurn(error);
     });
     child.once('exit', (code, signal) => {
       resolveStatsResponse(undefined);
@@ -933,10 +954,12 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       const output = Promise.allSettled([stdoutTask, stderrTask]);
       void waitForPromiseOrTimeout(output, CHILD_OUTPUT_DRAIN_WAIT_MS)
         .then(() => {
-          if (!completed) rejectSettled(childExitError('Pi RPC', code, signal, agentEnded, stderr));
+          if (!completed && !turnSettled) {
+            failTurn(childExitError('Pi RPC', code, signal, agentEnded, stderr));
+          }
         })
         .catch((error: unknown) => {
-          if (!completed) rejectSettled(error instanceof Error ? error : new Error(String(error)));
+          if (!completed) failTurn(error instanceof Error ? error : new Error(String(error)));
         });
     });
 
@@ -944,7 +967,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       await waitForSpawn(child);
       if (input.signal.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
       unbindControl = input.control?.bind(async (request) => {
-        if (completed || childExited(child)) {
+        if (completed || completionRecoveryInProgress || childExited(child)) {
           return { accepted: false, reason: 'worker-attempt-not-running' };
         }
         controlSequence += 1;
@@ -985,13 +1008,70 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       }
       const prompt = `${input.prompt}\n\n${WORKER_COMPLETION_REPORT_INSTRUCTION}`;
       child.stdin.write(rpcLine({ id: 'prompt', type: 'prompt', message: prompt }));
-      await settled;
+      await turnSettlement;
       await artifactProtocol?.settleObserved();
       if (assistantError) throw new WorkerSettledError(assistantError);
       if (input.signal.aborted) {
         throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
       }
-      const parsedOutput = parseRequiredWorkerCompletionOutput(output, 'Pi');
+
+      let parsedOutput: ReturnType<typeof parseRequiredWorkerCompletionOutput>;
+      try {
+        parsedOutput = parseRequiredWorkerCompletionOutput(output, 'Pi');
+      } catch {
+        completionRecoveryInProgress = true;
+        let recoveryProgressCompleted = false;
+        const completeRecovery = async (success: boolean): Promise<void> => {
+          if (recoveryProgressCompleted) return;
+          recoveryProgressCompleted = true;
+          await emit('worker.retry.completed', {
+            scope: 'completion-envelope',
+            attempt: 1,
+            success,
+            ...(success ? {} : { reason: 'completion-envelope-recovery-failed' }),
+          });
+        };
+        try {
+          await emit('worker.retry.started', {
+            scope: 'completion-envelope',
+            attempt: 1,
+            maxAttempts: 1,
+          });
+          beginTurn();
+          if (input.signal.aborted) {
+            throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
+          }
+          if (childExited(child)) {
+            throw new Error('Pi RPC completion-envelope recovery could not start because the worker exited');
+          }
+          if (output !== '' && !output.endsWith('\n')) output += '\n';
+          child.stdin.write(rpcLine({
+            id: 'agentknot-completion-envelope-recovery-1',
+            type: 'prompt',
+            message: COMPLETION_ENVELOPE_RECOVERY_PROMPT,
+          }));
+          await turnSettlement;
+          await artifactProtocol?.settleObserved();
+          if (assistantError) throw new WorkerSettledError(assistantError);
+          if (input.signal.aborted) {
+            throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
+          }
+          try {
+            parsedOutput = parseRequiredWorkerCompletionOutput(output, 'Pi');
+          } catch {
+            throw new WorkerSettledError(
+              'Pi worker settled without a valid completion report after one completion-envelope recovery prompt'
+            );
+          }
+          await completeRecovery(true);
+        } catch (error) {
+          await completeRecovery(false);
+          throw error;
+        } finally {
+          completionRecoveryInProgress = false;
+        }
+      }
+      completed = true;
       statsRequestId = SESSION_STATS_REQUEST_ID;
       const sessionStats = await requestSessionStats(child, statsResponse, statsRequestId);
       return {

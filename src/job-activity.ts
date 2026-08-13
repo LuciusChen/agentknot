@@ -1,5 +1,11 @@
 import { isTerminalStatus } from './execution-status.js';
-import type { JobEvent, JobEventType, JobRecord } from './types.js';
+import {
+  WORKER_RETRY_SCOPES,
+  type JobEvent,
+  type JobEventType,
+  type JobRecord,
+  type WorkerRetryScope,
+} from './types.js';
 
 export const JOB_ACTIVITY_STATES = [
   'queued',
@@ -23,7 +29,7 @@ export interface JobActivityObservation {
   type: JobEventType;
   toolName?: string;
   retryAttempt?: number;
-  retryScope?: 'downstream';
+  retryScope?: WorkerRetryScope;
   retryMaxAttempts?: number;
 }
 
@@ -41,6 +47,10 @@ export interface JobActivityProjection {
 
 const MAX_VISIBLE_TOOL_NAMES = 4;
 const MAX_TOOL_NAME_CHARACTERS = 80;
+
+function isWorkerRetryScope(value: unknown): value is WorkerRetryScope {
+  return WORKER_RETRY_SCOPES.some((scope) => scope === value);
+}
 
 function toolName(event: JobEvent): string | undefined {
   const value = event.data?.toolName;
@@ -74,7 +84,7 @@ function activityObservation(event: JobEvent): JobActivityObservation {
     ...(!Number.isSafeInteger(attempt) || (attempt as number) < 0
       ? {}
       : { retryAttempt: attempt as number }),
-    ...(retryScope === 'downstream' ? { retryScope } : {}),
+    ...(isWorkerRetryScope(retryScope) ? { retryScope } : {}),
     ...(!Number.isSafeInteger(retryMaxAttempts) || (retryMaxAttempts as number) < 1
       ? {}
       : { retryMaxAttempts: retryMaxAttempts as number }),
@@ -204,7 +214,7 @@ export function isJobActivityProjection(value: unknown): value is JobActivityPro
       (observation.toolName !== undefined && typeof observation.toolName !== 'string') ||
       (observation.retryAttempt !== undefined &&
         (!Number.isSafeInteger(observation.retryAttempt) || (observation.retryAttempt as number) < 0)) ||
-      (observation.retryScope !== undefined && observation.retryScope !== 'downstream') ||
+      (observation.retryScope !== undefined && !isWorkerRetryScope(observation.retryScope)) ||
       (observation.retryMaxAttempts !== undefined &&
         (!Number.isSafeInteger(observation.retryMaxAttempts) ||
           (observation.retryMaxAttempts as number) < 1))

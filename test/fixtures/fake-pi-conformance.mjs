@@ -76,12 +76,61 @@ function sendSplitUtf8Stderr(done) {
   });
 }
 
+const completionEnvelope = `AGENTKNOT_WORKER_COMPLETION_REPORT_V1: ${JSON.stringify({
+  schemaVersion: 1,
+  taskOutcome: 'completed',
+  changedFiles: [],
+  checksRun: [],
+  remainingRisks: [],
+  notes: [],
+})}`;
+
+function sendTurn(command, text, messages = []) {
+  const frames = [
+    { id: command.id, type: 'response', command: command.type, success: true },
+    { type: 'agent_start' },
+    ...(text === '' ? [] : [{ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: text } }]),
+    { type: 'agent_end', messages, willRetry: false },
+    { type: 'agent_settled' },
+  ];
+  sendFrames(frames, true, () => {});
+}
+
 function handle(command) {
-  if (command.type !== 'prompt') return;
+  if (process.env.FAKE_PI_COMMAND_LOG) {
+    appendFileSync(process.env.FAKE_PI_COMMAND_LOG, `${JSON.stringify({
+      type: command.type,
+      id: command.id,
+      message: typeof command.message === 'string' ? command.message.replace(/\r?\n/g, '\\n') : command.message,
+    })}\n`);
+  }
+  if (command.id === 'prompt' && process.env.FAKE_PI_PROMPT_FILE) {
+    writeFileSync(process.env.FAKE_PI_PROMPT_FILE, command.message);
+  }
+  if (command.type !== 'prompt' && command.type !== 'follow_up') return;
 
   switch (mode) {
     case 'split':
       sendSplitUtf8Frames(() => {});
+      break;
+    case 'completion-recovery-success':
+      if (command.id === 'prompt') sendTurn(command, 'first turn without its envelope');
+      else sendTurn(command, completionEnvelope);
+      break;
+    case 'completion-recovery-failure':
+      sendTurn(
+        command,
+        command.id === 'prompt' ? 'first turn without its envelope' : 'second turn still without its envelope'
+      );
+      break;
+    case 'settled-assistant-error':
+      if (command.id === 'prompt') {
+        sendTurn(command, 'assistant error output', [
+          { role: 'assistant', stopReason: 'error', errorMessage: 'fixture assistant terminal error' },
+        ]);
+      } else {
+        sendTurn(command, `\n${completionEnvelope}`);
+      }
       break;
     case 'malformed':
       process.stdout.write(`${JSON.stringify({ type: 'agent_start' })}\n{"type":\n`);

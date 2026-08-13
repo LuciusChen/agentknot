@@ -199,4 +199,17 @@ test('job activity distinguishes worker retry from broker-client connectivity', 
     { type: 'job.control.accepted', data: { attempt: 1, controlId: 'control-1' } }
   )));
   assert.equal(control.lastObserved?.retryAttempt, undefined);
+
+  const completionRecovery = projectJobActivity(job('running', events(
+    { type: 'job.started' },
+    { type: 'worker.started' },
+    {
+      type: 'worker.retry.started',
+      data: { scope: 'completion-envelope', attempt: 1, maxAttempts: 1 },
+    }
+  )));
+  assert.equal(completionRecovery.state, 'retrying');
+  assert.equal(completionRecovery.lastObserved?.retryScope, 'completion-envelope');
+  assert.equal(completionRecovery.lastObserved?.retryAttempt, 1);
+  assert.equal(isJobActivityProjection(completionRecovery), true);
 });
