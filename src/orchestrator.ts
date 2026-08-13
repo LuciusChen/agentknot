@@ -23,6 +23,7 @@ import {
   validateWorkerControlRequest,
 } from './worker-control.js';
 import { WorkerSettledError } from './types.js';
+import { normalizeWorkerUsageEvidence } from './worker-usage.js';
 import {
   capturedChangedFilesSummary,
   validateWorkerCompletionReport,
@@ -1034,6 +1035,7 @@ export class Orchestrator {
       job = current;
       if (job.status === 'running') {
         await this.#markPendingControlsLost(job, job.attempt);
+        this.#recordAttemptUsage(job, job.attempt, { unavailableReason: 'worker-failure' });
       }
       const cancellation = await this.#durability.getCancellation(job.id);
       if (cancellation !== undefined) {
@@ -1734,6 +1736,15 @@ export class Orchestrator {
       } catch (error) {
         failure = error;
       } finally {
+        this.#recordAttemptUsage(
+          job,
+          attempt,
+          result !== undefined
+            ? result.metadata?.sessionStats
+            : failure instanceof WorkerSettledError && failure.usage !== undefined
+              ? failure.usage
+              : { unavailableReason: 'worker-failure' }
+        );
         attemptActive = false;
         activeAttempt.closing = true;
         controlChannel.close();
@@ -1873,6 +1884,14 @@ export class Orchestrator {
         throw error;
       }
     }
+  }
+
+  #recordAttemptUsage(job: JobRecord, attempt: number, value: unknown): void {
+    if (job.attemptUsage?.some((evidence) => evidence.attempt === attempt)) return;
+    job.attemptUsage = [
+      ...(job.attemptUsage ?? []),
+      { attempt, usage: normalizeWorkerUsageEvidence(value) },
+    ];
   }
 
   async #emit(

@@ -531,7 +531,16 @@ test('Orchestrator treats a valid blocked worker result as route-neutral and non
     },
     async run() {
       runs += 1;
-      return { output: 'available evidence', completionReport };
+      return {
+        output: 'available evidence',
+        metadata: {
+          sessionStats: {
+            tokens: { input: 7, output: 3, cacheRead: 2, cacheWrite: 1, total: 13 },
+            cost: 0.07,
+          },
+        },
+        completionReport,
+      };
     },
   };
   const retryConfig = structuredClone(config);
@@ -550,6 +559,13 @@ test('Orchestrator treats a valid blocked worker result as route-neutral and non
     assert.equal(job.error?.retryable, false);
     assert.equal(runs, 1);
     assert.equal(job.events.some((event) => event.type === 'job.retrying'), false);
+    assert.deepEqual(job.attemptUsage, [{
+      attempt: 1,
+      usage: {
+        tokens: { input: 7, output: 3, cacheRead: 2, cacheWrite: 1, total: 13 },
+        cost: 0.07,
+      },
+    }]);
     assert.deepEqual(job.completionSummary?.workerReported, {
       status: 'reported',
       report: completionReport,
@@ -1228,6 +1244,10 @@ test('durable recovery waits for lease expiry, retries only the next attempt, an
     const queuedTerminal = await recovery.wait(recoverableQueued.id, 500);
     assert.equal(terminal?.status, 'succeeded');
     assert.equal(terminal?.attempt, 2);
+    assert.deepEqual(terminal?.attemptUsage, [
+      { attempt: 1, usage: { unavailableReason: 'worker-failure' } },
+      { attempt: 2, usage: { unavailableReason: 'missing' } },
+    ]);
     assert.deepEqual(attempts.sort(), ['job_recover_queued:1', 'job_recover_running:2']);
     assert.deepEqual(
       terminal?.events.map((event) => event.type),
@@ -1247,6 +1267,9 @@ test('durable recovery waits for lease expiry, retries only the next attempt, an
       ['job.queued', 'job.recovery.started', 'job.started', 'job.artifact', 'job.succeeded']
     );
     assert.equal(cancelled?.status, 'cancelled');
+    assert.deepEqual(cancelled?.attemptUsage, [
+      { attempt: 1, usage: { unavailableReason: 'worker-failure' } },
+    ]);
     assert.deepEqual(
       cancelled?.events.slice(-2).map((event) => event.type),
       ['job.control.lost', 'job.cancelled']

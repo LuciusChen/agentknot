@@ -350,6 +350,9 @@ test('exclusive createRuntime imports legacy state and fails unrecoverable histo
       status: 'unavailable',
       reason: 'not-retained',
     });
+    assert.deepEqual(job?.attemptUsage, [
+      { attempt: 1, usage: { unavailableReason: 'worker-failure' } },
+    ]);
     assert.equal(job?.events.at(-2)?.type, 'job.attempt.lost');
     assert.equal(job?.events.at(-2)?.data?.reason, 'lease-expired');
     assert.equal(job?.events.at(-2)?.data?.retryable, false);

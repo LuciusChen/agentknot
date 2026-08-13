@@ -302,8 +302,8 @@ function formatUsageReport(report: UsageReport): string {
       `${formatCount(report.scope.successfulJobs)} / ${formatCount(report.scope.totalJobs)} (${formatShare(report.scope.successfulJobs, report.scope.totalJobs)})`
     ),
     reportRow(
-      'Downstream stats',
-      `${formatCount(report.scope.statsAvailableJobs)} / ${formatCount(report.scope.successfulJobs)} (${formatShare(report.scope.statsAvailableJobs, report.scope.successfulJobs)})`
+      'Downstream attempts',
+      `${formatCount(report.scope.statsAvailableAttempts)} / ${formatCount(report.scope.observedAttempts)} (${formatShare(report.scope.statsAvailableAttempts, report.scope.observedAttempts)})`
     ),
     reportRow('Terminal orchestrations', formatCount(report.scope.terminalOrchestrations)),
     reportRow('Planned subtasks', formatCount(report.scope.plannedSubtasks)),
@@ -331,7 +331,7 @@ function formatUsageReport(report: UsageReport): string {
     lines.push(
       reportRow(
         'Missing stats',
-        `${formatCount(report.scope.statsUnavailableJobs)} (${report.downstream.unavailable.map((item) => `${item.reason}: ${formatCount(item.count)}`).join(', ')})`
+        `${formatCount(report.scope.statsUnavailableAttempts)} (${report.downstream.unavailable.map((item) => `${item.reason}: ${formatCount(item.count)}`).join(', ')})`
       )
     );
   }

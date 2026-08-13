@@ -107,6 +107,25 @@ function handle(command) {
   if (command.id === 'prompt' && process.env.FAKE_PI_PROMPT_FILE) {
     writeFileSync(process.env.FAKE_PI_PROMPT_FILE, command.message);
   }
+  if (command.type === 'get_session_stats' && process.env.FAKE_PI_STATS_MODE === 'success') {
+    sendFrame({
+      id: command.id,
+      type: 'response',
+      command: 'get_session_stats',
+      success: true,
+      data: {
+        userMessages: 2,
+        assistantMessages: 3,
+        toolCalls: 4,
+        toolResults: 5,
+        totalMessages: 6,
+        tokens: { input: 11, output: 12, cacheRead: 13, cacheWrite: 14, total: 50 },
+        cost: 0.42,
+        contextUsage: { tokens: 321, contextWindow: 1000, percent: 32.1 },
+      },
+    });
+    return;
+  }
   if (command.type !== 'prompt' && command.type !== 'follow_up') return;
 
   switch (mode) {

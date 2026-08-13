@@ -197,3 +197,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0083](./0083-remove-tool-count-task-boundaries.md) | Incident / Architecture Decision | Accepted / Implemented | Remove fixed tool-count task boundaries |
 | [0084](./0084-worker-settled-retry-ownership.md) | Incident / Architecture Decision | Resolved / Accepted | Keep downstream retry inside the worker session and prevent full Job replay |
 | [0085](./0085-in-session-completion-envelope-recovery.md) | Incident / Architecture Decision | Resolved / Accepted | Recover missing completion evidence in the live worker session |
+| [0086](./0086-per-attempt-usage-evidence.md) | Incident / Architecture Decision | Resolved / Accepted | Persist fixed-shape downstream usage per worker attempt |

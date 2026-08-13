@@ -1280,6 +1280,9 @@ test('PiRpcWorkerAdapter fails a second settled turn without an envelope without
     assert.equal(job.error?.retryable, false);
     assert.match(job.error?.message ?? '', /without a valid completion report/);
     assert.equal(job.events.some((event) => event.type === 'job.retrying'), false);
+    assert.deepEqual(job.attemptUsage, [
+      { attempt: 1, usage: { unavailableReason: 'timeout' } },
+    ]);
     assert.equal(recoveryPrompts.length, 1);
     assert.equal(recoveryPrompts[0]?.type, 'prompt');
     assert.equal(pids.length, 1);
@@ -1344,6 +1347,7 @@ test('Orchestrator retries one exited Pi child and leaves both exact PIDs gone',
       FAKE_PI_MODE: 'exit-once-then-split',
       FAKE_PI_ATTEMPT_MARKER: marker,
       FAKE_PI_PID_LOG: pidLog,
+      FAKE_PI_STATS_MODE: 'success',
     },
     10_000,
     2
@@ -1359,6 +1363,16 @@ test('Orchestrator retries one exited Pi child and leaves both exact PIDs gone',
     assert.equal(job.status, 'succeeded');
     assert.equal(job.attempt, 2);
     assert.equal(job.result?.attempt, 2);
+    assert.deepEqual(job.attemptUsage, [
+      { attempt: 1, usage: { unavailableReason: 'worker-failure' } },
+      {
+        attempt: 2,
+        usage: {
+          tokens: { input: 11, output: 12, cacheRead: 13, cacheWrite: 14, total: 50 },
+          cost: 0.42,
+        },
+      },
+    ]);
     assert.equal(job.events.filter((event) => event.type === 'job.retrying').length, 1);
     assert.equal(pids.length, 2);
     assert.equal(new Set(pids).size, 2);
@@ -1382,6 +1396,7 @@ test('Pi settled downstream failure does not replay a fresh worker session', asy
     {
       FAKE_PI_MODE: 'settled-downstream-error',
       FAKE_PI_PID_LOG: pidLog,
+      FAKE_PI_STATS_MODE: 'success',
     },
     10_000,
     2
@@ -1395,6 +1410,13 @@ test('Pi settled downstream failure does not replay a fresh worker session', asy
     assert.equal(job.error?.name, 'WorkerSettledError');
     assert.match(job.error?.message ?? '', /temporary downstream failure/);
     assert.equal(job.error?.retryable, false);
+    assert.deepEqual(job.attemptUsage, [{
+      attempt: 1,
+      usage: {
+        tokens: { input: 11, output: 12, cacheRead: 13, cacheWrite: 14, total: 50 },
+        cost: 0.42,
+      },
+    }]);
     assert.equal(job.events.some((event) => event.type === 'job.retrying'), false);
     assert.deepEqual(
       job.events.filter((event) => event.type.startsWith('worker.retry')).map((event) => ({

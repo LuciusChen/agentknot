@@ -62,7 +62,7 @@ function stats(
   cacheWrite: number,
   total: number,
   cost: number
-): Record<string, unknown> {
+) {
   return {
     tokens: { input, output, cacheRead, cacheWrite, total },
     cost,
@@ -191,6 +191,9 @@ test('usage report aggregates exact persisted stats and separates active and sha
     successfulJobs: 4,
     statsAvailableJobs: 2,
     statsUnavailableJobs: 2,
+    observedAttempts: 4,
+    statsAvailableAttempts: 2,
+    statsUnavailableAttempts: 2,
     terminalOrchestrations: 2,
     plannedSubtasks: 5,
   });
@@ -240,6 +243,46 @@ test('usage report aggregates exact persisted stats and separates active and sha
   assert.equal(report.qualityReview.status, 'unavailable');
   if (report.qualityReview.status !== 'unavailable') assert.fail('review usage should be unavailable');
   assert.equal(report.qualityReview.reason, 'no-configured-quality-reviews');
+});
+
+test('usage report aggregates every attempt once without recounting terminal metadata', () => {
+  const retried = job('job_retried', stats(900, 900, 900, 900, 3_600, 9));
+  retried.attemptUsage = [
+    { attempt: 1, usage: stats(10, 5, 30, 2, 47, 0.2) },
+    { attempt: 2, usage: stats(20, 7, 10, 3, 40, 0.3) },
+  ];
+  const failed = job('job_failed-attempt', undefined, 'failed');
+  failed.attemptUsage = [
+    { attempt: 1, usage: { unavailableReason: 'worker-failure' } },
+  ];
+
+  const report = buildUsageReport([retried, failed], []);
+
+  assert.deepEqual(report.scope, {
+    totalJobs: 2,
+    successfulJobs: 1,
+    statsAvailableJobs: 1,
+    statsUnavailableJobs: 1,
+    observedAttempts: 3,
+    statsAvailableAttempts: 2,
+    statsUnavailableAttempts: 1,
+    terminalOrchestrations: 0,
+    plannedSubtasks: 0,
+  });
+  assert.equal(report.downstream.status, 'available');
+  if (report.downstream.status !== 'available') assert.fail('attempt usage should be available');
+  assert.equal(report.downstream.coverage, 'partial');
+  assert.deepEqual(report.downstream.tokens, {
+    input: 30,
+    output: 12,
+    cacheRead: 40,
+    cacheWrite: 5,
+    total: 87,
+  });
+  assert.equal(report.downstream.providerReportedCost, 0.5);
+  assert.deepEqual(report.downstream.unavailable, [
+    { reason: 'worker-failure', count: 1 },
+  ]);
 });
 
 test('usage report keeps valid zero stats distinct from missing evidence', () => {

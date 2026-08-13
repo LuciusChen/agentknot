@@ -17,6 +17,7 @@ import type {
   WorkerProbeResult,
   WorkerRunInput,
   WorkerRunResult,
+  WorkerUsageEvidence,
 } from '../types.js';
 import {
   awaitChildOutput,
@@ -221,6 +222,14 @@ type SanitizedSessionStats = {
 };
 
 type SessionStatsMetadata = SanitizedSessionStats | { unavailableReason: SessionStatsUnavailableReason };
+
+function usageEvidence(stats: SessionStatsMetadata): WorkerUsageEvidence {
+  if ('unavailableReason' in stats) return { unavailableReason: stats.unavailableReason };
+  return {
+    tokens: { ...stats.tokens },
+    cost: stats.cost,
+  };
+}
 
 function rpcLine(value: Record<string, unknown>): string {
   return `${JSON.stringify(value)}\n`;
@@ -765,6 +774,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     beginTurn();
     let stderr = '';
     let statsRequestId: string | undefined;
+    let sessionStats: SessionStatsMetadata | undefined;
     let statsResponseResolved = false;
     let resolveStatsResponse!: (event: PiRpcEvent | undefined) => void;
     const statsResponse = new Promise<PiRpcEvent | undefined>((resolve) => {
@@ -774,6 +784,12 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
         resolve(event);
       };
     });
+    const collectSessionStats = async (): Promise<SessionStatsMetadata> => {
+      if (sessionStats !== undefined) return sessionStats;
+      statsRequestId = SESSION_STATS_REQUEST_ID;
+      sessionStats = await requestSessionStats(child, statsResponse, statsRequestId);
+      return sessionStats;
+    };
     const controlResponses = new Map<string, (event: PiRpcEvent | undefined) => void>();
     let controlSequence = 0;
     let unbindControl: (() => void) | undefined;
@@ -1010,7 +1026,9 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
       child.stdin.write(rpcLine({ id: 'prompt', type: 'prompt', message: prompt }));
       await turnSettlement;
       await artifactProtocol?.settleObserved();
-      if (assistantError) throw new WorkerSettledError(assistantError);
+      if (assistantError) {
+        throw new WorkerSettledError(assistantError, usageEvidence(await collectSessionStats()));
+      }
       if (input.signal.aborted) {
         throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
       }
@@ -1052,7 +1070,9 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           }));
           await turnSettlement;
           await artifactProtocol?.settleObserved();
-          if (assistantError) throw new WorkerSettledError(assistantError);
+          if (assistantError) {
+            throw new WorkerSettledError(assistantError, usageEvidence(await collectSessionStats()));
+          }
           if (input.signal.aborted) {
             throw input.signal.reason instanceof Error ? input.signal.reason : new Error('Aborted');
           }
@@ -1060,7 +1080,8 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
             parsedOutput = parseRequiredWorkerCompletionOutput(output, 'Pi');
           } catch {
             throw new WorkerSettledError(
-              'Pi worker settled without a valid completion report after one completion-envelope recovery prompt'
+              'Pi worker settled without a valid completion report after one completion-envelope recovery prompt',
+              usageEvidence(await collectSessionStats())
             );
           }
           await completeRecovery(true);
@@ -1072,8 +1093,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
         }
       }
       completed = true;
-      statsRequestId = SESSION_STATS_REQUEST_ID;
-      const sessionStats = await requestSessionStats(child, statsResponse, statsRequestId);
+      const sessionStats = await collectSessionStats();
       return {
         output: parsedOutput.output,
         completionReport: parsedOutput.completionReport,

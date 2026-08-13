@@ -7,7 +7,8 @@ import {
   type OrchestrationRecord,
   type RouteSelectionEvidence,
 } from './orchestration-types.js';
-import type { JobRecord } from './types.js';
+import type { JobRecord, WorkerUsageUnavailableReason } from './types.js';
+import { normalizeWorkerUsageEvidence } from './worker-usage.js';
 
 export interface UsageTokenTotals {
   input: number;
@@ -32,7 +33,7 @@ export type UsageRate =
     };
 
 export interface UsageUnavailableCount {
-  reason: 'missing' | 'timeout' | 'unsupported' | 'invalid';
+  reason: WorkerUsageUnavailableReason;
   count: number;
 }
 
@@ -162,6 +163,9 @@ export interface UsageReport {
     successfulJobs: number;
     statsAvailableJobs: number;
     statsUnavailableJobs: number;
+    observedAttempts: number;
+    statsAvailableAttempts: number;
+    statsUnavailableAttempts: number;
     terminalOrchestrations: number;
     plannedSubtasks: number;
   };
@@ -183,6 +187,11 @@ type ParsedSessionStats =
   | { status: 'available'; tokens: UsageTokenTotals; cost: number }
   | { status: 'unavailable'; reason: UsageUnavailableCount['reason'] };
 
+interface ParsedAttemptUsage {
+  present: boolean;
+  stats: ParsedSessionStats[];
+}
+
 const CACHE_HIT_FORMULA = 'cacheRead / (input + cacheRead)';
 const ROUTE_HIT_FORMULA = 'rule / (rule + default)';
 
@@ -194,43 +203,48 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
-function parseSessionStats(job: JobRecord): ParsedSessionStats {
-  const metadata = job.result?.metadata;
-  if (!isRecord(metadata) || metadata.sessionStats === undefined) {
-    return { status: 'unavailable', reason: 'missing' };
-  }
-  const stats = metadata.sessionStats;
-  if (!isRecord(stats)) return { status: 'unavailable', reason: 'invalid' };
-  if (stats.unavailableReason !== undefined) {
-    return stats.unavailableReason === 'timeout' || stats.unavailableReason === 'unsupported'
-      ? { status: 'unavailable', reason: stats.unavailableReason }
-      : { status: 'unavailable', reason: 'invalid' };
-  }
-  if (!isRecord(stats.tokens)) return { status: 'unavailable', reason: 'invalid' };
-  const tokens = stats.tokens;
-  if (
-    !isNonNegativeSafeInteger(tokens.input) ||
-    !isNonNegativeSafeInteger(tokens.output) ||
-    !isNonNegativeSafeInteger(tokens.cacheRead) ||
-    !isNonNegativeSafeInteger(tokens.cacheWrite) ||
-    !isNonNegativeSafeInteger(tokens.total) ||
-    typeof stats.cost !== 'number' ||
-    !Number.isFinite(stats.cost) ||
-    stats.cost < 0
-  ) {
-    return { status: 'unavailable', reason: 'invalid' };
+function parseSessionStatsValue(stats: unknown): ParsedSessionStats {
+  const evidence = normalizeWorkerUsageEvidence(stats);
+  if ('unavailableReason' in evidence) {
+    return { status: 'unavailable', reason: evidence.unavailableReason };
   }
   return {
     status: 'available',
-    tokens: {
-      input: tokens.input,
-      output: tokens.output,
-      cacheRead: tokens.cacheRead,
-      cacheWrite: tokens.cacheWrite,
-      total: tokens.total,
-    },
-    cost: stats.cost,
+    tokens: { ...evidence.tokens },
+    cost: evidence.cost,
   };
+}
+
+function parseSessionStats(job: JobRecord): ParsedSessionStats {
+  const metadata = job.result?.metadata;
+  return isRecord(metadata) && Object.hasOwn(metadata, 'sessionStats')
+    ? parseSessionStatsValue(metadata.sessionStats)
+    : { status: 'unavailable', reason: 'missing' };
+}
+
+/** Attempt evidence is authoritative; terminal metadata remains a legacy fallback only. */
+function parseAttemptUsage(job: JobRecord): ParsedAttemptUsage {
+  if (job.attemptUsage === undefined) return { present: false, stats: [] };
+  if (!Array.isArray(job.attemptUsage) || job.attemptUsage.length === 0) {
+    return { present: true, stats: [{ status: 'unavailable', reason: 'missing' }] };
+  }
+  const attempts = new Set<number>();
+  const stats: ParsedSessionStats[] = [];
+  for (const evidence of job.attemptUsage) {
+    if (
+      !isRecord(evidence) ||
+      !isNonNegativeSafeInteger(evidence.attempt) ||
+      evidence.attempt < 1 ||
+      attempts.has(evidence.attempt) ||
+      !Object.hasOwn(evidence, 'usage')
+    ) {
+      stats.push({ status: 'unavailable', reason: 'invalid' });
+      continue;
+    }
+    attempts.add(evidence.attempt);
+    stats.push(parseSessionStatsValue(evidence.usage));
+  }
+  return { present: true, stats };
 }
 
 function addSafe(left: number, right: number): number | undefined {
@@ -248,43 +262,67 @@ function downstreamUsage(jobs: readonly JobRecord[]): {
   downstream: DownstreamUsage;
   availableJobs: number;
   unavailableJobs: number;
+  observedAttempts: number;
+  availableAttempts: number;
+  unavailableAttempts: number;
 } {
-  const successful = jobs.filter((job) => job.status === 'succeeded');
   const unavailable = new Map<UsageUnavailableCount['reason'], number>();
   const totals: UsageTokenTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
   let providerReportedCost = 0;
   let availableJobs = 0;
+  let unavailableJobs = 0;
+  let observedAttempts = 0;
+  let availableAttempts = 0;
   let aggregateOverflow = false;
 
-  for (const job of successful) {
-    const stats = parseSessionStats(job);
-    if (stats.status === 'unavailable') {
-      unavailable.set(stats.reason, (unavailable.get(stats.reason) ?? 0) + 1);
-      continue;
+  for (const job of jobs) {
+    const attemptUsage = parseAttemptUsage(job);
+    const stats = attemptUsage.present
+      ? attemptUsage.stats
+      : job.status === 'succeeded'
+        ? [parseSessionStats(job)]
+        : [];
+    let jobObserved = false;
+    let jobHasAvailableStats = false;
+    for (const item of stats) {
+      jobObserved = true;
+      observedAttempts += 1;
+      if (item.status === 'unavailable') {
+        unavailable.set(item.reason, (unavailable.get(item.reason) ?? 0) + 1);
+        continue;
+      }
+      jobHasAvailableStats = true;
+      availableAttempts += 1;
+      for (const field of ['input', 'output', 'cacheRead', 'cacheWrite', 'total'] as const) {
+        const sum = addSafe(totals[field], item.tokens[field]);
+        if (sum === undefined) aggregateOverflow = true;
+        else totals[field] = sum;
+      }
+      const cost = providerReportedCost + item.cost;
+      if (!Number.isFinite(cost)) aggregateOverflow = true;
+      else providerReportedCost = cost;
     }
-    availableJobs += 1;
-    for (const field of ['input', 'output', 'cacheRead', 'cacheWrite', 'total'] as const) {
-      const sum = addSafe(totals[field], stats.tokens[field]);
-      if (sum === undefined) aggregateOverflow = true;
-      else totals[field] = sum;
+    if (jobObserved) {
+      if (jobHasAvailableStats) availableJobs += 1;
+      else unavailableJobs += 1;
     }
-    const cost = providerReportedCost + stats.cost;
-    if (!Number.isFinite(cost)) aggregateOverflow = true;
-    else providerReportedCost = cost;
   }
 
   const unavailableCounts = [...unavailable.entries()]
     .map(([reason, count]) => ({ reason, count }))
     .sort((left, right) => left.reason.localeCompare(right.reason));
-  const unavailableJobs = successful.length - availableJobs;
-  if (successful.length === 0) {
+  const unavailableAttempts = observedAttempts - availableAttempts;
+  if (observedAttempts === 0) {
     return {
       downstream: { status: 'unavailable', reason: 'no-successful-jobs', unavailable: [] },
       availableJobs,
       unavailableJobs,
+      observedAttempts,
+      availableAttempts,
+      unavailableAttempts,
     };
   }
-  if (availableJobs === 0) {
+  if (availableAttempts === 0) {
     return {
       downstream: {
         status: 'unavailable',
@@ -293,6 +331,9 @@ function downstreamUsage(jobs: readonly JobRecord[]): {
       },
       availableJobs,
       unavailableJobs,
+      observedAttempts,
+      availableAttempts,
+      unavailableAttempts,
     };
   }
   if (aggregateOverflow) {
@@ -304,12 +345,15 @@ function downstreamUsage(jobs: readonly JobRecord[]): {
       },
       availableJobs,
       unavailableJobs,
+      observedAttempts,
+      availableAttempts,
+      unavailableAttempts,
     };
   }
   return {
     downstream: {
       status: 'available',
-      coverage: unavailableJobs === 0 ? 'complete' : 'partial',
+      coverage: unavailableAttempts === 0 ? 'complete' : 'partial',
       tokens: totals,
       providerReportedCost,
       cacheReadHitRate: rate(
@@ -321,6 +365,9 @@ function downstreamUsage(jobs: readonly JobRecord[]): {
     },
     availableJobs,
     unavailableJobs,
+    observedAttempts,
+    availableAttempts,
+    unavailableAttempts,
   };
 }
 
@@ -649,6 +696,9 @@ export function buildUsageReport(
       successfulJobs: jobs.filter((job) => job.status === 'succeeded').length,
       statsAvailableJobs: downstream.availableJobs,
       statsUnavailableJobs: downstream.unavailableJobs,
+      observedAttempts: downstream.observedAttempts,
+      statsAvailableAttempts: downstream.availableAttempts,
+      statsUnavailableAttempts: downstream.unavailableAttempts,
       terminalOrchestrations: routeSelection.terminalOrchestrations,
       plannedSubtasks: routeSelection.plannedSubtasks,
     },

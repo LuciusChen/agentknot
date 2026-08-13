@@ -164,6 +164,31 @@ export interface JobResult {
   metadata?: Record<string, unknown>;
 }
 
+export interface WorkerUsageTokens {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  total: number;
+}
+
+export type WorkerUsageUnavailableReason =
+  | 'missing'
+  | 'timeout'
+  | 'unsupported'
+  | 'invalid'
+  | 'worker-failure';
+
+/** Fixed-shape usage evidence shared by Worker adapters and durable Job attempts. */
+export type WorkerUsageEvidence =
+  | { tokens: WorkerUsageTokens; cost: number }
+  | { unavailableReason: WorkerUsageUnavailableReason };
+
+export interface JobAttemptUsage {
+  attempt: number;
+  usage: WorkerUsageEvidence;
+}
+
 export interface JobError {
   name: string;
   message: string;
@@ -318,6 +343,8 @@ export interface JobRecord {
   workspaceSnapshot?: JobWorkspaceSnapshot;
   artifacts?: JobArtifact[];
   result?: JobResult;
+  /** One fixed-shape downstream-usage observation per completed worker attempt. */
+  attemptUsage?: JobAttemptUsage[];
   error?: JobError;
   /** Additive terminal evidence; absent on legacy records. */
   completionSummary?: JobCompletionSummary;
@@ -431,6 +458,10 @@ export interface WorkerRunResult {
  */
 export class WorkerSettledError extends Error {
   readonly name = 'WorkerSettledError';
+
+  constructor(message: string, readonly usage?: WorkerUsageEvidence) {
+    super(message);
+  }
 }
 
 export interface WorkerProbeInput {
