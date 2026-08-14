@@ -478,12 +478,22 @@ function workOrderExecutorPrompt(command: WorkOrderCommand): string {
   ].join('\n');
 }
 
-function taskHumanText(value: string, maxBytes = 240): string {
+const MAX_TASK_PRESENTATION_BYTES = 240;
+const TASK_TRUNCATION_MARKER = '… [truncated]';
+
+function taskHumanText(value: string, maxBytes = MAX_TASK_PRESENTATION_BYTES): string {
   const normalized = value
     .replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ')
     .replace(/\s+/gu, ' ')
     .trim();
-  return normalized === '' ? 'not available' : limitText(normalized, maxBytes).value;
+  if (normalized === '') return 'not available';
+
+  const limited = limitText(normalized, maxBytes);
+  if (limited.truncation === undefined) return limited.value;
+
+  const markerBytes = Buffer.byteLength(TASK_TRUNCATION_MARKER, 'utf8');
+  const prefix = limitText(normalized, maxBytes - markerBytes).value;
+  return `${prefix}${TASK_TRUNCATION_MARKER}`;
 }
 
 function taskExecutionStatus(job: JobRecord | undefined): string {

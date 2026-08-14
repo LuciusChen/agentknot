@@ -42,6 +42,21 @@ async function runCli(configPath: string, ...args: string[]): Promise<{
   return { stdout: String(result.stdout), stderr: String(result.stderr) };
 }
 
+function assertTruncatedTaskField(
+  stdout: string,
+  prefix: string,
+  index = 0,
+  valuePrefix = prefix
+): void {
+  const line = stdout
+    .split('\n')
+    .filter((candidate) => candidate.startsWith(prefix))[index];
+  if (line === undefined) throw new Error(`Missing task report line with prefix ${prefix}`);
+  const value = line.slice(valuePrefix.length);
+  assert.match(value, /… \[truncated\]$/u);
+  assert.equal(Buffer.byteLength(value, 'utf8'), 240);
+}
+
 test('task issues a WorkOrder, binds a durable Job, and reloads its result after restart', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-cli-task-'));
   const workspace = path.join(directory, 'workspace');
@@ -202,6 +217,58 @@ test('task issues a WorkOrder, binds a durable Job, and reloads its result after
     assert.equal(createdJson.artifactVerification?.valid, true);
     assert.equal((await git(workspace, 'rev-parse', 'HEAD')).trim(), baseCommit);
     assert.equal(await git(workspace, 'status', '--porcelain=v1', '--untracked-files=all'), '');
+    const longAscii = 'A'.repeat(400);
+    const longUnicode = '界'.repeat(200);
+    const longTask = await runCli(
+      configPath,
+      'task',
+      longAscii,
+      '--workspace',
+      workspace,
+      '--acceptance',
+      longUnicode,
+      '--constraint',
+      longAscii
+    );
+    assertTruncatedTaskField(longTask.stdout, '  Objective: ');
+    assertTruncatedTaskField(longTask.stdout, '    - ', 0);
+    assertTruncatedTaskField(longTask.stdout, '    - ', 1);
+    assertTruncatedTaskField(longTask.stdout, '  Task fixture completed: ', 0, '  ');
+
+    const machine = JSON.parse(
+      (
+        await runCli(
+          configPath,
+          'task',
+          longAscii,
+          '--workspace',
+          workspace,
+          '--acceptance',
+          longUnicode,
+          '--constraint',
+          longAscii,
+          '--json'
+        )
+      ).stdout
+    ) as TaskJsonOutput;
+    const expectedPrompt = [
+      'Execute the following AgentKnot WorkOrder command.',
+      '',
+      'Objective:',
+      longAscii,
+      '',
+      'Acceptance criteria:',
+      `- ${longUnicode}`,
+      '',
+      'Constraints:',
+      `- ${longAscii}`,
+    ].join('\n');
+    assert.equal(machine.workOrder.command.objective, longAscii);
+    assert.deepEqual(machine.workOrder.command.acceptanceCriteria, [longUnicode]);
+    assert.deepEqual(machine.workOrder.command.constraints, [longAscii]);
+    assert.equal(machine.job?.request.prompt, expectedPrompt);
+    assert.equal(machine.job?.result?.output, `Task fixture completed: ${expectedPrompt}`);
+    assert.doesNotMatch(JSON.stringify(machine), /… \[truncated\]/u);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
