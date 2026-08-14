@@ -37,6 +37,7 @@ WorkOrder -> Executor Job -> Candidate -> Review -> Disposition
 
 - [x] Add durable schemaVersion 1 WorkOrder issue/read/list/event persistence with one immutable command and only the `issued` status.
 - [x] Add explicit CAS binding from an issued WorkOrder to one executor Job identity that the caller/controller already admitted. Same-Job replay is idempotent; a different Job or stale first-bind revision conflicts. Binding neither launches nor controls the Job, and Job success is not WorkOrder acceptance.
+- [x] Add a minimal WorkOrder-rooted developer CLI that composes issue, ordinary Job admission, explicit binding, terminal observation, artifact verification, and restart-safe reporting without adding another workflow record or changing existing statuses. Default completion reports are human-readable and hide internal IDs/artifact identity; explicit JSON mode retains complete machine evidence.
 - [ ] Add an immutable Candidate artifact record linked to WorkOrder and Job without changing WorkOrder or Job status.
 - [ ] Add domain Review linked to a Candidate without reinterpreting existing orchestration advisory-review evidence.
 - [ ] Add explicit Disposition after review. Acceptance and discard must remain distinct from Job technical success.

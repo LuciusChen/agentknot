@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { open } from 'node:fs/promises';
+import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
@@ -12,13 +13,14 @@ import {
   type BrokerStatus,
   STARTUP_REPORT_PATH_ENV,
 } from './broker-lifecycle.js';
+import { loadConfig } from './config.js';
 import { validateTaskAssessment } from './delegation-policy.js';
 import { AgentKnotHttpClient, type AgentKnotWaitUpdate } from './http-client.js';
 import { createAgentKnotHttpServer } from './http-server.js';
 import type { JobActivityProjection } from './job-activity.js';
 import { buildJobList } from './job-list.js';
 import { assertJsonMetadata } from './metadata.js';
-import { limitTextSuffix, MAX_STARTUP_DIAGNOSTIC_BYTES } from './record-limits.js';
+import { limitText, limitTextSuffix, MAX_STARTUP_DIAGNOSTIC_BYTES } from './record-limits.js';
 import {
   createLocalDiscoveryRegistration,
   readLocalDiscovery,
@@ -33,8 +35,15 @@ import {
 } from './orchestration-types.js';
 import { buildOrchestrationHandoff } from './orchestration-handoff.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
-import type { JobEvent, JobRequest } from './types.js';
+import type {
+  JobArtifactVerificationReport,
+  JobEvent,
+  JobRecord,
+  JobRequest,
+} from './types.js';
 import type { RouteSelectionModeUsage, UsageRate, UsageReport } from './usage-report.js';
+import { SqliteWorkOrderStore } from './work-order-store.js';
+import { WorkOrderService, type WorkOrderCommand, type WorkOrderRecord } from './work-order.js';
 
 const MAX_ASSESSMENT_JSON_BYTES = 64 * 1024;
 const MAX_REQUEST_FILE_BYTES = 256 * 1024;
@@ -77,6 +86,15 @@ function takeFlag(args: string[], name: string): boolean {
   if (index === -1) return false;
   args.splice(index, 1);
   return true;
+}
+
+function takeOptions(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (;;) {
+    const value = takeOption(args, name);
+    if (value === undefined) return values;
+    values.push(value);
+  }
 }
 
 function parseAssessmentJson(value: string): TaskAssessment {
@@ -196,6 +214,8 @@ function help(): string {
   return `AgentKnot — vendor-neutral coding-agent orchestration
 
 Usage:
+  agentknot task [objective...] [--route NAME] [--workspace PATH] [--acceptance TEXT] [--constraint TEXT] [--json]
+  agentknot task-show WORK_ORDER_ID [--json]
   agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME] [--idempotency-key KEY]
   agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE] [--idempotency-key KEY]
   agentknot orchestrate --request-file PATH [--json] [--handoff-json] [--progress]
@@ -222,6 +242,16 @@ Usage:
 Global options:
   --config PATH       Configuration file (default: agentknot.config.json)
   --server URL        Shared AgentKnot server (or AGENTKNOT_SERVER_URL)
+
+Task options:
+  --prompt TEXT       Objective instead of positional text
+  --route NAME        Worker/provider/model route
+  --workspace PATH    Worker working directory (default: current directory)
+  --source NAME       Controller identity (default: cli)
+  --acceptance TEXT   Acceptance criterion; may be repeated
+  --constraint TEXT   Execution constraint; may be repeated
+  --base-revision REV Opaque source revision recorded in the immutable WorkOrder command
+  --json              Print the complete WorkOrder, Job, and artifact evidence as JSON
 
 Run options:
   --prompt TEXT       Prompt instead of positional text
@@ -423,6 +453,212 @@ function printEvent(event: JobEvent, json: boolean, events: boolean): void {
   }
 }
 
+function workOrderRevision(record: WorkOrderRecord): number {
+  const revision = record.events.at(-1)?.sequence;
+  if (revision === undefined) throw new Error(`WorkOrder ${record.id} has no public revision`);
+  return revision;
+}
+
+function workOrderExecutorPrompt(command: WorkOrderCommand): string {
+  return [
+    'Execute the following AgentKnot WorkOrder command.',
+    '',
+    'Objective:',
+    command.objective,
+    '',
+    'Acceptance criteria:',
+    ...(command.acceptanceCriteria.length === 0
+      ? ['- none specified']
+      : command.acceptanceCriteria.map((criterion) => `- ${criterion}`)),
+    '',
+    'Constraints:',
+    ...(command.constraints.length === 0
+      ? ['- none specified']
+      : command.constraints.map((constraint) => `- ${constraint}`)),
+  ].join('\n');
+}
+
+function taskHumanText(value: string, maxBytes = 240): string {
+  const normalized = value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return normalized === '' ? 'not available' : limitText(normalized, maxBytes).value;
+}
+
+function taskExecutionStatus(job: JobRecord | undefined): string {
+  if (job === undefined) return 'No Executor Job is bound yet.';
+  switch (job.status) {
+    case 'succeeded':
+      return 'Execution completed successfully. This is technical completion, not acceptance.';
+    case 'failed': {
+      const detail = job.error?.message;
+      return detail === undefined
+        ? 'Execution failed.'
+        : `Execution failed: ${taskHumanText(detail)}`;
+    }
+    case 'cancelled':
+      return 'Execution was cancelled.';
+    case 'queued':
+      return 'Execution is queued.';
+    case 'running':
+      return 'Execution is running.';
+  }
+}
+
+function taskOutputSummary(job: JobRecord): string {
+  const output = job.result?.output.trim();
+  if (!output) return job.error?.message === undefined ? 'No result is available.' : taskHumanText(job.error.message);
+  return taskHumanText(output);
+}
+
+function taskChangedFiles(job: JobRecord): string[] | undefined {
+  const captured = job.completionSummary?.changedFiles;
+  if (captured?.status === 'captured') return captured.paths;
+  const paths = (job.artifacts ?? []).flatMap((artifact) => artifact.changedFiles ?? []);
+  return paths.length === 0 ? undefined : [...new Set(paths)].sort();
+}
+
+function taskWorkerCheckLines(job: JobRecord | undefined): string[] {
+  if (job === undefined) return ['  No execution evidence is available yet.'];
+  const workerReported = job.completionSummary?.workerReported;
+  if (workerReported?.status !== 'reported') return ['  Worker-reported checks: not available'];
+  const counts = { passed: 0, failed: 0, unknown: 0 };
+  for (const check of workerReported.report.checksRun) counts[check.outcome] += 1;
+  return [
+    `  Worker-reported checks: ${counts.passed} passed, ${counts.failed} failed, ${counts.unknown} unknown`,
+    ...workerReported.report.checksRun.map(
+      (check) => `    - ${taskHumanText(check.command)}: ${check.outcome}`
+    ),
+  ];
+}
+
+function taskArtifactValidation(
+  job: JobRecord | undefined,
+  verification: JobArtifactVerificationReport | undefined
+): string {
+  if (job === undefined) return 'not available';
+  if (job.status === 'queued' || job.status === 'running') return 'pending';
+  if ((job.artifacts ?? []).length === 0) return 'not applicable';
+  if (verification === undefined) return 'unavailable';
+  return verification.valid ? 'passed' : 'failed';
+}
+
+function taskNextAction(
+  job: JobRecord | undefined,
+  verification: JobArtifactVerificationReport | undefined
+): string {
+  if (job === undefined) return 'Bind an admitted Executor Job before checking this task again.';
+  if (job.status === 'queued' || job.status === 'running') {
+    return 'Wait for execution to finish, then check this task again.';
+  }
+  if (job.status === 'failed') {
+    return 'Inspect the failure and issue a new task if another attempt is appropriate.';
+  }
+  if (job.status === 'cancelled') {
+    return 'Issue a new task if the requested work is still needed.';
+  }
+  if (verification !== undefined && !verification.valid) {
+    return 'Inspect the artifact-integrity failure before reviewing any reported changes.';
+  }
+  return 'Review the result and decide whether to accept or apply it; AgentKnot has done neither.';
+}
+
+function formatTaskHuman(
+  workOrder: WorkOrderRecord,
+  job: JobRecord | undefined,
+  verification: JobArtifactVerificationReport | undefined
+): string {
+  const changedFiles = job === undefined ? undefined : taskChangedFiles(job);
+  const lines = [
+    'Task',
+    `  Objective: ${taskHumanText(workOrder.command.objective)}`,
+    '  Expected outcome:',
+    ...(workOrder.command.acceptanceCriteria.length === 0
+      ? ['    - not specified']
+      : workOrder.command.acceptanceCriteria.map(
+          (criterion) => `    - ${taskHumanText(criterion)}`
+        )),
+    '  Constraints:',
+    ...(workOrder.command.constraints.length === 0
+      ? ['    - none specified']
+      : workOrder.command.constraints.map(
+          (constraint) => `    - ${taskHumanText(constraint)}`
+        )),
+    '',
+    'Status',
+    `  ${taskExecutionStatus(job)}`,
+    '',
+    'Summary',
+    `  ${job === undefined ? 'No execution result is available yet.' : taskOutputSummary(job)}`,
+    '',
+    'Changes',
+    ...(changedFiles === undefined
+      ? ['  unavailable']
+      : changedFiles.length === 0
+        ? ['  none']
+        : changedFiles.map((file) => `  - ${taskHumanText(file)}`)),
+    '',
+    'Tests',
+    ...taskWorkerCheckLines(job),
+    `  Artifact integrity: ${taskArtifactValidation(job, verification)}`,
+    '',
+    'Next action',
+    `  ${taskNextAction(job, verification)}`,
+  ];
+  return lines.join('\n');
+}
+
+function formatTaskJson(
+  workOrder: WorkOrderRecord,
+  job: JobRecord | undefined,
+  verification: JobArtifactVerificationReport | undefined
+): string {
+  return JSON.stringify(
+    {
+      schemaVersion: 1,
+      workOrder,
+      ...(job === undefined ? {} : { job }),
+      ...(verification === undefined ? {} : { artifactVerification: verification }),
+    },
+    null,
+    2
+  );
+}
+
+function printTaskReport(
+  workOrder: WorkOrderRecord,
+  job: JobRecord | undefined,
+  verification: JobArtifactVerificationReport | undefined,
+  json: boolean
+): void {
+  process.stdout.write(
+    `${json ? formatTaskJson(workOrder, job, verification) : formatTaskHuman(workOrder, job, verification)}\n`
+  );
+}
+
+async function openTaskWorkOrders(configPath: string | undefined): Promise<{
+  store: SqliteWorkOrderStore;
+  service: WorkOrderService;
+}> {
+  const loaded = await loadConfig(
+    configPath ?? process.env.AGENTKNOT_CONFIG ?? 'agentknot.config.json'
+  );
+  const workOrderStorageDirectory = path.resolve(
+    loaded.baseDirectory,
+    path.join(path.dirname(loaded.config.storage.directory), 'work-orders')
+  );
+  if (
+    workOrderStorageDirectory === path.resolve(loaded.storageDirectory) ||
+    workOrderStorageDirectory ===
+      path.resolve(loaded.orchestrationStorageDirectory)
+  ) {
+    throw new Error('WorkOrder storage directory must be distinct from execution storage');
+  }
+  const store = await SqliteWorkOrderStore.open(workOrderStorageDirectory);
+  return { store, service: new WorkOrderService({ store }) };
+}
+
 function formatElapsed(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1_000));
   if (seconds < 60) return `${seconds}s`;
@@ -537,6 +773,8 @@ type ClientStatusReport =
 
 function isClientCapableCommand(command: string): boolean {
   return new Set([
+    'task',
+    'task-show',
     'run',
     'orchestrate',
     'routes',
@@ -731,6 +969,122 @@ async function main(argv: string[]): Promise<void> {
     ? await resolveClientTransport(configPath, explicitServerUrl, environmentServerUrl)
     : undefined;
   const remote = transport?.kind === 'remote' ? transport.client : undefined;
+
+  if (command === 'task') {
+    const route = takeOption(args, '--route');
+    const workspace = takeOption(args, '--workspace') ?? process.cwd();
+    const source = takeOption(args, '--source') ?? 'cli';
+    const promptOption = takeOption(args, '--prompt');
+    const baseRevision = takeOption(args, '--base-revision');
+    const acceptanceCriteria = takeOptions(args, '--acceptance');
+    const constraints = takeOptions(args, '--constraint');
+    const json = takeFlag(args, '--json');
+    if (args.some((value) => value.startsWith('--'))) {
+      throw new Error(`Unknown option: ${args.join(' ')}`);
+    }
+    const objective = promptOption ?? args.join(' ');
+    const commandInput: WorkOrderCommand = {
+      objective,
+      workspace,
+      acceptanceCriteria:
+        acceptanceCriteria.length === 0
+          ? [`Complete the requested objective: ${objective}`]
+          : acceptanceCriteria,
+      constraints,
+      ...(baseRevision === undefined ? {} : { baseRevision }),
+    };
+    const workOrders = await openTaskWorkOrders(configPath);
+    let runtime: AgentKnotRuntime | undefined;
+    try {
+      const issued = await workOrders.service.issue(commandInput);
+      const request: JobRequest = {
+        prompt: workOrderExecutorPrompt(issued.command),
+        workspace: issued.command.workspace,
+        source,
+        ...(route === undefined ? {} : { route }),
+      };
+      if (remote !== undefined) {
+        const initial = await remote.startJob(request);
+        const bound = await workOrders.service.bindExecutorJob(
+          issued.id,
+          workOrderRevision(issued),
+          initial.id
+        );
+        if (!json) process.stdout.write('Task started. Waiting for execution to finish...\n\n');
+        const stopCancellation = cancelOnTermination(() => remote.cancelJob(initial.id));
+        const job = await remote.waitForJob(initial).finally(stopCancellation);
+        const verification = await remote.verifyArtifacts(job.id);
+        printTaskReport(bound, job, verification, json);
+        if (job.status !== 'succeeded') process.exitCode = 1;
+        return;
+      }
+
+      runtime = await createRuntime({
+        ...(configPath === undefined ? {} : { configPath }),
+        reconcileOnStartup: true,
+      });
+      const started = await runtime.start(request);
+      const bound = await workOrders.service.bindExecutorJob(
+        issued.id,
+        workOrderRevision(issued),
+        started.job.id
+      );
+      if (!json) process.stdout.write('Task started. Waiting for execution to finish...\n\n');
+      const stopCancellation = cancelOnTermination(started.cancel);
+      const job = await started.completion.finally(stopCancellation);
+      const verification = await runtime.verifyArtifacts(job.id);
+      printTaskReport(bound, job, verification, json);
+      if (job.status !== 'succeeded') process.exitCode = 1;
+      return;
+    } finally {
+      await runtime?.close();
+      await workOrders.store.close();
+    }
+  }
+
+  if (command === 'task-show') {
+    const json = takeFlag(args, '--json');
+    const workOrderId = args.shift();
+    if (!workOrderId || args.length > 0) {
+      throw new Error('task-show requires exactly one WORK_ORDER_ID');
+    }
+    const workOrders = await openTaskWorkOrders(configPath);
+    let runtime: AgentKnotRuntime | undefined;
+    try {
+      const workOrder = await workOrders.service.get(workOrderId);
+      if (workOrder === undefined) {
+        process.stderr.write('Task not found.\n');
+        process.exitCode = 1;
+        return;
+      }
+      if (workOrder.executorJobId === undefined) {
+        printTaskReport(workOrder, undefined, undefined, json);
+        return;
+      }
+      const job =
+        remote !== undefined
+          ? await remote.getJob(workOrder.executorJobId)
+          : await (runtime = await createRuntime({
+              ...(configPath === undefined ? {} : { configPath }),
+              reconcileOnStartup: false,
+            })).get(workOrder.executorJobId);
+      if (job === undefined) {
+        process.stderr.write('Task execution record is unavailable.\n');
+        process.exitCode = 1;
+        return;
+      }
+      const verification =
+        remote !== undefined
+          ? await remote.verifyArtifacts(job.id)
+          : await runtime!.verifyArtifacts(job.id);
+      printTaskReport(workOrder, job, verification, json);
+      if (job.status === 'failed' || job.status === 'cancelled') process.exitCode = 1;
+      return;
+    } finally {
+      await runtime?.close();
+      await workOrders.store.close();
+    }
+  }
 
   if (command === 'run') {
     const route = takeOption(args, '--route');
