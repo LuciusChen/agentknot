@@ -20,4 +20,6 @@ export * from './runtime-ownership.js';
 export * from './store.js';
 export * from './types.js';
 export * from './usage-report.js';
+export * from './work-order.js';
+export * from './work-order-store.js';
 export * from './workspace-isolation.js';

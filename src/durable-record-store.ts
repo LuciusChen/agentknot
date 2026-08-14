@@ -9,7 +9,7 @@ const DATABASE_FILENAME = 'agentknot.sqlite';
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const REVISION = Symbol('agentknot.persisted-revision');
 
-type RecordKind = 'Job' | 'Orchestration';
+type RecordKind = 'Job' | 'Orchestration' | 'WorkOrder';
 
 interface StoredEvent {
   sequence: number;
@@ -584,6 +584,9 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
 
   async save(record: T, lease?: ExecutionLease, now = new Date()): Promise<void> {
     this.#assertOpen();
+    if (this.#kind === 'WorkOrder') {
+      throw new Error('WorkOrder records do not support general save after issue');
+    }
     const expectedRevision = revisionOf(record);
     if (expectedRevision === undefined) {
       throw new StaleRecordRevisionError(
