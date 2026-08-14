@@ -1,8 +1,13 @@
 import {
+  RecordBindingConflictError,
   SqliteDurableRecordStore,
   type OpenDurableStoreOptions,
 } from './durable-record-store.js';
-import type { WorkOrderRecord, WorkOrderStore } from './work-order.js';
+import {
+  WorkOrderBindingConflictError,
+  type WorkOrderRecord,
+  type WorkOrderStore,
+} from './work-order.js';
 
 /**
  * Transactional WorkOrder store. Composition intentionally exposes creation and reads only:
@@ -42,6 +47,27 @@ export class SqliteWorkOrderStore implements WorkOrderStore {
 
   eventsAfter(id: string, sequence: number): Promise<WorkOrderRecord['events']> {
     return this.#backend.eventsAfter(id, sequence) as Promise<WorkOrderRecord['events']>;
+  }
+
+  async bindExecutorJob(
+    workOrderId: string,
+    expectedWorkOrderRevision: number,
+    executorJobId: string,
+    at: string
+  ): Promise<WorkOrderRecord> {
+    try {
+      return await this.#backend.bindWorkOrderExecutorJob(
+        workOrderId,
+        expectedWorkOrderRevision,
+        executorJobId,
+        at
+      );
+    } catch (error) {
+      if (error instanceof RecordBindingConflictError) {
+        throw new WorkOrderBindingConflictError(error.message, { cause: error });
+      }
+      throw error;
+    }
   }
 
   close(): Promise<void> {

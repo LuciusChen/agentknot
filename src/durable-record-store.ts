@@ -102,6 +102,10 @@ export class StaleRecordRevisionError extends Error {
   readonly name = 'StaleRecordRevisionError';
 }
 
+export class RecordBindingConflictError extends Error {
+  readonly name = 'RecordBindingConflictError';
+}
+
 export class IdempotencyConflictError extends Error {
   readonly name = 'IdempotencyConflictError';
 }
@@ -646,6 +650,78 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
       }
     });
     attachRevision(record, expectedRevision + 1);
+  }
+
+  /** Purpose-specific WorkOrder transition; expected revision is its latest public event sequence. */
+  async bindWorkOrderExecutorJob(
+    workOrderId: string,
+    expectedWorkOrderRevision: number,
+    executorJobId: string,
+    at: string
+  ): Promise<T> {
+    this.#assertOpen();
+    if (this.#kind !== 'WorkOrder') {
+      throw new Error('Executor Job binding is available only for WorkOrders');
+    }
+    assertIdentifier('WorkOrder id', workOrderId);
+    assertIdentifier('Executor Job id', executorJobId);
+    if (!Number.isSafeInteger(expectedWorkOrderRevision) || expectedWorkOrderRevision < 1) {
+      throw new Error('Expected WorkOrder revision must be a positive safe integer');
+    }
+
+    return transaction(this.#database, () => {
+      const currentRow = this.#row(workOrderId);
+      if (currentRow === undefined) throw new Error(`WorkOrder ${workOrderId} does not exist`);
+      const current = this.#parse(
+        currentRow.record_json,
+        currentRow.revision,
+        currentRow.event_sequence
+      ) as T & { executorJobId?: unknown };
+      if (current.status !== 'issued') {
+        throw new Error(`WorkOrder ${workOrderId} must be issued before binding an executor Job`);
+      }
+      if (current.executorJobId !== undefined) {
+        if (current.executorJobId === executorJobId) return current;
+        throw new RecordBindingConflictError(
+          `WorkOrder ${workOrderId} is already bound to executor Job ${String(current.executorJobId)}`
+        );
+      }
+      if (currentRow.event_sequence !== expectedWorkOrderRevision) {
+        throw new StaleRecordRevisionError(
+          `WorkOrder ${workOrderId} revision ${expectedWorkOrderRevision} is stale; current revision is ${currentRow.event_sequence}`
+        );
+      }
+
+      const event: StoredEvent & {
+        workOrderId: string;
+        data: { executorJobId: string };
+      } = {
+        sequence: currentRow.event_sequence + 1,
+        workOrderId,
+        at,
+        type: 'work-order.executor-job.bound',
+        data: { executorJobId },
+      };
+      const updated = this.#materialize({
+        ...current,
+        executorJobId,
+        updatedAt: at,
+        events: [...current.events, event],
+      });
+      this.#assertAppendOnly(current.events, updated.events, workOrderId);
+      this.#insertEvent.run(workOrderId, event.sequence, event.at, event.type, JSON.stringify(event));
+      const result = this.#updateRecord.run(
+        updated.updatedAt,
+        updated.events.length,
+        serializeBoundedRecord(this.#kind, updated),
+        workOrderId,
+        currentRow.revision
+      );
+      if (changes(result) !== 1) {
+        throw new StaleRecordRevisionError(`WorkOrder ${workOrderId} changed while binding`);
+      }
+      return attachRevision(updated, currentRow.revision + 1);
+    });
   }
 
   async get(id: string): Promise<T | undefined> {

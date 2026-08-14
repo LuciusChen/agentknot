@@ -7,12 +7,16 @@ import test from 'node:test';
 import {
   SqliteDurableRecordStore,
   SqliteWorkOrderStore,
+  StaleRecordRevisionError,
+  WorkOrderBindingConflictError,
   WorkOrderService,
   type WorkOrderCommand,
   type WorkOrderRecord,
 } from '../src/index.js';
 
 const ISSUED_AT = new Date('2026-08-13T01:02:03.000Z');
+const BOUND_AT = new Date('2026-08-13T01:03:04.000Z');
+const REPLAYED_AT = new Date('2026-08-13T01:04:05.000Z');
 
 function command(workspace: string): WorkOrderCommand {
   return {
@@ -25,6 +29,10 @@ function command(workspace: string): WorkOrderCommand {
     constraints: ['Do not launch a Job.', 'Do not modify the canonical workspace.'],
     baseRevision: 'refs/heads/main@abc123',
   };
+}
+
+function revisionOf(record: WorkOrderRecord): number {
+  return record.events.at(-1)!.sequence;
 }
 
 async function withDirectory(run: (directory: string) => Promise<void>): Promise<void> {
@@ -93,6 +101,170 @@ test('round-trips WorkOrder command fields after closing and reopening SQLite', 
       assert.deepEqual(await second.get(issued.id), issued);
       assert.deepEqual(await second.list(), [issued]);
       assert.deepEqual(await second.eventsAfter(issued.id, 0), issued.events);
+    } finally {
+      await second.close();
+    }
+  });
+});
+
+test('binds one admitted Job identity to an issued WorkOrder', async () => {
+  await withDirectory(async (directory) => {
+    const store = await SqliteWorkOrderStore.open(directory);
+    let now = ISSUED_AT;
+    const service = new WorkOrderService({ store, now: () => now });
+    try {
+      const issued = await service.issue(command(directory));
+      now = BOUND_AT;
+      const bound = await service.bindExecutorJob(
+        issued.id,
+        revisionOf(issued),
+        'job_executor'
+      );
+
+      assert.equal(bound.executorJobId, 'job_executor');
+      assert.equal(bound.status, 'issued');
+      assert.deepEqual(bound.command, issued.command);
+      assert.equal(bound.updatedAt, BOUND_AT.toISOString());
+      assert.deepEqual(bound.events[1], {
+        sequence: 2,
+        workOrderId: issued.id,
+        at: BOUND_AT.toISOString(),
+        type: 'work-order.executor-job.bound',
+        data: { executorJobId: 'job_executor' },
+      });
+      assert.deepEqual(await service.get(issued.id), bound);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+test('replaying the same Job binding is idempotent even with the original revision', async () => {
+  await withDirectory(async (directory) => {
+    const store = await SqliteWorkOrderStore.open(directory);
+    let now = ISSUED_AT;
+    const service = new WorkOrderService({ store, now: () => now });
+    try {
+      const issued = await service.issue(command(directory));
+      now = BOUND_AT;
+      const first = await service.bindExecutorJob(
+        issued.id,
+        revisionOf(issued),
+        'job_executor'
+      );
+      now = REPLAYED_AT;
+      const replayed = await service.bindExecutorJob(
+        issued.id,
+        revisionOf(issued),
+        'job_executor'
+      );
+
+      assert.deepEqual(replayed, first);
+      assert.equal(replayed.events.length, 2);
+      assert.equal(replayed.updatedAt, BOUND_AT.toISOString());
+      assert.deepEqual(await service.eventsAfter(issued.id, 0), first.events);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+test('rejects rebinding an issued WorkOrder to a different Job', async () => {
+  await withDirectory(async (directory) => {
+    const store = await SqliteWorkOrderStore.open(directory);
+    const service = new WorkOrderService({ store, now: () => ISSUED_AT });
+    try {
+      const issued = await service.issue(command(directory));
+      const first = await service.bindExecutorJob(issued.id, revisionOf(issued), 'job_first');
+
+      await assert.rejects(
+        service.bindExecutorJob(issued.id, revisionOf(first), 'job_second'),
+        WorkOrderBindingConflictError
+      );
+      assert.deepEqual(await service.get(issued.id), first);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+test('concurrent callers binding different Jobs produce one success and one conflict', async () => {
+  await withDirectory(async (directory) => {
+    const firstStore = await SqliteWorkOrderStore.open(directory);
+    const secondStore = await SqliteWorkOrderStore.open(directory);
+    const first = new WorkOrderService({ store: firstStore, now: () => ISSUED_AT });
+    const second = new WorkOrderService({ store: secondStore, now: () => BOUND_AT });
+    try {
+      const issued = await first.issue(command(directory));
+      const results = await Promise.allSettled([
+        first.bindExecutorJob(issued.id, revisionOf(issued), 'job_first'),
+        second.bindExecutorJob(issued.id, revisionOf(issued), 'job_second'),
+      ]);
+
+      assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+      const rejected = results.find((result) => result.status === 'rejected');
+      assert.ok(rejected && rejected.status === 'rejected');
+      assert.ok(rejected.reason instanceof WorkOrderBindingConflictError);
+
+      const bound = await first.get(issued.id);
+      assert.ok(bound);
+      assert.ok(bound.executorJobId === 'job_first' || bound.executorJobId === 'job_second');
+      assert.equal(bound.events.length, 2);
+    } finally {
+      await Promise.all([firstStore.close(), secondStore.close()]);
+    }
+  });
+});
+
+test('rejects a stale WorkOrder revision before the first binding', async () => {
+  await withDirectory(async (directory) => {
+    const store = await SqliteWorkOrderStore.open(directory);
+    const service = new WorkOrderService({ store, now: () => ISSUED_AT });
+    try {
+      const issued = await service.issue(command(directory));
+
+      await assert.rejects(
+        service.bindExecutorJob(issued.id, revisionOf(issued) + 1, 'job_executor'),
+        StaleRecordRevisionError
+      );
+      assert.deepEqual(await service.get(issued.id), issued);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+test('rejects binding when the WorkOrder does not exist', async () => {
+  await withDirectory(async (directory) => {
+    const store = await SqliteWorkOrderStore.open(directory);
+    try {
+      const service = new WorkOrderService({ store, now: () => BOUND_AT });
+      await assert.rejects(
+        service.bindExecutorJob('work_order_missing', 1, 'job_executor'),
+        /WorkOrder work_order_missing does not exist/
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+test('retains the executor Job binding after closing and reopening SQLite', async () => {
+  await withDirectory(async (directory) => {
+    const first = await SqliteWorkOrderStore.open(directory);
+    const service = new WorkOrderService({ store: first, now: () => ISSUED_AT });
+    const issued = await service.issue(command(directory));
+    const bound = await service.bindExecutorJob(
+      issued.id,
+      revisionOf(issued),
+      'job_executor'
+    );
+    await first.close();
+
+    const second = await SqliteWorkOrderStore.open(directory);
+    try {
+      assert.deepEqual(await second.get(issued.id), bound);
+      assert.deepEqual(await second.eventsAfter(issued.id, 1), [bound.events[1]]);
     } finally {
       await second.close();
     }

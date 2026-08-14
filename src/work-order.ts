@@ -18,14 +18,24 @@ export interface WorkOrderCommand {
   baseRevision?: string;
 }
 
-export type WorkOrderEventType = 'work-order.issued';
-
-export interface WorkOrderEvent {
+interface WorkOrderEventBase {
   sequence: number;
   workOrderId: string;
   at: string;
-  type: WorkOrderEventType;
 }
+
+export interface WorkOrderIssuedEvent extends WorkOrderEventBase {
+  type: 'work-order.issued';
+}
+
+export interface WorkOrderExecutorJobBoundEvent extends WorkOrderEventBase {
+  type: 'work-order.executor-job.bound';
+  data: { executorJobId: string };
+}
+
+export type WorkOrderEvent = WorkOrderIssuedEvent | WorkOrderExecutorJobBoundEvent;
+
+export type WorkOrderEventType = WorkOrderEvent['type'];
 
 export interface WorkOrderRecord {
   id: string;
@@ -33,6 +43,8 @@ export interface WorkOrderRecord {
   status: WorkOrderStatus;
   /** Immutable after issue; persistence exposes no general WorkOrder update operation. */
   command: WorkOrderCommand;
+  /** The one already-admitted Job explicitly selected for execution of this command. */
+  executorJobId?: string;
   createdAt: string;
   updatedAt: string;
   events: WorkOrderEvent[];
@@ -43,11 +55,21 @@ export interface WorkOrderStore {
   get(id: string): Promise<WorkOrderRecord | undefined>;
   list(): Promise<WorkOrderRecord[]>;
   eventsAfter(id: string, sequence: number): Promise<WorkOrderEvent[]>;
+  bindExecutorJob(
+    workOrderId: string,
+    expectedWorkOrderRevision: number,
+    executorJobId: string,
+    at: string
+  ): Promise<WorkOrderRecord>;
 }
 
 export interface WorkOrderServiceOptions {
   store: WorkOrderStore;
   now?: () => Date;
+}
+
+export class WorkOrderBindingConflictError extends Error {
+  readonly name = 'WorkOrderBindingConflictError';
 }
 
 function assertNonEmptyText(label: string, value: unknown): asserts value is string {
@@ -132,5 +154,32 @@ export class WorkOrderService {
 
   eventsAfter(id: string, sequence: number): Promise<WorkOrderEvent[]> {
     return this.#store.eventsAfter(id, sequence);
+  }
+
+  /** Binds one already-persisted Job; it neither creates nor starts execution. */
+  async bindExecutorJob(
+    workOrderId: string,
+    expectedWorkOrderRevision: number,
+    executorJobId: string
+  ): Promise<WorkOrderRecord> {
+    const workOrder = await this.#store.get(workOrderId);
+    if (workOrder === undefined) throw new Error(`WorkOrder ${workOrderId} does not exist`);
+    if (workOrder.status !== 'issued') {
+      throw new Error(`WorkOrder ${workOrderId} must be issued before binding an executor Job`);
+    }
+    if (
+      workOrder.executorJobId !== undefined &&
+      workOrder.executorJobId !== executorJobId
+    ) {
+      throw new WorkOrderBindingConflictError(
+        `WorkOrder ${workOrderId} is already bound to executor Job ${workOrder.executorJobId}`
+      );
+    }
+    return this.#store.bindExecutorJob(
+      workOrderId,
+      expectedWorkOrderRevision,
+      executorJobId,
+      this.#now().toISOString()
+    );
   }
 }
