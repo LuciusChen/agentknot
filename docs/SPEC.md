@@ -2,7 +2,7 @@
 
 - Status: Living architecture contract
 - Version: 0.1
-- Last updated: 2026-08-12
+- Last updated: 2026-08-14
 - Applies to: AgentKnot 0.0.x unless a section is marked proposed
 
 ## Purpose
@@ -28,6 +28,10 @@ custom caller -+             v
                          worker process/protocol
                                    |
                             provider / model
+
+upstream controller -> WorkOrderService -> WorkOrderStore
+                              |
+                              +-- bind identity of an already admitted Job
 ```
 
 The controller, worker, provider, and model are separate concepts:
@@ -38,11 +42,13 @@ The controller, worker, provider, and model are separate concepts:
 - A **worker adapter** translates one worker runtime and protocol into AgentKnot contracts.
 - A **provider/model route** is configuration passed to the worker. It is not currently a standalone runtime abstraction.
 - The **workspace manager** prepares and cleans attempts and captures artifacts independently of the worker.
+- A **WorkOrder** is an immutable command root above execution. It may reference one already admitted executor Job identity but does not create or control that Job.
 
 ## Boundary ownership
 
 | Concern | Owner | Must not leak into |
 | --- | --- | --- |
+| Immutable user command, WorkOrder issue, and purpose-specific executor Job identity binding | `WorkOrderService` and `WorkOrderStore` | Job admission/lifecycle, Orchestration state, or acceptance inference |
 | Native command/Skill presentation, stateless `SessionStart` obligation, and controller-specific audit `source` | controller integration adapter | orchestration policy, routes, worker adapters, or artifact promotion |
 | Parent task, assessment, workspace, caller identity | upstream controller and `OrchestrationRequest` admission | controller-vendor branches, worker-specific request types, or middleware model planning |
 | Delegation mode, task-kind policy, child/depth/concurrency caps, and optional human-authored route-selection policy | orchestration service/configuration | controller-vendor branches or worker adapters |
@@ -83,7 +89,7 @@ The optional additive `idempotencyKey` is a bounded opaque controller/caller ide
 
 ### Durable state and events
 
-One transactional local store is authoritative for each migrated record kind. A successful transition atomically commits:
+One transactional local store is authoritative for each durable record kind. A successful transition atomically commits:
 
 - a bounded materialized record projection;
 - a monotonically increasing compare-and-swap revision;
@@ -91,7 +97,7 @@ One transactional local store is authoritative for each migrated record kind. A 
 
 Persisted events cannot be removed or rewritten. Readers resume after a sequence cursor and may reconstruct or validate a projection from the log. Live listeners, long-poll, SSE, callback, and controller wakeups may accelerate delivery only after commit; none is state authority. Two store instances attempting to save the same prior revision cannot silently overwrite each other.
 
-The implemented persistence foundation is `SqliteDurableRecordStore`: it uses one mode-0600 local SQLite database, WAL, `synchronous=FULL`, bounded record serialization, atomic projection/event transactions, compare-and-swap revisions, scoped idempotency records, durable cancellation intent, and execution leases. Production `createRuntime()` uses it for Job and Orchestration records and imports only legacy JSON snapshots whose filename identity matches the record, without rewriting or deleting them. Admission commits record, first event, optional idempotency mapping, and first lease atomically. Accepted cancellation fences a concurrent success transition. Leaf recovery replays integrity-checked admitted input after a higher fence is claimed. Dispatching parents persist their controller-authored plan and immutable input before execution; recovery reclaims that exact plan, adopts identity-matching existing children/reviewers, admits only missing deterministic children, and marks interrupted command validation unavailable instead of pretending to reattach. Historical planning/no-plan records fail explicitly.
+The implemented persistence foundation is `SqliteDurableRecordStore`: it uses one mode-0600 local SQLite database, WAL, `synchronous=FULL`, bounded record serialization, atomic projection/event transactions, and compare-and-swap revisions. WorkOrder persistence reuses that projection/event transaction without execution leases, cancellation, or idempotent admission. Production `createRuntime()` uses the same foundation with the additional scoped idempotency, cancellation, and execution-lease operations for Job and Orchestration records and imports only legacy JSON snapshots whose filename identity matches the record, without rewriting or deleting them. Job/Orchestration admission commits record, first event, optional idempotency mapping, and first lease atomically. Accepted cancellation fences a concurrent success transition. Leaf recovery replays integrity-checked admitted input after a higher fence is claimed. Dispatching parents persist their controller-authored plan and immutable input before execution; recovery reclaims that exact plan, adopts identity-matching existing children/reviewers, admits only missing deterministic children, and marks interrupted command validation unavailable instead of pretending to reattach. Historical planning/no-plan records fail explicitly.
 
 ### Execution leases and fencing
 
@@ -116,7 +122,17 @@ The durable store is the production record/event authority after deterministic d
 
 ## Current public contracts
 
-The canonical TypeScript definitions are in `src/types.ts` and `src/orchestration-types.ts`. Other transports and documentation must derive from or remain mechanically checked against those contracts; one runtime payload must not acquire multiple hand-maintained definitions.
+The canonical TypeScript definitions are in `src/work-order.ts`, `src/types.ts`, and `src/orchestration-types.ts`. Other transports and documentation must derive from or remain mechanically checked against those contracts; one runtime payload must not acquire multiple hand-maintained definitions.
+
+### `WorkOrderCommand` and executor Job binding
+
+`WorkOrderCommand` contains a non-empty objective, normalized workspace, acceptance criteria, constraints, and an optional opaque base revision. `WorkOrderService.issue` defensively normalizes and copies that command into a new schemaVersion 1 `WorkOrderRecord` with status `issued` and sequence-one `work-order.issued`. The WorkOrder API exposes issue, get, list, and event-cursor reads but no general update operation, so the issued command cannot be silently replaced.
+
+`bindExecutorJob(workOrderId, expectedWorkOrderRevision, executorJobId)` is the only implemented post-issue WorkOrder mutation. The caller/controller must already have admitted the named Job; WorkOrder binding does not depend on `JobStore`, validate or create the Job, start execution, or coordinate its lifecycle. Job admission and WorkOrder binding are separate operations and are not one cross-database transaction.
+
+For an unbound issued WorkOrder, the current public event sequence is the expected revision. A successful bind atomically updates only the WorkOrder projection and appends one `work-order.executor-job.bound` event carrying the executor Job identity. Replaying the same identity returns the existing bound record without another event even when the caller repeats the original revision. A different Job identity raises a binding conflict; a stale revision before the first bind raises a stale-revision conflict. The WorkOrder command and `issued` status remain unchanged, and the Job and Orchestration records are read-only with respect to this operation.
+
+Job terminal success is not WorkOrder acceptance. `Candidate`, domain `Review`, and `Disposition` are not current records or states. The planned sequence `WorkOrder -> Executor Job -> Candidate -> Review -> Disposition` is future architecture, not an interpretation of existing Job/Orchestration status or advisory-review evidence.
 
 ### Independent local broker discovery
 
@@ -380,6 +396,12 @@ An absolute `workspaceIsolation.directory` is the exact managed root. A relative
 
 Ignored dependencies and build output are not present in a detached worktree. Dirty submodule contents are rejected because the superproject snapshot cannot represent them. The worker must provision any required ignored state. Worktree mode protects Git repository state; it does not isolate host files, processes, credentials, or networks.
 
+### WorkOrder store
+
+`SqliteWorkOrderStore` is the current WorkOrder authority. It composes `SqliteDurableRecordStore` rather than exposing the mutable execution-store facade. Issue commits the bounded snapshot and `work-order.issued` event in one transaction. Binding uses a purpose-specific transaction and the public expected event sequence while retaining the storage-internal CAS revision; projection and `work-order.executor-job.bound` either commit together or not at all. Closing and reopening the store preserves both the command and binding.
+
+WorkOrder persistence is not part of `createRuntime()`, broker recovery, execution ownership, Job capacity, or cancellation. It opens a separate caller-selected SQLite directory. There is no atomic transaction spanning that database and Job admission storage, and no current WorkOrder-to-Job reconciliation process.
+
 ### Job store
 
 `MemoryJobStore` provides process-local snapshots.
@@ -425,6 +447,16 @@ All Orchestration store adapters enforce the same 16 MiB exact-projection ceilin
 Parent durable admission atomically creates status `queued`, sequence-one `orchestration.queued`, optional idempotency identity, and the first execution lease. Later event persistence appends in memory only for the duration of the save and rolls back the event and timestamp if the save fails, leaving the last successful store projection authoritative. A child `JobPersistenceError` remains a control-plane failure: the parent cancels other active children and propagates the rejection without fabricating a worker-style child outcome. A cancellation-evidence save failure is reported but cannot prevent abort propagation to active children or review/validation work. Accepted durable cancellation prevents a simultaneous parent success and is materialized as cancellation-request plus terminal-cancelled evidence.
 
 Production stores permit independent readers and enforce per-record CAS, idempotency, cancellation, fenced execution writes, leaf/parent reclaim, atomic route-pool selection, and FIFO Job capacity. They do not yet provide distributed consensus, multi-host scheduling, schema migration, or one transaction spanning the separate Job and Orchestration databases. `createRuntime()` therefore still takes the transitional scheduler-lifetime locks before execution/recovery; this is a multi-executor migration limit, not record or capacity authority.
+
+## WorkOrder lifecycle
+
+The only WorkOrder status is `issued`:
+
+```text
+issued -- bind existing executor Job identity --> issued
+```
+
+The arrow records an association and one append-only event; it is not a status transition and does not trigger execution. No `executing`, `candidate-ready`, `reviewing`, `accepted`, or `discarded` paper states are defined. Future Candidate, Review, and Disposition records must be introduced as separate domain concepts without changing `JobStatus` or treating Job/Orchestration completion as acceptance.
 
 ## Job lifecycle
 
@@ -672,6 +704,7 @@ Human-authored active route selection does not satisfy or claim a model-ranking 
 ## Compatibility and schema rules
 
 - Public runtime input must be validated at its transport boundary.
+- WorkOrder commands are immutable after issue. Executor Job binding is additive, purpose-specific, and CAS-protected; changing the command or replacing a bound Job requires a future explicit domain mechanism rather than a general save.
 - Existing job snapshots must retain their resolved route and event meaning.
 - New optional fields may be added compatibly; changing state or event semantics requires a versioned contract and migration decision. `JobArtifact.baseTree` and `changedFiles` are optional when reading persisted records, while newly captured git-worktree artifacts always emit both.
 - `delegation.dispatch.routeSelection` is optional configuration, and its shadow/active evidence is additive plan/metadata evidence; omission remains disabled and does not change persisted Job or Orchestration `schemaVersion: 1`.
@@ -691,6 +724,7 @@ Any change to a stable contract must include deterministic evidence at the ownin
 
 At minimum, the conformance suite must eventually prove:
 
+- WorkOrder issue/read/list/event persistence, restart round-trip, immutable command fields, first executor Job binding, same-Job idempotent replay, different-Job conflict, stale first-bind rejection, concurrent different-Job conflict, and binding restart persistence without Job/Orchestration mutation;
 - controller source neutrality and independent route resolution;
 - Codex/Claude manifest, MCP, Skill, and identical `SessionStart` hook parity for `startup`, `resume`, `clear`, and `compact`; bounded stateless event handling; no `UserPromptSubmit` hook or raw-prompt forwarding; common explicit stopped-broker activation from a strict launch profile; and unavailable launch without target-repository or model fallback;
 - atomic durable admission, canonical-request idempotency, append-only cursor resume, stale-CAS rejection, monotonic lease fences across expiry and release, cancellation/success races, late stale completion, and cross-process wait/cancel by record ID;

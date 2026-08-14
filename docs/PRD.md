@@ -2,13 +2,15 @@
 
 - Status: Living product contract
 - Version: 0.1
-- Last updated: 2026-08-13
+- Last updated: 2026-08-14
 
 ## Product thesis
 
 AgentKnot is a small, local-first, vendor-neutral execution control plane for validating and executing a controller-authored delegation handoff from interchangeable controllers through interchangeable agent workers and model routes.
 
 Its job is to admit work, apply a bounded delegation policy, persist the plan and lifecycle evidence, invoke workers, and hand back results and artifacts. It does not own the worker's intelligence, the provider's model runtime, or a collaboration network.
+
+Above that technical execution plane, AgentKnot now has one minimal durable command root. A WorkOrder records the user's immutable objective, workspace, acceptance criteria, constraints, and optional base revision, then may explicitly bind the identity of one executor Job that the caller/controller already admitted. The bind is a durable association, not a launch or lifecycle operation.
 
 ```text
 controller -> plan/assessment -> Orchestration API -> deterministic policy
@@ -17,6 +19,8 @@ controller -> plan/assessment -> Orchestration API -> deterministic policy
 controller ---------------------------> Job API -> worker -> provider/model
                                                     |
                                                     +-> evidence/artifacts
+
+WorkOrder -- bind existing executor Job identity --> Job
 ```
 
 ## Problem
@@ -65,6 +69,12 @@ Multi-tenant platform operators and large remote agent fleets are not initial us
 
 `source` records who submitted a job. It must not select a code path. Codex, Claude, CI, and custom callers use the same Job API.
 
+### WorkOrder command boundary
+
+A WorkOrder is independent of Job and Orchestration lifecycle state. Its command is immutable after issue, and its current status remains only `issued`. A controller may first admit a Job through the existing execution API and then call `bindExecutorJob(workOrderId, expectedWorkOrderRevision, executorJobId)` to persist that exact identity. AgentKnot does not currently make Job admission and WorkOrder binding one cross-store transaction; the caller owns their ordering and the already-admitted-Job precondition.
+
+An unbound issued WorkOrder may bind once. Replaying the same executor Job identity is idempotent, binding a different identity conflicts, and a stale revision conflicts before a first binding. Binding appends purpose-specific evidence without changing the command, WorkOrder status, Job record, Job status, Orchestration record, or Orchestration status. Job success remains technical execution evidence and never implies WorkOrder acceptance.
+
 ### Explicit routing
 
 A route resolves worker, provider, model, thinking level, timeout, and retry settings before execution. Existing jobs retain that resolved snapshot even if configuration changes later. The optional human-authored `delegation.dispatch.routeSelection` policy supports `shadow` evidence and `active` execution. Shadow keeps `dispatch.defaultRoute`; active writes the first matching configured route into the planned child and ordinary Job request. The controller assesses complexity, but its strict assessment cannot name a route.
@@ -111,6 +121,7 @@ Automatic delegation must be explicit at the API boundary, carry a strict contro
 
 Version 0.0.1 currently implements:
 
+- a TypeScript-only durable WorkOrder domain root with immutable issued commands, transactional snapshot/event persistence, restart-safe reads, and explicit CAS binding to one already admitted executor Job identity without launching or controlling that Job;
 - controller-neutral CLI, HTTP, and TypeScript entry points;
 - a compact CLI orchestration handoff projection for controller consumption that omits duplicated prompts, policy snapshots, and event history without changing the persisted full record or artifact-review authority;
 - experimental thin Codex and Claude client packages with controller-native handoff Skills, one identical stateless `SessionStart` hook for `startup`, `resume`, `clear`, and `compact`, no `UserPromptSubmit` hook, and the same `agentknot mcp` stdio broker client. The hook reads only bounded event JSON and injects one concise controller obligation; it performs no filesystem, Git, network, broker, policy, runtime, prompt, transcript, or session-state work. The upstream controller owns semantic classification, planning, decomposition, workspace selection, and acceptance criteria, then submits the parent task plus strict assessment through common MCP tools or the transport-equivalent CLI. Codex implicit-invocation metadata is only a selection hint, not proof of automatic Skill invocation; a fresh-session miss is recorded in [decision 0074](../postmortems/0074-session-start-controller-entry.md). MCP never creates a runtime in its own process; its explicit lifecycle tool may spawn the independent broker from a previously validated product-owned launch profile. The Skill neither infers target-repository configuration nor chooses routes/models ([decisions 0053](../postmortems/0053-controller-owned-planning-handoff.md), [0057](../postmortems/0057-independent-broker-and-thin-controller-clients.md), [0058](../postmortems/0058-controller-neutral-broker-activation.md), [0063](../postmortems/0063-remove-per-prompt-controller-obligations.md), and [0074](../postmortems/0074-session-start-controller-entry.md));
@@ -164,6 +175,16 @@ Provider and model independence are currently routing properties implemented by 
 Pi is the sole built-in real worker adapter. OpenCode Go remains a configured downstream provider/model route for Pi, while other worker runtimes remain custom adapter or future integration choices; AgentKnot does not directly invoke the OpenCode CLI ([decision 0059](../postmortems/0059-retire-native-opencode-worker.md)).
 
 Pi extensions are optional worker-profile inputs, not portable core dependencies. A community package can enter the repository dogfood route only after source/supply-chain review and repeated same-task comparison against the minimal Pi route show no regression in terminal completion, artifact validity, or tests and a measurable improvement in upstream intervention, token use, or elapsed work. Trials must use an exact version or immutable external path without global or repository-local installation, and must preserve the selected provider, model, and thinking level. AgentKnot never silently selects an extension or model fallback.
+
+## Planned command-driven domain lifecycle
+
+The intended later sequence is:
+
+```text
+WorkOrder -> Executor Job -> Candidate -> Review -> Disposition
+```
+
+Only WorkOrder issue/persistence and explicit binding to an already admitted executor Job identity are implemented in this domain sequence. Candidate, domain Review, and Disposition do not yet exist. No current transition treats Job success, an artifact, an orchestration advisory verdict, or validation evidence as WorkOrder acceptance. Later slices must introduce those records and transitions explicitly rather than adding acceptance states to `JobStatus` or silently reinterpreting Orchestration.
 
 ## Non-goals
 

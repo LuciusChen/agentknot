@@ -1,7 +1,7 @@
 # AgentKnot roadmap
 
 - Status: Living execution plan
-- Last updated: 2026-08-13
+- Last updated: 2026-08-14
 - Planning model: evidence-gated stages, not date promises
 - Current default focus: Stage 2 contract completion; Stage 3 foundation is delivered but its next slices are queued
 
@@ -26,6 +26,22 @@ The source of product truth is [PRD.md](./PRD.md). Stable technical behavior is 
 | 2 | Prove controller and worker portability through contracts | Current default focus |
 | 3 | Make the local middleware kernel durable and recoverable | Foundation delivered; next slices queued |
 | 4 | Evaluate remote/team operation only from demonstrated demand | Conditional |
+
+## Current command-driven domain evolution
+
+This sequence is a narrow domain evolution layered above the historical execution stages below; it does not rewrite or delete their delivered evidence, roadmap gates, postmortems, or Job/Orchestration semantics.
+
+```text
+WorkOrder -> Executor Job -> Candidate -> Review -> Disposition
+```
+
+- [x] Add durable schemaVersion 1 WorkOrder issue/read/list/event persistence with one immutable command and only the `issued` status.
+- [x] Add explicit CAS binding from an issued WorkOrder to one executor Job identity that the caller/controller already admitted. Same-Job replay is idempotent; a different Job or stale first-bind revision conflicts. Binding neither launches nor controls the Job, and Job success is not WorkOrder acceptance.
+- [ ] Add an immutable Candidate artifact record linked to WorkOrder and Job without changing WorkOrder or Job status.
+- [ ] Add domain Review linked to a Candidate without reinterpreting existing orchestration advisory-review evidence.
+- [ ] Add explicit Disposition after review. Acceptance and discard must remain distinct from Job technical success.
+
+Candidate, domain Review, and Disposition are not implemented. Each unchecked item requires its own bounded design, persistence semantics, tests, and independent promotion decision; none authorizes automatic apply, commit, merge, push, or promotion.
 
 ## Stage 0: Vendor-neutral execution slice
 
@@ -350,6 +366,7 @@ Make the controller-neutral execution handoff durable across controller sessions
 
 ### Foundation delivered
 
+- [x] Reuse the durable SQLite projection/event transaction for immutable WorkOrder issue and purpose-specific executor Job identity binding, while keeping WorkOrder outside Job/Orchestration execution, recovery, cancellation, and lifecycle ownership.
 - [x] Record the controller/kernel/adapter boundary and keep semantic planning upstream in the existing strict controller-authored handoff ([decision 0055](../postmortems/0055-durable-middleware-kernel.md)).
 - [x] Make production Job and Orchestration persistence transactional: bounded projections, append-only sequenced events, CAS revisions, scoped canonical-request idempotency, atomically admitted first leases, renewable fenced execution leases, and durable cancellation intent.
 - [x] Make same-ID wait, status, and cancellation derive authority from durable stores. HTTP no longer owns separate active-execution maps, and independent store/runtime instances prove duplicate identity, stale-write/fence rejection, event-cursor resume, and cross-session cancellation.

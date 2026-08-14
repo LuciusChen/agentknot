@@ -40,6 +40,22 @@ controller plan/assessment → AgentKnot policy → persisted plan → bounded c
                          └──────→ Job API → worker adapter → provider/model
 ```
 
+A `WorkOrder` is the separate durable command root above technical execution. The current TypeScript domain API can issue an immutable command and explicitly bind it to the identity of one Job that the caller/controller has already admitted:
+
+```text
+WorkOrder -- bind existing executor Job identity --> Job
+```
+
+Binding does not create or launch the Job, does not make WorkOrder responsible for Job retries, cancellation, recovery, or terminal state, and does not combine Job admission with WorkOrder persistence in one transaction. The WorkOrder command and `issued` status remain unchanged. Job success proves only technical execution success; it does not mean the WorkOrder result was accepted.
+
+The intended later domain sequence is deliberately separate from current behavior:
+
+```text
+Future: WorkOrder -> Executor Job -> Candidate -> Review -> Disposition
+```
+
+`Candidate`, domain `Review`, and `Disposition` are not implemented. Existing orchestration advisory review is execution evidence and is not that future domain lifecycle.
+
 An optional orchestration route-selection policy can either record vendor-neutral shadow suggestions or apply explicit human-authored rules. The upstream controller assesses task complexity but cannot name a route in the assessment; configured policy remains the execution authority.
 
 The reference and sole built-in real worker adapter uses [Pi RPC](https://pi.dev/docs/latest/rpc), a strict JSONL protocol. Provider, model, and effort remain route data, and custom TypeScript adapters can be supplied without changing Job semantics.
@@ -52,6 +68,7 @@ The labels below are availability claims, not maturity ratings. **Current** mean
 
 | Status | Capability | Evidence or gate |
 | --- | --- | --- |
+| **Current** | Durable immutable WorkOrders with explicit binding to one already admitted executor Job identity through the TypeScript API. | Issue persists the command and `work-order.issued` atomically. Binding uses the WorkOrder event sequence as expected revision, appends one `work-order.executor-job.bound` event, treats the same Job as an idempotent replay, and rejects stale first binds or a different Job. It neither admits nor controls the Job. |
 | **Current** | Controller-neutral leaf jobs and bounded depth-one orchestration through CLI, HTTP, and TypeScript, with `off`, `suggest`, and `auto` delegation modes. | Implemented and covered by deterministic API, policy, lifecycle, and persistence tests; callers must invoke the Job or orchestration API rather than relying on native-chat interception. |
 | **Current** | Transactional local Job/Orchestration persistence with append-only event cursors, CAS revisions, idempotent admission, fenced execution leases, durable cancellation intent, shared Job capacity, and isolated leaf/parent restart recovery. | Production `createRuntime()` imports identity-matching legacy JSON evidence without rewriting it and writes one SQLite authority per configured record directory. Record, optional idempotency identity, first lease, and FIFO capacity admission are durable; direct, child, and reviewer Jobs share the configured `maxConcurrency`. After lease expiry, git-worktree Jobs replay only from integrity-checked admitted workspace snapshots; recoverable parents reuse the admitted controller plan and deterministic child/reviewer identities without replanning or route replacement. A transitional lifetime lock still limits production to one execution-owning broker until a separate multi-executor protocol exists ([decision 0055](postmortems/0055-durable-middleware-kernel.md)). |
 | **Experimental** | Thin installable Codex and Claude controller clients with explicit or implicit controller-authored handoff. | Each package exposes a controller-native Skill, launches the common `agentknot mcp` stdio client, and registers the same stateless `SessionStart` obligation for `startup`, `resume`, `clear`, and `compact`. The hook reads only bounded event JSON and emits one concise controller obligation; it performs no filesystem, Git, network, broker, policy, runtime, prompt, transcript, or session-state work, and there is no `UserPromptSubmit` hook. This deterministic session context does not guarantee Skill invocation: the controller still owns semantic eligibility, planning, and strict-assessment authoring. The common Skill and lifecycle obligation are compact fixed inputs with deterministic Codex/Claude parity; one controlled fresh Codex Skill-load pair reported 164 fewer input tokens. The attempted delegated pair is invalid because one arm used a task-specific tool-count limit, so it establishes no end-to-end savings. One real fresh Codex task selected the Skill and completed through the existing broker, while real Claude parity remains a promotion gate ([decisions 0053](postmortems/0053-controller-owned-planning-handoff.md), [0057](postmortems/0057-independent-broker-and-thin-controller-clients.md), [0063](postmortems/0063-remove-per-prompt-controller-obligations.md), [0074](postmortems/0074-session-start-controller-entry.md), [0082](postmortems/0082-real-repository-selective-context-gate.md), and [0083](postmortems/0083-remove-tool-count-task-boundaries.md)). |
@@ -487,6 +504,8 @@ Use `--config PATH` or `AGENTKNOT_CONFIG` for another configuration file. Route 
 When `workspaceIsolation.mode` is `git-worktree`, AgentKnot requires a valid `HEAD` and snapshots supported top-level staged, unstaged, and non-ignored untracked content, capped by the existing 16 MiB binary-patch budget. Before durable leaf Job admission, and before admission of a parent that will dispatch, a non-empty input patch is atomically retained under that exact execution identity with mode 0600; the record keeps its SHA-256, size, commit, tree, repository, workspace, and subdirectory. Parent children and reviewers derive their Job snapshots from that one admitted parent input, while restart recovery can verify and replay each retained boundary instead of mutable source state. Each attempt is a detached worktree at that base with the snapshot replayed only inside it; relative worktree configuration is materialized outside the host project tree so external repositories cannot inherit its ancestor-discovered instructions or package configuration. The worker receives the matching repository subdirectory. After every attempt, a binary worker-delta patch up to 16 MiB is written under storage, including tracked-file deletions, worker untracked files, and commits, and metadata records `baseTree` plus Git-derived repository-relative `changedFiles`, including `[]` for an empty delta. The exact managed worktree is then removed. A larger snapshot fails before admission; a larger worker patch fails without retry or partial artifact. These paths are controller-captured evidence, not a worker claim, completion proof, or semantic verification; the terminal summary keeps worker claims separate and includes the same optional `baseTree` identity. Patches are artifacts only and are never applied automatically. Legacy artifacts and summaries may omit `baseTree` or `changedFiles`. Ignored dependencies/build outputs remain absent and dirty submodule contents are rejected. Compatibility mode `none` passes the caller's directory directly and provides no isolation.
 
 ## API surface
+
+The current WorkOrder surface is TypeScript-only: `WorkOrderService` issues and reads immutable commands, while `bindExecutorJob(workOrderId, expectedWorkOrderRevision, executorJobId)` records one explicit association to a caller-admitted Job. WorkOrders are not admitted through the Job/Orchestration broker transports and do not start or control execution.
 
 ```text
 POST /v1/jobs
