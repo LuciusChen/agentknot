@@ -258,7 +258,7 @@ Task options:
   --acceptance TEXT   Acceptance criterion; may be repeated
   --constraint TEXT   Execution constraint; may be repeated
   --base-revision REV Opaque source revision recorded in the immutable WorkOrder command
-  --json              Print complete WorkOrder, Job, Candidate, and artifact evidence as JSON
+  --json              Print the complete evidence available to the selected task command as JSON
 
 Task Candidate:
   task-candidate explicitly records or reloads immutable Candidate evidence for the successful
