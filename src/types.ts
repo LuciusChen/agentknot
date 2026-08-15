@@ -464,6 +464,26 @@ export class WorkerSettledError extends Error {
   }
 }
 
+/**
+ * The worker transport failed before the adapter observed its first settled session boundary.
+ * A later whole-Job attempt may therefore retry the exact admitted route without replaying a
+ * session that the worker already settled. An adapter may supply a structured retry delay hint;
+ * core bounds that hint before waiting and never derives it from provider error text.
+ */
+export class WorkerTransientError extends Error {
+  readonly name = 'WorkerTransientError';
+
+  constructor(message: string, readonly retryAfterMs?: number) {
+    super(message);
+    if (
+      retryAfterMs !== undefined &&
+      (!Number.isSafeInteger(retryAfterMs) || retryAfterMs < 0)
+    ) {
+      throw new Error('WorkerTransientError retryAfterMs must be a non-negative safe integer');
+    }
+  }
+}
+
 export interface WorkerProbeInput {
   route: ResolvedRoute;
   signal: AbortSignal;

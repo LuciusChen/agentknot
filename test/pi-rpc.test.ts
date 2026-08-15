@@ -16,7 +16,7 @@ import {
 } from '../src/worker-completion-report.js';
 import { MemoryJobStore } from '../src/store.js';
 import { AttemptWorkerControlChannel } from '../src/worker-control.js';
-import type { JobEventType, ResolvedRoute } from '../src/types.js';
+import { WorkerTransientError, type JobEventType, type ResolvedRoute } from '../src/types.js';
 import { registerWorkerAdapterConformanceTests } from './worker-adapter-conformance.js';
 
 const route: ResolvedRoute = {
@@ -1334,7 +1334,11 @@ test('PiRpcWorkerAdapter reports process exit before agent_settled', async () =>
 
   await assert.rejects(
     adapter.run(conformanceInput(new AbortController().signal), () => undefined),
-    /exited before agent_settled.*code=17.*premature fixture exit/
+    (error: unknown) => {
+      assert.ok(error instanceof WorkerTransientError);
+      assert.match(error.message, /exited before agent_settled.*code=17.*premature fixture exit/);
+      return true;
+    }
   );
 });
 
@@ -1373,7 +1377,13 @@ test('Orchestrator retries one exited Pi child and leaves both exact PIDs gone',
         },
       },
     ]);
+    const retry = job.events.find((event) => event.type === 'job.retrying');
     assert.equal(job.events.filter((event) => event.type === 'job.retrying').length, 1);
+    assert.equal(retry?.data?.name, 'WorkerTransientError');
+    assert.equal(retry?.data?.reason, 'pre-settlement-worker-failure');
+    assert.equal(typeof retry?.data?.delayMs, 'number');
+    assert.ok(Number(retry?.data?.delayMs) >= 800);
+    assert.ok(Number(retry?.data?.delayMs) <= 1_200);
     assert.equal(pids.length, 2);
     assert.equal(new Set(pids).size, 2);
     for (const pid of pids) assertProcessGone(pid);

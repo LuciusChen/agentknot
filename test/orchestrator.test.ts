@@ -11,7 +11,13 @@ import type { AgentKnotConfig } from '../src/config.js';
 import { JobControlPersistenceError, JobPersistenceError, Orchestrator } from '../src/orchestrator.js';
 import { FileJobStore, MemoryJobStore, SqliteJobStore } from '../src/store.js';
 import { WorkspaceIsolationManager } from '../src/workspace-isolation.js';
-import type { JobArtifactReadGrant, JobStore, WorkerAdapter, WorkerEventSink } from '../src/types.js';
+import {
+  WorkerTransientError,
+  type JobArtifactReadGrant,
+  type JobStore,
+  type WorkerAdapter,
+  type WorkerEventSink,
+} from '../src/types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -899,6 +905,97 @@ test('worker event sinks stop accepting events after their attempt settles', asy
   );
   assert.deepEqual((await store.get(job.id))?.events, terminalEvents);
   assert.equal(job.events.at(-1)?.type, 'job.succeeded');
+});
+
+test('structured pre-settlement failure honors retry delay evidence before the next attempt', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-worker-retry-delay-'));
+  const calls: number[] = [];
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'transient adapter ready' };
+    },
+    async run(input) {
+      calls.push(Date.now());
+      if (input.attempt === 1) {
+        throw new WorkerTransientError('temporary worker transport failure', 1_500);
+      }
+      return { output: 'completed after bounded retry delay' };
+    },
+  };
+  const retryConfig = structuredClone(config);
+  retryConfig.routes.mock!.maxAttempts = 2;
+  const orchestrator = new Orchestrator({
+    config: retryConfig,
+    store: new MemoryJobStore(),
+    adapters: new Map([['mock', adapter]]),
+  });
+
+  try {
+    const job = await orchestrator.run({ prompt: 'retry transient worker failure', workspace });
+    const retry = job.events.find((event) => event.type === 'job.retrying');
+
+    assert.equal(job.status, 'succeeded');
+    assert.equal(job.attempt, 2);
+    assert.equal(calls.length, 2);
+    assert.ok((calls[1] ?? 0) - (calls[0] ?? 0) >= 1_450);
+    assert.deepEqual(retry?.data, {
+      name: 'WorkerTransientError',
+      message: 'temporary worker transport failure',
+      attempt: 1,
+      nextAttempt: 2,
+      reason: 'pre-settlement-worker-failure',
+      delayMs: 1_500,
+      retryAfterMs: 1_500,
+    });
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('cancellation interrupts bounded worker retry backoff without starting another attempt', async () => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), 'agentknot-worker-retry-cancel-'));
+  const store = new MemoryJobStore();
+  let runs = 0;
+  const adapter: WorkerAdapter = {
+    name: 'mock',
+    async doctor() {
+      return { ok: true, message: 'transient adapter ready' };
+    },
+    async run() {
+      runs += 1;
+      throw new WorkerTransientError('temporary worker transport failure', 120_000);
+    },
+  };
+  const retryConfig = structuredClone(config);
+  retryConfig.routes.mock!.maxAttempts = 2;
+  const orchestrator = new Orchestrator({
+    config: retryConfig,
+    store,
+    adapters: new Map([['mock', adapter]]),
+  });
+
+  try {
+    const started = await orchestrator.start({ prompt: 'cancel retry wait', workspace });
+    let retryDelayMs: unknown;
+    for (let poll = 0; poll < 200; poll += 1) {
+      retryDelayMs = (await store.get(started.job.id))?.events.find(
+        (event) => event.type === 'job.retrying'
+      )?.data?.delayMs;
+      if (retryDelayMs !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(retryDelayMs, 60_000);
+
+    await started.cancel();
+    const job = await started.completion;
+    assert.equal(job.status, 'cancelled');
+    assert.equal(runs, 1);
+    assert.equal(job.events.filter((event) => event.type === 'job.retrying').length, 1);
+    assert.equal(job.events.at(-1)?.type, 'job.cancelled');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test('independent durable runtime observes cancellation and terminal state by Job identity', async () => {

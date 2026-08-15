@@ -6,7 +6,7 @@ import { StringDecoder } from 'node:string_decoder';
 
 import type { PiRpcWorkerConfig } from '../config.js';
 import { MAX_WORKER_STDERR_BYTES, limitTextSuffix } from '../record-limits.js';
-import { WorkerSettledError } from '../types.js';
+import { WorkerSettledError, WorkerTransientError } from '../types.js';
 import type {
   ResolvedRoute,
   WorkerAdapter,
@@ -442,7 +442,7 @@ function childExitError(
   const state = agentEnded
     ? 'received agent_end without agent_settled before exit'
     : 'exited before agent_settled';
-  return new Error(
+  return new WorkerTransientError(
     `${label} ${state} (code=${String(code)}, signal=${String(signal)})${
       stderr.trim() === '' ? '' : `: ${stderr.trim()}`
     }`

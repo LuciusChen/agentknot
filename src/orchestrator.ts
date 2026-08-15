@@ -22,7 +22,7 @@ import {
   normalizeWorkerControlKinds,
   validateWorkerControlRequest,
 } from './worker-control.js';
-import { WorkerSettledError } from './types.js';
+import { WorkerSettledError, WorkerTransientError } from './types.js';
 import { normalizeWorkerUsageEvidence } from './worker-usage.js';
 import {
   capturedChangedFilesSummary,
@@ -123,6 +123,10 @@ class WorkerArtifactReadUnusedError extends Error {
 export const ROUTE_DIAGNOSTIC_TIMEOUT_MS = 30_000;
 const MAX_ACTIVITY_ID_BYTES = 256;
 const MAX_ACTIVITY_NAME_BYTES = 128;
+const WORKER_RETRY_BASE_DELAY_MS = 1_000;
+const WORKER_RETRY_EXPONENTIAL_MAX_MS = 30_000;
+const WORKER_RETRY_DELAY_MAX_MS = 60_000;
+const WORKER_RETRY_JITTER_RANGE = 0.2;
 
 function limitedJobEventData(
   type: JobEventType,
@@ -191,10 +195,36 @@ function delayWithSignal(milliseconds: number, signal?: AbortSignal): Promise<vo
     }, milliseconds);
     const onAbort = () => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       reject(abortError(signal as AbortSignal));
     };
     signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
+}
+
+function workerTransientRetryDelayMs(
+  jobId: string,
+  failedAttempt: number,
+  retryAfterMs: number | undefined
+): number {
+  const exponential = Math.min(
+    WORKER_RETRY_EXPONENTIAL_MAX_MS,
+    WORKER_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, failedAttempt - 1)
+  );
+  const seed = Number.parseInt(
+    canonicalJsonSha256({ jobId, failedAttempt }).slice(0, 8),
+    16
+  );
+  const unit = seed / 0xffffffff;
+  const jittered = Math.max(
+    1,
+    Math.round(exponential * (1 - WORKER_RETRY_JITTER_RANGE + unit * WORKER_RETRY_JITTER_RANGE * 2))
+  );
+  return Math.min(
+    WORKER_RETRY_DELAY_MAX_MS,
+    Math.max(jittered, retryAfterMs ?? 0)
+  );
 }
 
 export interface OrchestratorOptions {
@@ -1876,13 +1906,31 @@ export class Orchestrator {
         return;
       }
       const nextAttempt = attempt + 1;
+      const retryDelayMs =
+        failure instanceof WorkerTransientError
+          ? workerTransientRetryDelayMs(job.id, attempt, failure.retryAfterMs)
+          : 0;
       job.attempt = nextAttempt;
       try {
-        await this.#emit(job, 'job.retrying', { ...details, attempt, nextAttempt });
+        await this.#emit(job, 'job.retrying', {
+          ...details,
+          attempt,
+          nextAttempt,
+          ...(retryDelayMs === 0
+            ? {}
+            : {
+                reason: 'pre-settlement-worker-failure',
+                delayMs: retryDelayMs,
+                ...(failure instanceof WorkerTransientError && failure.retryAfterMs !== undefined
+                  ? { retryAfterMs: failure.retryAfterMs }
+                  : {}),
+              }),
+        });
       } catch (error) {
         job.attempt = attempt;
         throw error;
       }
+      if (retryDelayMs > 0) await delayWithSignal(retryDelayMs, jobSignal);
     }
   }
 
