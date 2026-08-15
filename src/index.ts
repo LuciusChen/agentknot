@@ -4,6 +4,8 @@ export * from './candidate.js';
 export * from './candidate-store.js';
 export * from './config.js';
 export * from './delegation-policy.js';
+export * from './disposition.js';
+export * from './disposition-store.js';
 export * from './durable-record-store.js';
 export * from './durable-subscription.js';
 export * from './http-server.js';

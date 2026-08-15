@@ -15,6 +15,7 @@ export const MAX_ORCHESTRATION_RECORD_BYTES = 16 * 1024 * 1024;
 export const MAX_WORK_ORDER_RECORD_BYTES = 16 * 1024 * 1024;
 export const MAX_CANDIDATE_RECORD_BYTES = 16 * 1024 * 1024;
 export const MAX_REVIEW_RECORD_BYTES = 16 * 1024 * 1024;
+export const MAX_DISPOSITION_RECORD_BYTES = 16 * 1024 * 1024;
 export const MAX_CALLBACK_BODY_BYTES = 8 * 1024 * 1024;
 
 export interface TextTruncation {
@@ -26,7 +27,13 @@ export class RecordSizeLimitError extends Error {
   readonly name = 'RecordSizeLimitError';
 
   constructor(
-    readonly recordKind: 'Job' | 'Orchestration' | 'WorkOrder' | 'Candidate' | 'Review',
+    readonly recordKind:
+      | 'Job'
+      | 'Orchestration'
+      | 'WorkOrder'
+      | 'Candidate'
+      | 'Review'
+      | 'Disposition',
     readonly actualBytes: number,
     readonly maxBytes: number
   ) {
@@ -134,7 +141,13 @@ export function limitObjectData(
 }
 
 export function serializeBoundedRecord(
-  kind: 'Job' | 'Orchestration' | 'WorkOrder' | 'Candidate' | 'Review',
+  kind:
+    | 'Job'
+    | 'Orchestration'
+    | 'WorkOrder'
+    | 'Candidate'
+    | 'Review'
+    | 'Disposition',
   value: unknown
 ): string {
   const serialized = `${JSON.stringify(value, null, 2)}\n`;
@@ -148,7 +161,9 @@ export function serializeBoundedRecord(
           ? MAX_WORK_ORDER_RECORD_BYTES
           : kind === 'Candidate'
             ? MAX_CANDIDATE_RECORD_BYTES
-            : MAX_REVIEW_RECORD_BYTES;
+            : kind === 'Review'
+              ? MAX_REVIEW_RECORD_BYTES
+              : MAX_DISPOSITION_RECORD_BYTES;
   if (actualBytes > maxBytes) throw new RecordSizeLimitError(kind, actualBytes, maxBytes);
   return serialized;
 }
