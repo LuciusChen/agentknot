@@ -1,5 +1,7 @@
 export * from './adapters/index.js';
 export * from './broker-profile.js';
+export * from './candidate.js';
+export * from './candidate-store.js';
 export * from './config.js';
 export * from './delegation-policy.js';
 export * from './durable-record-store.js';

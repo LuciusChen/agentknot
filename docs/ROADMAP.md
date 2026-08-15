@@ -38,11 +38,11 @@ WorkOrder -> Executor Job -> Candidate -> Review -> Disposition
 - [x] Add durable schemaVersion 1 WorkOrder issue/read/list/event persistence with one immutable command and only the `issued` status.
 - [x] Add explicit CAS binding from an issued WorkOrder to one executor Job identity that the caller/controller already admitted. Same-Job replay is idempotent; a different Job or stale first-bind revision conflicts. Binding neither launches nor controls the Job, and Job success is not WorkOrder acceptance.
 - [x] Add a minimal WorkOrder-rooted developer CLI that composes issue, ordinary Job admission, explicit binding, terminal observation, artifact verification, and restart-safe reporting without adding another workflow record or changing existing statuses. Default completion reports are human-readable and hide internal IDs/artifact identity; explicit JSON mode retains complete machine evidence.
-- [ ] Add an immutable Candidate artifact record linked to WorkOrder and Job without changing WorkOrder or Job status.
+- [x] Add the minimal immutable, status-free `CandidateRecord` artifact-evidence record linked to one WorkOrder and its bound Executor Job by exact recorded `git-patch` identity (`path`, `sha256`, `baseCommit`), without changing WorkOrder or Job status. Explicit TypeScript creation validates read-only WorkOrder/Job projections, then atomically writes the Candidate snapshot and `candidate.created` event through the existing durable SQLite/event infrastructure; the validation reads and Candidate persistence are separate stores and not one cross-store transaction.
 - [ ] Add domain Review linked to a Candidate without reinterpreting existing orchestration advisory-review evidence.
 - [ ] Add explicit Disposition after review. Acceptance and discard must remain distinct from Job technical success.
 
-Candidate, domain Review, and Disposition are not implemented. Each unchecked item requires its own bounded design, persistence semantics, tests, and independent promotion decision; none authorizes automatic apply, commit, merge, push, or promotion.
+The minimal CandidateRecord slice is implemented as an explicit TypeScript API only; it does not add Candidate CLI creation, Review, Disposition, acceptance, discard, artifact application, promotion, or Job/WorkOrder status transitions. Each unchecked item requires its own bounded design, persistence semantics, tests, and independent promotion decision; none authorizes automatic apply, commit, merge, push, or promotion.
 
 ## Stage 0: Vendor-neutral execution slice
 

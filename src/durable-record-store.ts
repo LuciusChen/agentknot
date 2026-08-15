@@ -9,7 +9,7 @@ const DATABASE_FILENAME = 'agentknot.sqlite';
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const REVISION = Symbol('agentknot.persisted-revision');
 
-type RecordKind = 'Job' | 'Orchestration' | 'WorkOrder';
+type RecordKind = 'Job' | 'Orchestration' | 'WorkOrder' | 'Candidate';
 
 interface StoredEvent {
   sequence: number;
@@ -20,9 +20,11 @@ interface StoredEvent {
 export interface DurableStoredRecord {
   id: string;
   schemaVersion: 1;
-  status: string;
+  /** Execution records have a status; immutable domain records may be status-free. */
+  status?: string;
   createdAt: string;
-  updatedAt: string;
+  /** Immutable records may omit an update timestamp; persistence uses createdAt for its index. */
+  updatedAt?: string;
   events: StoredEvent[];
 }
 
@@ -591,6 +593,9 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
     if (this.#kind === 'WorkOrder') {
       throw new Error('WorkOrder records do not support general save after issue');
     }
+    if (this.#kind === 'Candidate') {
+      throw new Error('Candidate records do not support general save after creation');
+    }
     const expectedRevision = revisionOf(record);
     if (expectedRevision === undefined) {
       throw new StaleRecordRevisionError(
@@ -639,7 +644,7 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
         );
       }
       const result = this.#updateRecord.run(
-        normalized.updatedAt,
+        normalized.updatedAt ?? normalized.createdAt,
         normalized.events.length,
         serializeBoundedRecord(this.#kind, normalized),
         normalized.id,
@@ -711,7 +716,7 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
       this.#assertAppendOnly(current.events, updated.events, workOrderId);
       this.#insertEvent.run(workOrderId, event.sequence, event.at, event.type, JSON.stringify(event));
       const result = this.#updateRecord.run(
-        updated.updatedAt,
+        updated.updatedAt ?? updated.createdAt,
         updated.events.length,
         serializeBoundedRecord(this.#kind, updated),
         workOrderId,
@@ -917,7 +922,7 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
     this.#insertRecord.run(
       record.id,
       record.createdAt,
-      record.updatedAt,
+      record.updatedAt ?? record.createdAt,
       record.events.length,
       serialized
     );
