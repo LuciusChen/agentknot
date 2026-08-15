@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { open } from 'node:fs/promises';
+import { access, open } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -48,6 +48,7 @@ import {
   type TaskAssessment,
 } from './orchestration-types.js';
 import { buildOrchestrationHandoff } from './orchestration-handoff.js';
+import { durableStorePath } from './durable-record-store.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
 import {
   REVIEW_FINDING_SEVERITIES,
@@ -635,10 +636,154 @@ function taskArtifactValidation(
   return verification.valid ? 'passed' : 'failed';
 }
 
+interface TaskCandidatePresentation {
+  candidate: CandidateRecord;
+  reviews: ReviewRecord[];
+  dispositions: DispositionRecord[];
+}
+
+type TaskEvidencePresentation = TaskCandidatePresentation[];
+
+type TaskCandidateDecision = 'undisposed' | 'ambiguous' | DispositionDecision;
+
+function taskCandidateDecision(evidence: TaskCandidatePresentation): TaskCandidateDecision {
+  if (evidence.dispositions.length === 0) return 'undisposed';
+  if (evidence.dispositions.length !== 1) return 'ambiguous';
+  for (const disposition of evidence.dispositions) return disposition.decision;
+  return 'ambiguous';
+}
+
+function taskReviewEvidenceLines(
+  review: ReviewRecord,
+  indent: string,
+  label: string
+): string[] {
+  return [
+    `${indent}${label}`,
+    `${indent}  Reviewer: ${taskHumanText(review.reviewer)}`,
+    `${indent}  Summary: ${taskHumanText(review.summary)}`,
+    ...(review.findings.length === 0
+      ? [`${indent}  Findings: none`]
+      : [
+          `${indent}  Findings:`,
+          ...review.findings.flatMap((finding) =>
+            taskReviewFindingLines(finding, `${indent}    `)
+          ),
+        ]),
+  ];
+}
+
+function taskDispositionEvidenceLines(
+  disposition: DispositionRecord,
+  review: ReviewRecord | undefined,
+  indent: string,
+  label: string
+): string[] {
+  return [
+    `${indent}${label}`,
+    `${indent}  Decision: ${disposition.decision}`,
+    `${indent}  Decided by: ${taskHumanText(disposition.decidedBy)}`,
+    `${indent}  Rationale: ${taskHumanText(disposition.rationale)}`,
+    `${indent}  No artifact or canonical workspace was changed.`,
+    ...(review === undefined
+      ? []
+      : [
+          `${indent}  Review considered: ${taskHumanText(review.reviewer)} — ${taskHumanText(review.summary)}`,
+        ]),
+  ];
+}
+
+function taskCandidateEvidenceLines(
+  presentations: TaskCandidatePresentation[]
+): string[] {
+  if (presentations.length === 0) return [];
+  const multiple = presentations.length > 1;
+  const lines = [multiple ? 'Candidates' : 'Candidate'];
+  presentations.forEach((evidence, candidateIndex) => {
+    const indent = multiple ? '    ' : '  ';
+    if (multiple) {
+      if (candidateIndex > 0) lines.push('');
+      lines.push(`  Candidate ${candidateIndex + 1}`);
+    }
+    const hasReviewEvidence = evidence.reviews.length > 0;
+    const hasDispositionEvidence = evidence.dispositions.length > 0;
+    lines.push(
+      hasReviewEvidence || hasDispositionEvidence
+        ? `${indent}Recorded as immutable evidence for this task result.`
+        : `${indent}Recorded as immutable evidence for this task result; it has not been reviewed or accepted.`
+    );
+    if (!hasReviewEvidence) {
+      if (multiple) lines.push(`${indent}Reviews: none`);
+    } else {
+      evidence.reviews.forEach((review, reviewIndex) => {
+        if (reviewIndex > 0) lines.push('');
+        const label =
+          evidence.reviews.length === 1 ? 'Review' : `Review ${reviewIndex + 1}`;
+        lines.push(...taskReviewEvidenceLines(review, multiple ? '    ' : '', label));
+      });
+    }
+    const reviewById = new Map(evidence.reviews.map((review) => [review.id, review]));
+    if (!hasDispositionEvidence) {
+      if (multiple) lines.push(`${indent}Disposition: not recorded`);
+      return;
+    }
+    evidence.dispositions.forEach((disposition, dispositionIndex) => {
+      if (dispositionIndex > 0) lines.push('');
+      const label =
+        evidence.dispositions.length === 1
+          ? 'Disposition'
+          : `Disposition ${dispositionIndex + 1}`;
+      lines.push(
+        ...taskDispositionEvidenceLines(
+          disposition,
+          reviewById.get(disposition.reviewId),
+          multiple ? '    ' : '',
+          label
+        )
+      );
+    });
+  });
+  return lines;
+}
+
+function taskEvidenceNextAction(presentations: TaskCandidatePresentation[]): string {
+  if (presentations.length === 1) {
+    const evidence = presentations[0]!;
+    const decision = taskCandidateDecision(evidence);
+    if (decision === 'undisposed') {
+      return evidence.reviews.length === 0
+        ? 'Review the Candidate before recording a disposition; AgentKnot has not reviewed or accepted it.'
+        : 'Record an explicit accept or discard disposition for the reviewed Candidate.';
+    }
+    if (decision === 'accept') {
+      return 'Inspect and promote the artifact separately if that action is intended.';
+    }
+    if (decision === 'discard') {
+      return 'The artifact was not applied or deleted; any cleanup remains a separate action.';
+    }
+    return 'Resolve the Candidate evidence before taking an artifact action.';
+  }
+
+  const decisions = presentations.map(taskCandidateDecision);
+  if (decisions.some((decision) => decision === 'undisposed' || decision === 'ambiguous')) {
+    return presentations.some((evidence) => evidence.reviews.length === 0)
+      ? 'Resolve each Candidate individually: record a Review where needed, then an explicit disposition for every Candidate.'
+      : 'Resolve each Candidate individually by recording an explicit disposition for every Candidate, then inspect them separately.';
+  }
+  if (new Set(decisions).size > 1) {
+    return 'Decisions are mixed; inspect each Candidate individually before taking any artifact action.';
+  }
+  if (decisions.every((decision) => decision === 'accept')) {
+    return 'Inspect each accepted artifact and promote them separately if that action is intended.';
+  }
+  return 'The artifacts were not applied or deleted; any cleanup remains a separate action.';
+}
+
 function taskNextAction(
   job: JobRecord | undefined,
   verification: JobArtifactVerificationReport | undefined,
-  candidate?: CandidateRecord
+  candidate?: CandidateRecord,
+  presentation?: TaskEvidencePresentation
 ): string {
   if (job === undefined) return 'Bind an admitted Executor Job before checking this task again.';
   if (job.status === 'queued' || job.status === 'running') {
@@ -653,6 +798,9 @@ function taskNextAction(
   if (verification !== undefined && !verification.valid) {
     return 'Inspect the artifact-integrity failure before reviewing any reported changes.';
   }
+  if (presentation !== undefined && presentation.length > 0) {
+    return taskEvidenceNextAction(presentation);
+  }
   if (candidate !== undefined) {
     return 'Review the Candidate before recording a disposition; AgentKnot has not reviewed or accepted it.';
   }
@@ -663,9 +811,23 @@ function formatTaskHuman(
   workOrder: WorkOrderRecord,
   job: JobRecord | undefined,
   verification: JobArtifactVerificationReport | undefined,
-  candidate?: CandidateRecord
+  candidate?: CandidateRecord,
+  presentation?: TaskEvidencePresentation
 ): string {
   const changedFiles = job === undefined ? undefined : taskChangedFiles(job);
+  const renderedCandidateEvidence =
+    presentation === undefined ? undefined : taskCandidateEvidenceLines(presentation);
+  const preReviewCandidateEvidence = [
+    '',
+    'Candidate',
+    '  Recorded as immutable evidence for this task result; it has not been reviewed or accepted.',
+  ];
+  const candidateEvidence =
+    renderedCandidateEvidence === undefined || renderedCandidateEvidence.length === 0
+      ? candidate === undefined
+        ? []
+        : preReviewCandidateEvidence
+      : ['', ...renderedCandidateEvidence];
   const lines = [
     'Task',
     `  Objective: ${taskHumanText(workOrder.command.objective)}`,
@@ -694,20 +856,14 @@ function formatTaskHuman(
       : changedFiles.length === 0
         ? ['  none']
         : changedFiles.map((file) => `  - ${taskHumanText(file)}`)),
-    ...(candidate === undefined
-      ? []
-      : [
-          '',
-          'Candidate',
-          '  Recorded as immutable evidence for this task result; it has not been reviewed or accepted.',
-        ]),
+    ...candidateEvidence,
     '',
     'Tests',
     ...taskWorkerCheckLines(job),
     `  Artifact integrity: ${taskArtifactValidation(job, verification)}`,
     '',
     'Next action',
-    `  ${taskNextAction(job, verification, candidate)}`,
+    `  ${taskNextAction(job, verification, candidate, presentation)}`,
   ];
   return lines.join('\n');
 }
@@ -736,10 +892,11 @@ function printTaskReport(
   job: JobRecord | undefined,
   verification: JobArtifactVerificationReport | undefined,
   json: boolean,
-  candidate?: CandidateRecord
+  candidate?: CandidateRecord,
+  presentation?: TaskEvidencePresentation
 ): void {
   process.stdout.write(
-    `${json ? formatTaskJson(workOrder, job, verification, candidate) : formatTaskHuman(workOrder, job, verification, candidate)}\n`
+    `${json ? formatTaskJson(workOrder, job, verification, candidate) : formatTaskHuman(workOrder, job, verification, candidate, presentation)}\n`
   );
 }
 
@@ -963,6 +1120,25 @@ function dispositionsForTask(
   });
 }
 
+function taskCandidatePresentations(
+  candidates: CandidateRecord[],
+  reviews: ReviewRecord[],
+  dispositions: DispositionRecord[]
+): TaskCandidatePresentation[] {
+  return candidates.map((candidate) => {
+    const candidateReviews = reviews.filter((review) => review.candidateId === candidate.id);
+    const reviewIds = new Set(candidateReviews.map((review) => review.id));
+    return {
+      candidate,
+      reviews: candidateReviews,
+      dispositions: dispositions.filter(
+        (disposition) =>
+          disposition.candidateId === candidate.id && reviewIds.has(disposition.reviewId)
+      ),
+    };
+  });
+}
+
 function formatTaskDispositionHuman(
   workOrder: WorkOrderRecord,
   review: ReviewRecord,
@@ -1060,6 +1236,41 @@ function formatTaskDispositionsJson(
   );
 }
 
+async function openOptionalTaskStore<T>(
+  configPath: string | undefined,
+  name: string,
+  label: string,
+  openStore: (directory: string) => Promise<T>
+): Promise<T | undefined> {
+  const loaded = await loadConfig(
+    configPath ?? process.env.AGENTKNOT_CONFIG ?? 'agentknot.config.json'
+  );
+  const storageDirectory = path.resolve(
+    loaded.baseDirectory,
+    path.join(path.dirname(loaded.config.storage.directory), name)
+  );
+  if (
+    storageDirectory === path.resolve(loaded.storageDirectory) ||
+    storageDirectory === path.resolve(loaded.orchestrationStorageDirectory)
+  ) {
+    throw new Error(`${label} storage directory must be distinct from execution storage`);
+  }
+  try {
+    await access(durableStorePath(storageDirectory));
+  } catch (error: unknown) {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return undefined;
+    }
+    throw error;
+  }
+  return openStore(storageDirectory);
+}
+
 async function openTaskWorkOrders(configPath: string | undefined): Promise<{
   store: SqliteWorkOrderStore;
   service: WorkOrderService;
@@ -1099,6 +1310,17 @@ async function openTaskCandidates(configPath: string | undefined): Promise<Sqlit
   return SqliteCandidateStore.open(candidateStorageDirectory);
 }
 
+async function openOptionalTaskCandidates(
+  configPath: string | undefined
+): Promise<SqliteCandidateStore | undefined> {
+  return openOptionalTaskStore(
+    configPath,
+    'candidates',
+    'Candidate',
+    (directory) => SqliteCandidateStore.open(directory, { readOnly: true })
+  );
+}
+
 async function openTaskReviews(configPath: string | undefined): Promise<SqliteReviewStore> {
   const loaded = await loadConfig(
     configPath ?? process.env.AGENTKNOT_CONFIG ?? 'agentknot.config.json'
@@ -1114,6 +1336,17 @@ async function openTaskReviews(configPath: string | undefined): Promise<SqliteRe
     throw new Error('Review storage directory must be distinct from execution storage');
   }
   return SqliteReviewStore.open(reviewStorageDirectory);
+}
+
+async function openOptionalTaskReviews(
+  configPath: string | undefined
+): Promise<SqliteReviewStore | undefined> {
+  return openOptionalTaskStore(
+    configPath,
+    'reviews',
+    'Review',
+    (directory) => SqliteReviewStore.open(directory, { readOnly: true })
+  );
 }
 
 async function openTaskDispositions(
@@ -1133,6 +1366,17 @@ async function openTaskDispositions(
     throw new Error('Disposition storage directory must be distinct from execution storage');
   }
   return SqliteDispositionStore.open(dispositionStorageDirectory);
+}
+
+async function openOptionalTaskDispositions(
+  configPath: string | undefined
+): Promise<SqliteDispositionStore | undefined> {
+  return openOptionalTaskStore(
+    configPath,
+    'dispositions',
+    'Disposition',
+    (directory) => SqliteDispositionStore.open(directory, { readOnly: true })
+  );
 }
 
 function formatElapsed(milliseconds: number): string {
@@ -1527,6 +1771,9 @@ async function main(argv: string[]): Promise<void> {
     }
     const workOrders = await openTaskWorkOrders(configPath);
     let runtime: AgentKnotRuntime | undefined;
+    let candidates: SqliteCandidateStore | undefined;
+    let reviews: SqliteReviewStore | undefined;
+    let dispositions: SqliteDispositionStore | undefined;
     try {
       const workOrder = await workOrders.service.get(workOrderId);
       if (workOrder === undefined) {
@@ -1554,12 +1801,40 @@ async function main(argv: string[]): Promise<void> {
         remote !== undefined
           ? await remote.verifyArtifacts(job.id)
           : await runtime!.verifyArtifacts(job.id);
-      printTaskReport(workOrder, job, verification, json);
+      let presentation: TaskEvidencePresentation | undefined;
+      if (!json) {
+        candidates = await openOptionalTaskCandidates(configPath);
+        const taskCandidates =
+          candidates === undefined
+            ? []
+            : await candidatesForWorkOrder(candidates, workOrder);
+        if (taskCandidates.length > 0) {
+          reviews = await openOptionalTaskReviews(configPath);
+          dispositions = await openOptionalTaskDispositions(configPath);
+          const taskReviews = reviews === undefined
+            ? []
+            : reviewsForCandidates(taskCandidates, await reviews.list());
+          const taskDispositions = dispositions === undefined
+            ? []
+            : dispositionsForTask(taskCandidates, taskReviews, await dispositions.list());
+          presentation = taskCandidatePresentations(
+            taskCandidates,
+            taskReviews,
+            taskDispositions
+          );
+        }
+      }
+      printTaskReport(workOrder, job, verification, json, undefined, presentation);
       if (job.status === 'failed' || job.status === 'cancelled') process.exitCode = 1;
       return;
     } finally {
-      await runtime?.close();
-      await workOrders.store.close();
+      await Promise.all([
+        dispositions?.close(),
+        reviews?.close(),
+        candidates?.close(),
+        runtime?.close(),
+        workOrders.store.close(),
+      ]);
     }
   }
 
@@ -1571,6 +1846,8 @@ async function main(argv: string[]): Promise<void> {
     }
     const workOrders = await openTaskWorkOrders(configPath);
     let candidates: SqliteCandidateStore | undefined;
+    let reviews: SqliteReviewStore | undefined;
+    let dispositions: SqliteDispositionStore | undefined;
     let runtime: AgentKnotRuntime | undefined;
     try {
       candidates = await openTaskCandidates(configPath);
@@ -1633,11 +1910,29 @@ async function main(argv: string[]): Promise<void> {
           artifact,
         });
       }
-      printTaskReport(workOrder, job, verification, json, candidate);
+      let presentation: TaskEvidencePresentation | undefined;
+      if (!json) {
+        reviews = await openOptionalTaskReviews(configPath);
+        dispositions = await openOptionalTaskDispositions(configPath);
+        const taskReviews = reviews === undefined
+          ? []
+          : reviewsForCandidates([candidate], await reviews.list());
+        const taskDispositions = dispositions === undefined
+          ? []
+          : dispositionsForTask([candidate], taskReviews, await dispositions.list());
+        presentation = taskCandidatePresentations(
+          [candidate],
+          taskReviews,
+          taskDispositions
+        );
+      }
+      printTaskReport(workOrder, job, verification, json, candidate, presentation);
       if (verification === undefined || !verification.valid) process.exitCode = 1;
       return;
     } finally {
       await Promise.all([
+        dispositions?.close(),
+        reviews?.close(),
         runtime?.close(),
         candidates?.close(),
         workOrders.store.close(),

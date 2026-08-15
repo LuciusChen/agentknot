@@ -309,7 +309,10 @@ test('task issues a WorkOrder, binds a durable Job, and reloads its result after
     assert.match(restarted.stdout, /Changes\n  none/u);
     assert.match(restarted.stdout, /Tests\n  Worker-reported checks: not available/u);
     assert.match(restarted.stdout, /Artifact integrity: passed/u);
-    assert.match(restarted.stdout, /Next action\n  Review the result/u);
+    assert.match(
+      restarted.stdout,
+      /Next action\n  Review the Candidate before recording a disposition/u
+    );
     assert.doesNotMatch(restarted.stdout, new RegExp(`${workOrderId}|${jobId}`, 'u'));
     assert.doesNotMatch(restarted.stdout, /SHA-256|sha256|Base commit|\/artifacts\//u);
 
