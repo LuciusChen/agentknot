@@ -43,6 +43,7 @@ import {
   PI_ARTIFACT_READ_PROTOCOL,
   PI_ARTIFACT_READ_TOOL,
 } from './pi-artifact-reader-extension.js';
+import { PI_TOOL_RESULT_LIMIT_EXTENSION_SOURCE } from './pi-tool-result-limit-extension.js';
 
 interface PiRpcEvent {
   id?: string;
@@ -688,23 +689,33 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
     if (!health.ok) throw new Error(health.message);
 
     const command = this.config.command ?? 'pi';
-    let artifactExtensionDirectory: string | undefined;
+    const attemptExtensionDirectory = await mkdtemp(
+      path.join(os.tmpdir(), 'agentknot-pi-extensions-')
+    );
+    const toolResultLimitExtensionFile = path.join(
+      attemptExtensionDirectory,
+      'tool-result-limit.mjs'
+    );
     let artifactExtensionFile: string | undefined;
-    if (input.artifactReader !== undefined) {
-      artifactExtensionDirectory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-artifact-read-'));
-      artifactExtensionFile = path.join(artifactExtensionDirectory, 'extension.mjs');
-      try {
+    try {
+      await writeFile(toolResultLimitExtensionFile, PI_TOOL_RESULT_LIMIT_EXTENSION_SOURCE, {
+        mode: 0o600,
+      });
+      if (input.artifactReader !== undefined) {
+        artifactExtensionFile = path.join(attemptExtensionDirectory, 'artifact-read.mjs');
         await writeFile(artifactExtensionFile, PI_ARTIFACT_READ_EXTENSION_SOURCE, { mode: 0o600 });
-      } catch (error) {
-        await rm(artifactExtensionDirectory, { recursive: true, force: true });
-        throw error;
       }
+    } catch (error) {
+      await rm(attemptExtensionDirectory, { recursive: true, force: true });
+      throw error;
     }
     const configuredArgs = withAmbientDiscoveryDisabled(this.config.commandArgs);
     const args = [
       ...(artifactExtensionFile === undefined
         ? configuredArgs
         : withRequiredToolAllowed(configuredArgs, PI_ARTIFACT_READ_TOOL)),
+      '--extension',
+      toolResultLimitExtensionFile,
       ...(artifactExtensionFile === undefined
         ? []
         : ['--extension', artifactExtensionFile]),
@@ -732,9 +743,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
             stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
           }) as ChildProcessWithoutNullStreams;
     } catch (error) {
-      if (artifactExtensionDirectory !== undefined) {
-        await rm(artifactExtensionDirectory, { recursive: true, force: true });
-      }
+      await rm(attemptExtensionDirectory, { recursive: true, force: true });
       throw error;
     }
     const exit = waitForExit(child);
@@ -1118,9 +1127,7 @@ export class PiRpcWorkerAdapter implements WorkerAdapter {
           await awaitChildOutput(child, stdoutTask, stderrTask);
         } finally {
           await artifactProtocol?.close();
-          if (artifactExtensionDirectory !== undefined) {
-            await rm(artifactExtensionDirectory, { recursive: true, force: true });
-          }
+          await rm(attemptExtensionDirectory, { recursive: true, force: true });
         }
       }
     }

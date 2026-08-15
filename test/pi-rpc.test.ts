@@ -675,17 +675,32 @@ test('PiRpcWorkerAdapter explicitly maps an artifact reader and never persists i
 
     assert.equal(reads, 1);
     const args = await readFixtureArgv(argvFile);
-    const extensionIndex = args.lastIndexOf('--extension');
-    assert.ok(extensionIndex >= 0);
-    const extensionFile = args[extensionIndex + 1] ?? '';
-    assert.match(extensionFile, /agentknot-artifact-read-[^/]+\/extension\.mjs$/u);
+    const extensionFiles = args.flatMap((argument, index) =>
+      argument === '--extension' && args[index + 1] !== undefined ? [args[index + 1]!] : []
+    );
+    assert.equal(extensionFiles.length, 2);
+    const toolResultLimitExtensionFile = extensionFiles.find((file) =>
+      file.endsWith('/tool-result-limit.mjs')
+    ) ?? '';
+    const artifactExtensionFile = extensionFiles.find((file) =>
+      file.endsWith('/artifact-read.mjs')
+    ) ?? '';
+    assert.match(
+      toolResultLimitExtensionFile,
+      /agentknot-pi-extensions-[^/]+\/tool-result-limit\.mjs$/u
+    );
+    assert.match(
+      artifactExtensionFile,
+      /agentknot-pi-extensions-[^/]+\/artifact-read\.mjs$/u
+    );
     const toolsIndex = args.lastIndexOf('--tools');
     assert.equal(args[toolsIndex + 1], 'read,grep,agentknot_artifact_read');
     const excludeToolsIndex = args.lastIndexOf('--exclude-tools');
     assert.equal(args[excludeToolsIndex + 1], 'write');
     const capture = recordValue(JSON.parse(await readFile(captureFile, 'utf8')));
     assert.equal(capture.content, content);
-    await assert.rejects(stat(extensionFile), { code: 'ENOENT' });
+    await assert.rejects(stat(toolResultLimitExtensionFile), { code: 'ENOENT' });
+    await assert.rejects(stat(artifactExtensionFile), { code: 'ENOENT' });
 
     const artifactStarted = events.find(
       (event) => event.type === 'worker.tool.started' && event.data?.toolName === 'agentknot_artifact_read'
@@ -984,6 +999,12 @@ test('PiRpcWorkerAdapter isolates ambient discovery for normal runs while preser
     const args = await readFixtureArgv(argvFile);
     for (const flag of ambientDiscoveryDisableFlags) assert.equal(countArguments(args, flag), 1, flag);
     assert.equal(args.includes('--no-context-files'), false, 'AGENTS.md context must remain enabled');
+    const toolResultLimitExtensionFile = args[args.lastIndexOf('--extension') + 1] ?? '';
+    assert.match(
+      toolResultLimitExtensionFile,
+      /agentknot-pi-extensions-[^/]+\/tool-result-limit\.mjs$/u
+    );
+    await assert.rejects(stat(toolResultLimitExtensionFile), { code: 'ENOENT' });
     for (const argument of [
       '--extension',
       'explicit-extension',
