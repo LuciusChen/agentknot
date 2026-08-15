@@ -41,6 +41,13 @@ import {
 } from './orchestration-types.js';
 import { buildOrchestrationHandoff } from './orchestration-handoff.js';
 import { createRuntime, type AgentKnotRuntime } from './runtime.js';
+import {
+  REVIEW_FINDING_SEVERITIES,
+  ReviewService,
+  type ReviewFinding,
+  type ReviewRecord,
+} from './review.js';
+import { SqliteReviewStore } from './review-store.js';
 import type {
   JobArtifactVerificationReport,
   JobEvent,
@@ -101,6 +108,41 @@ function takeOptions(args: string[], name: string): string[] {
     if (value === undefined) return values;
     values.push(value);
   }
+}
+
+function parseReviewFindingJson(value: string, index: number): ReviewFinding {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    throw new Error(`--finding-json[${index}] must be valid JSON`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`--finding-json[${index}] must be an object`);
+  }
+  const finding = parsed as Record<string, unknown>;
+  const keys = Object.keys(finding);
+  if (
+    keys.length !== 3 ||
+    !Object.hasOwn(finding, 'severity') ||
+    !Object.hasOwn(finding, 'message') ||
+    !Object.hasOwn(finding, 'evidence')
+  ) {
+    throw new Error(
+      `--finding-json[${index}] must contain only severity, message, and evidence`
+    );
+  }
+  if (!REVIEW_FINDING_SEVERITIES.includes(finding.severity as ReviewFinding['severity'])) {
+    throw new Error(`--finding-json[${index}].severity must be low, medium, or high`);
+  }
+  if (typeof finding.message !== 'string' || typeof finding.evidence !== 'string') {
+    throw new Error(`--finding-json[${index}] message and evidence must be strings`);
+  }
+  return {
+    severity: finding.severity as ReviewFinding['severity'],
+    message: finding.message,
+    evidence: finding.evidence,
+  };
 }
 
 function parseAssessmentJson(value: string): TaskAssessment {
@@ -223,6 +265,8 @@ Usage:
   agentknot task [objective...] [--route NAME] [--workspace PATH] [--acceptance TEXT] [--constraint TEXT] [--json]
   agentknot task-show WORK_ORDER_ID [--json]
   agentknot task-candidate WORK_ORDER_ID [--json]
+  agentknot task-review WORK_ORDER_ID --reviewer NAME --summary TEXT [--finding-json JSON] [--candidate CANDIDATE_ID] [--json]
+  agentknot task-reviews WORK_ORDER_ID [--json]
   agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME] [--idempotency-key KEY]
   agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE] [--idempotency-key KEY]
   agentknot orchestrate --request-file PATH [--json] [--handoff-json] [--progress]
@@ -263,6 +307,14 @@ Task options:
 Task Candidate:
   task-candidate explicitly records or reloads immutable Candidate evidence for the successful
   bound Job's verified terminal-attempt artifact. It does not review, accept, or apply the result.
+
+Task Review:
+  --reviewer NAME     Identity of the reviewer whose evidence is being recorded
+  --summary TEXT      Review summary; it is evidence, not a verdict or disposition
+  --finding-json JSON One {severity,message,evidence} finding; may be repeated
+  --candidate ID      Select one Candidate only when the WorkOrder has more than one
+  task-review records supplied review evidence; it does not launch a Reviewer Job or decide.
+  task-reviews reloads all Reviews currently linked through the WorkOrder's Candidates.
 
 Run options:
   --prompt TEXT       Prompt instead of positional text
@@ -711,6 +763,132 @@ function taskCandidateArtifactIsVerified(
   );
 }
 
+async function candidatesForWorkOrder(
+  store: SqliteCandidateStore,
+  workOrder: WorkOrderRecord
+): Promise<CandidateRecord[]> {
+  return (await store.list()).filter(
+    (candidate) =>
+      candidate.workOrderId === workOrder.id &&
+      candidate.executorJobId === workOrder.executorJobId
+  );
+}
+
+function selectTaskReviewCandidate(
+  candidates: CandidateRecord[],
+  requestedCandidateId: string | undefined
+): CandidateRecord {
+  if (requestedCandidateId !== undefined) {
+    const selected = candidates.find((candidate) => candidate.id === requestedCandidateId);
+    if (selected === undefined) {
+      throw new Error('The selected Candidate does not belong to this WorkOrder');
+    }
+    return selected;
+  }
+  if (candidates.length === 0) {
+    throw new Error('Task has no Candidate; record one before creating a Review');
+  }
+  if (candidates.length > 1) {
+    throw new Error(
+      'Task has multiple Candidates; select one explicitly with --candidate CANDIDATE_ID'
+    );
+  }
+  return candidates[0]!;
+}
+
+function taskReviewFindingLines(finding: ReviewFinding, indent: string): string[] {
+  return [
+    `${indent}- ${finding.severity}: ${taskHumanText(finding.message)}`,
+    `${indent}  Evidence: ${taskHumanText(finding.evidence)}`,
+  ];
+}
+
+function formatTaskReviewHuman(workOrder: WorkOrderRecord, review: ReviewRecord): string {
+  return [
+    'Task',
+    `  Objective: ${taskHumanText(workOrder.command.objective)}`,
+    '',
+    'Review',
+    `  Reviewer: ${taskHumanText(review.reviewer)}`,
+    `  Summary: ${taskHumanText(review.summary)}`,
+    '',
+    'Findings',
+    ...(review.findings.length === 0
+      ? ['  none']
+      : review.findings.flatMap((finding) => taskReviewFindingLines(finding, '  '))),
+    '',
+    'Current status',
+    '  Review evidence is recorded. It is not a verdict, acceptance, or disposition.',
+    '',
+    'Next action',
+    '  Consider all relevant Reviews, then explicitly record a disposition when ready.',
+  ].join('\n');
+}
+
+function formatTaskReviewsHuman(
+  workOrder: WorkOrderRecord,
+  candidates: CandidateRecord[],
+  reviews: ReviewRecord[]
+): string {
+  const lines = [
+    'Task',
+    `  Objective: ${taskHumanText(workOrder.command.objective)}`,
+    '',
+    'Current status',
+    candidates.length === 0
+      ? '  No Candidate has been recorded for this task.'
+      : `  ${candidates.length} Candidate${candidates.length === 1 ? '' : 's'} and ${reviews.length} Review${reviews.length === 1 ? '' : 's'} are recorded.`,
+    '',
+    'Reviews',
+  ];
+  if (reviews.length === 0) {
+    lines.push('  none');
+  } else {
+    reviews.forEach((review, index) => {
+      if (index > 0) lines.push('');
+      lines.push(
+        `  Review ${index + 1}`,
+        `    Reviewer: ${taskHumanText(review.reviewer)}`,
+        `    Summary: ${taskHumanText(review.summary)}`,
+        ...(review.findings.length === 0
+          ? ['    Findings: none']
+          : [
+              '    Findings:',
+              ...review.findings.flatMap((finding) =>
+                taskReviewFindingLines(finding, '      ')
+              ),
+            ])
+      );
+    });
+  }
+  lines.push(
+    '',
+    'Next action',
+    candidates.length === 0
+      ? '  Record a Candidate before creating Review evidence.'
+      : reviews.length === 0
+        ? '  Record an independent Review for the Candidate.'
+        : '  Consider all relevant Reviews; no disposition has been inferred or recorded here.'
+  );
+  return lines.join('\n');
+}
+
+function formatTaskReviewJson(
+  workOrder: WorkOrderRecord,
+  candidate: CandidateRecord,
+  review: ReviewRecord
+): string {
+  return JSON.stringify({ schemaVersion: 1, workOrder, candidate, review }, null, 2);
+}
+
+function formatTaskReviewsJson(
+  workOrder: WorkOrderRecord,
+  candidates: CandidateRecord[],
+  reviews: ReviewRecord[]
+): string {
+  return JSON.stringify({ schemaVersion: 1, workOrder, candidates, reviews }, null, 2);
+}
+
 async function openTaskWorkOrders(configPath: string | undefined): Promise<{
   store: SqliteWorkOrderStore;
   service: WorkOrderService;
@@ -748,6 +926,23 @@ async function openTaskCandidates(configPath: string | undefined): Promise<Sqlit
     throw new Error('Candidate storage directory must be distinct from execution storage');
   }
   return SqliteCandidateStore.open(candidateStorageDirectory);
+}
+
+async function openTaskReviews(configPath: string | undefined): Promise<SqliteReviewStore> {
+  const loaded = await loadConfig(
+    configPath ?? process.env.AGENTKNOT_CONFIG ?? 'agentknot.config.json'
+  );
+  const reviewStorageDirectory = path.resolve(
+    loaded.baseDirectory,
+    path.join(path.dirname(loaded.config.storage.directory), 'reviews')
+  );
+  if (
+    reviewStorageDirectory === path.resolve(loaded.storageDirectory) ||
+    reviewStorageDirectory === path.resolve(loaded.orchestrationStorageDirectory)
+  ) {
+    throw new Error('Review storage directory must be distinct from execution storage');
+  }
+  return SqliteReviewStore.open(reviewStorageDirectory);
 }
 
 function formatElapsed(milliseconds: number): string {
@@ -1254,6 +1449,90 @@ async function main(argv: string[]): Promise<void> {
     } finally {
       await Promise.all([
         runtime?.close(),
+        candidates?.close(),
+        workOrders.store.close(),
+      ]);
+    }
+  }
+
+  if (command === 'task-review') {
+    const reviewer = takeOption(args, '--reviewer');
+    const summary = takeOption(args, '--summary');
+    const selectedCandidateId = takeOption(args, '--candidate');
+    const findingJson = takeOptions(args, '--finding-json');
+    const json = takeFlag(args, '--json');
+    const workOrderId = args.shift();
+    if (!workOrderId || args.length > 0) {
+      throw new Error('task-review requires exactly one WORK_ORDER_ID');
+    }
+    if (reviewer === undefined) throw new Error('task-review requires --reviewer NAME');
+    if (summary === undefined) throw new Error('task-review requires --summary TEXT');
+    const findings = findingJson.map((value, index) => parseReviewFindingJson(value, index));
+    const workOrders = await openTaskWorkOrders(configPath);
+    let candidates: SqliteCandidateStore | undefined;
+    let reviews: SqliteReviewStore | undefined;
+    try {
+      candidates = await openTaskCandidates(configPath);
+      reviews = await openTaskReviews(configPath);
+      const workOrder = await workOrders.service.get(workOrderId);
+      if (workOrder === undefined) {
+        process.stderr.write('Task not found.\n');
+        process.exitCode = 1;
+        return;
+      }
+      const candidate = selectTaskReviewCandidate(
+        await candidatesForWorkOrder(candidates, workOrder),
+        selectedCandidateId
+      );
+      const review = await new ReviewService({ store: reviews, candidates }).create({
+        candidateId: candidate.id,
+        reviewer,
+        summary,
+        findings,
+      });
+      process.stdout.write(
+        `${json ? formatTaskReviewJson(workOrder, candidate, review) : formatTaskReviewHuman(workOrder, review)}\n`
+      );
+      return;
+    } finally {
+      await Promise.all([
+        reviews?.close(),
+        candidates?.close(),
+        workOrders.store.close(),
+      ]);
+    }
+  }
+
+  if (command === 'task-reviews') {
+    const json = takeFlag(args, '--json');
+    const workOrderId = args.shift();
+    if (!workOrderId || args.length > 0) {
+      throw new Error('task-reviews requires exactly one WORK_ORDER_ID');
+    }
+    const workOrders = await openTaskWorkOrders(configPath);
+    let candidates: SqliteCandidateStore | undefined;
+    let reviews: SqliteReviewStore | undefined;
+    try {
+      candidates = await openTaskCandidates(configPath);
+      reviews = await openTaskReviews(configPath);
+      const workOrder = await workOrders.service.get(workOrderId);
+      if (workOrder === undefined) {
+        process.stderr.write('Task not found.\n');
+        process.exitCode = 1;
+        return;
+      }
+      const taskCandidates = await candidatesForWorkOrder(candidates, workOrder);
+      const candidateIds = new Set(taskCandidates.map((candidate) => candidate.id));
+      const taskReviews = (await reviews.list()).filter((review) =>
+        candidateIds.has(review.candidateId)
+      );
+      process.stdout.write(
+        `${json ? formatTaskReviewsJson(workOrder, taskCandidates, taskReviews) : formatTaskReviewsHuman(workOrder, taskCandidates, taskReviews)}\n`
+      );
+      return;
+    } finally {
+      await Promise.all([
+        reviews?.close(),
         candidates?.close(),
         workOrders.store.close(),
       ]);
