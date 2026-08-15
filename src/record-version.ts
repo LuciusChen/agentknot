@@ -16,7 +16,7 @@ function formatVersion(value: unknown): string {
 }
 
 export function materializePersistedRecord<T>(
-  kind: 'Job' | 'Orchestration' | 'WorkOrder' | 'Candidate',
+  kind: 'Job' | 'Orchestration' | 'WorkOrder' | 'Candidate' | 'Review',
   value: unknown
 ): T & VersionedRecord {
   if (!isRecord(value)) {

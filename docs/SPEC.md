@@ -36,6 +36,10 @@ upstream controller -> WorkOrderService -> WorkOrderStore
 upstream controller -> CandidateService -> CandidateStore
                               |
                               +-- read-only WorkOrder/Job validation
+
+upstream controller -> ReviewService -> ReviewStore
+                              |
+                              +-- read-only Candidate validation
 ```
 
 The controller, worker, provider, and model are separate concepts:
@@ -54,6 +58,7 @@ The controller, worker, provider, and model are separate concepts:
 | --- | --- | --- |
 | Immutable user command, WorkOrder issue, and purpose-specific executor Job identity binding | `WorkOrderService` and `WorkOrderStore` | Job admission/lifecycle, Orchestration state, or acceptance inference |
 | Immutable, status-free Candidate evidence, read-only WorkOrder/Job validation, and exact recorded artifact identity binding | `CandidateService` and `CandidateStore` | WorkOrder/Job status or lifecycle, Review, Disposition, acceptance, artifact application, or promotion |
+| Immutable, status-free Review evidence, read-only Candidate validation, and bounded findings | `ReviewService` and `ReviewStore` | Candidate/WorkOrder/Job/Orchestration records or statuses, orchestration quality-review evidence, Disposition, acceptance, discard, artifact application, or promotion |
 | Native command/Skill presentation, stateless `SessionStart` obligation, and controller-specific audit `source` | controller integration adapter | orchestration policy, routes, worker adapters, or artifact promotion |
 | Parent task, assessment, workspace, caller identity | upstream controller and `OrchestrationRequest` admission | controller-vendor branches, worker-specific request types, or middleware model planning |
 | Delegation mode, task-kind policy, child/depth/concurrency caps, and optional human-authored route-selection policy | orchestration service/configuration | controller-vendor branches or worker adapters |
@@ -102,7 +107,7 @@ One transactional local store is authoritative for each durable record kind. A s
 
 Persisted events cannot be removed or rewritten. Readers resume after a sequence cursor and may reconstruct or validate a projection from the log. Live listeners, long-poll, SSE, callback, and controller wakeups may accelerate delivery only after commit; none is state authority. Two store instances attempting to save the same prior revision cannot silently overwrite each other.
 
-The implemented persistence foundation is `SqliteDurableRecordStore`: it uses one mode-0600 local SQLite database, WAL, `synchronous=FULL`, bounded record serialization, atomic projection/event transactions, and compare-and-swap revisions. WorkOrder and Candidate persistence reuse that projection/event transaction without execution leases, cancellation, or idempotent admission. Candidate creation atomically writes one immutable Candidate projection and its `candidate.created` event, but its read-only WorkOrder/Job validation occurs before that write in separate stores and is not part of a cross-store transaction. Production `createRuntime()` uses the same foundation with the additional scoped idempotency, cancellation, and execution-lease operations for Job and Orchestration records and imports only legacy JSON snapshots whose filename identity matches the record, without rewriting or deleting them. Job/Orchestration admission commits record, first event, optional idempotency mapping, and first lease atomically. Accepted cancellation fences a concurrent success transition. Leaf recovery replays integrity-checked admitted input after a higher fence is claimed. Dispatching parents persist their controller-authored plan and immutable input before execution; recovery reclaims that exact plan, adopts identity-matching existing children/reviewers, admits only missing deterministic children, and marks interrupted command validation unavailable instead of pretending to reattach. Historical planning/no-plan records fail explicitly.
+The implemented persistence foundation is `SqliteDurableRecordStore`: it uses one mode-0600 local SQLite database, WAL, `synchronous=FULL`, bounded record serialization, atomic projection/event transactions, and compare-and-swap revisions. WorkOrder, Candidate, and Review persistence reuse that projection/event transaction without execution leases, cancellation, or idempotent admission. Candidate creation atomically writes one immutable Candidate projection and its `candidate.created` event, but its read-only WorkOrder/Job validation occurs before that write in separate stores and is not part of a cross-store transaction. Review creation likewise atomically writes one immutable Review projection and its `review.created` event after a separate read-only Candidate existence check; neither domain path has cross-store recovery or reconciliation. Production `createRuntime()` uses the same foundation with the additional scoped idempotency, cancellation, and execution-lease operations for Job and Orchestration records and imports only legacy JSON snapshots whose filename identity matches the record, without rewriting or deleting them. Job/Orchestration admission commits record, first event, optional idempotency mapping, and first lease atomically. Accepted cancellation fences a concurrent success transition. Leaf recovery replays integrity-checked admitted input after a higher fence is claimed. Dispatching parents persist their controller-authored plan and immutable input before execution; recovery reclaims that exact plan, adopts identity-matching existing children/reviewers, admits only missing deterministic children, and marks interrupted command validation unavailable instead of pretending to reattach. Historical planning/no-plan records fail explicitly.
 
 ### Execution leases and fencing
 
@@ -127,7 +132,7 @@ The durable store is the production record/event authority after deterministic d
 
 ## Current public contracts
 
-The canonical TypeScript definitions are in `src/work-order.ts`, `src/candidate.ts`, `src/types.ts`, and `src/orchestration-types.ts`. Other transports and documentation must derive from or remain mechanically checked against those contracts; one runtime payload must not acquire multiple hand-maintained definitions.
+The canonical TypeScript definitions are in `src/work-order.ts`, `src/candidate.ts`, `src/review.ts`, `src/types.ts`, and `src/orchestration-types.ts`. Other transports and documentation must derive from or remain mechanically checked against those contracts; one runtime payload must not acquire multiple hand-maintained definitions.
 
 ### `WorkOrderCommand` and executor Job binding
 
@@ -141,7 +146,7 @@ For an unbound issued WorkOrder, the current public event sequence is the expect
 
 The developer command does not make WorkOrder responsible for Job lifecycle. WorkOrder issue, Job admission, and WorkOrder binding remain ordered separate transactions; a failure between admission and binding can leave an unbound WorkOrder or an independently running Job, and no reconciliation is implied. Reporting Job success, artifact integrity, or worker checks is technical evidence only and never WorkOrder acceptance. The command creates no Candidate, Review, Disposition, promotion, apply, commit, merge, or push behavior.
 
-Job terminal success is not WorkOrder acceptance. The minimal `CandidateRecord` is current only through its explicit TypeScript domain API; the planned sequence `WorkOrder -> Executor Job -> Candidate -> Review -> Disposition` is now partially implemented and is not an interpretation of existing Job/Orchestration status or advisory-review evidence.
+Job terminal success is not WorkOrder acceptance. The minimal `CandidateRecord` and `ReviewRecord` are current only through their explicit TypeScript domain APIs; the planned sequence `WorkOrder -> Executor Job -> Candidate -> Review -> Disposition` is partially implemented and is not an interpretation of existing Job/Orchestration status or advisory-review evidence.
 
 ### `CandidateRecord` artifact evidence
 
@@ -150,6 +155,16 @@ Job terminal success is not WorkOrder acceptance. The minimal `CandidateRecord` 
 A schemaVersion 1 `CandidateRecord` contains `id`, `workOrderId`, `executorJobId`, `artifact: { path, sha256, baseCommit }`, `createdAt`, and its append-only event list; the current record is immutable and status-free and contains no `updatedAt`. Creation emits one `candidate.created` event. `SqliteCandidateStore` wraps `SqliteDurableRecordStore` with the `Candidate` kind in a caller-selected local `agentknot.sqlite` directory and exposes create/read/list/event-cursor operations; the Candidate snapshot and event insert are atomic, while general Candidate save is rejected.
 
 The WorkOrder and Job reads precede Candidate persistence and are separate read-only store operations, not one cross-store transaction. Candidate creation therefore does not provide validation/persistence atomicity or reconciliation across those stores. It only adds Candidate evidence and leaves WorkOrder/Job records, events, statuses, leases, and lifecycle unchanged. The Candidate API is TypeScript-only; no CLI or HTTP creation path exists. Candidate is not Review or Disposition and does not decide acceptance, discard, promotion, or artifact application.
+
+### `ReviewRecord` evidence
+
+`ReviewService.create` is the explicit domain creation path. It validates only that the requested `candidateId` exists in the read-only Candidate projection, then writes the independent Review projection. It does not read WorkOrder, Job, or Orchestration records, infer or require their statuses, or copy any Candidate fields beyond the link identity.
+
+A schemaVersion 1 `ReviewRecord` contains only `id`, `candidateId`, bounded non-empty `reviewer`, bounded non-empty `summary`, defensively copied `findings`, `createdAt`, and its append-only event list. Each finding contains exactly one independent `severity` of `low`, `medium`, or `high`, a bounded non-empty `message`, and bounded non-empty `evidence`; the domain limits are 256 UTF-8 bytes for reviewer identity, 2 KiB for summary, at most 10 findings, and 1 KiB for each finding message/evidence. The record is immutable and status-free: it has no verdict, recommendation, acceptance/discard value, lifecycle status, or `updatedAt`, and multiple ReviewRecords may reference the same CandidateRecord.
+
+`SqliteReviewStore` wraps `SqliteDurableRecordStore` with the `Review` kind in a caller-selected local `agentknot.sqlite` directory and exposes create/read/list/event-cursor operations. The snapshot and one `review.created` event commit atomically; general Review save is rejected. Candidate validation and Review persistence are separate stores and not one cross-store transaction, with no recovery or reconciliation. The API is TypeScript-only and adds no CLI/HTTP workflow, reviewer launching, automatic review, source-record transition, Disposition, acceptance, discard, artifact application, commit, merge, push, or promotion behavior.
+
+The domain Review contract is deliberately separate from `OrchestrationRecord.qualityReview`: its verdict/findings are not imported, aliased, reinterpreted, migrated, or automatically converted into ReviewRecord fields. Orchestration quality-review evidence remains execution evidence.
 
 ### Independent local broker discovery
 
@@ -475,7 +490,7 @@ The only WorkOrder status is `issued`:
 issued -- bind existing executor Job identity --> issued
 ```
 
-The arrow records an association and one append-only event; it is not a status transition and does not trigger execution. Explicit Candidate creation is a separate evidence write, not a WorkOrder or Job transition, and it does not create a `candidate-ready` status. No `executing`, `reviewing`, `accepted`, or `discarded` paper states are defined. Candidate is already implemented only as an immutable, status-free record; Review and Disposition remain separate future domain concepts, and none may change `JobStatus` or treat Job/Orchestration completion as acceptance.
+The arrow records an association and one append-only event; it is not a status transition and does not trigger execution. Explicit Candidate creation and Review creation are separate evidence writes, not WorkOrder or Job transitions, and neither creates a `candidate-ready` or `reviewing` status. No `executing`, `reviewing`, `accepted`, or `discarded` paper states are defined. Candidate and Review are implemented only as immutable, status-free records; Disposition remains a separate future domain concept, and none may change `JobStatus` or treat Job/Orchestration completion as acceptance.
 
 ## Job lifecycle
 
@@ -725,6 +740,7 @@ Human-authored active route selection does not satisfy or claim a model-ranking 
 - Public runtime input must be validated at its transport boundary.
 - WorkOrder commands are immutable after issue. Executor Job binding is additive, purpose-specific, and CAS-protected; changing the command or replacing a bound Job requires a future explicit domain mechanism rather than a general save.
 - CandidateRecord creation is explicit and TypeScript-only. A Candidate is immutable and status-free, stores one WorkOrder ID, one bound Executor Job ID, and one exact recorded `git-patch` identity (`path`, `sha256`, `baseCommit`), and has no general save or status transition. Its WorkOrder/Job reads and Candidate persistence are separate stores rather than one cross-store transaction.
+- ReviewRecord creation is explicit and TypeScript-only. A Review is immutable and status-free, stores one Candidate ID, bounded reviewer/summary text, and bounded structured findings, and has no general save, verdict, recommendation, acceptance/discard value, lifecycle status, or `updatedAt`. Its read-only Candidate validation and Review persistence are separate stores rather than one cross-store transaction; it never converts orchestration quality-review evidence.
 - Existing job snapshots must retain their resolved route and event meaning.
 - New optional fields may be added compatibly; changing state or event semantics requires a versioned contract and migration decision. `JobArtifact.baseTree` and `changedFiles` are optional when reading persisted records, while newly captured git-worktree artifacts always emit both.
 - `delegation.dispatch.routeSelection` is optional configuration, and its shadow/active evidence is additive plan/metadata evidence; omission remains disabled and does not change persisted Job or Orchestration `schemaVersion: 1`.
@@ -746,6 +762,7 @@ At minimum, the conformance suite must eventually prove:
 
 - WorkOrder issue/read/list/event persistence, restart round-trip, immutable command fields, first executor Job binding, same-Job idempotent replay, different-Job conflict, stale first-bind rejection, concurrent different-Job conflict, and binding restart persistence without Job/Orchestration mutation;
 - CandidateRecord creation/read/list/event-cursor persistence, restart round-trip, immutable/status-free shape, exact WorkOrder-to-bound-Job and `git-patch` identity validation, rejection of missing or mismatched source/artifact references, source-record nonmutation, defensive-copy behavior, and rejection of general Candidate updates;
+- ReviewRecord creation/read/list/event-cursor persistence, restart round-trip, schemaVersion 1 status-free shape without verdict/recommendation/acceptance/discard/status/`updatedAt`, bounded invalid-input rejection, low/medium/high finding validation, defensive-copy behavior, missing-Candidate rejection, multiple reviews for one Candidate, source-record nonmutation, and rejection of general Review updates;
 - controller source neutrality and independent route resolution;
 - Codex/Claude manifest, MCP, Skill, and identical `SessionStart` hook parity for `startup`, `resume`, `clear`, and `compact`; bounded stateless event handling; no `UserPromptSubmit` hook or raw-prompt forwarding; common explicit stopped-broker activation from a strict launch profile; and unavailable launch without target-repository or model fallback;
 - atomic durable admission, canonical-request idempotency, append-only cursor resume, stale-CAS rejection, monotonic lease fences across expiry and release, cancellation/success races, late stale completion, and cross-process wait/cancel by record ID;

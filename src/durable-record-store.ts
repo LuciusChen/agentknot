@@ -9,7 +9,7 @@ const DATABASE_FILENAME = 'agentknot.sqlite';
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const REVISION = Symbol('agentknot.persisted-revision');
 
-type RecordKind = 'Job' | 'Orchestration' | 'WorkOrder' | 'Candidate';
+type RecordKind = 'Job' | 'Orchestration' | 'WorkOrder' | 'Candidate' | 'Review';
 
 interface StoredEvent {
   sequence: number;
@@ -595,6 +595,9 @@ export class SqliteDurableRecordStore<T extends DurableStoredRecord> {
     }
     if (this.#kind === 'Candidate') {
       throw new Error('Candidate records do not support general save after creation');
+    }
+    if (this.#kind === 'Review') {
+      throw new Error('Review records do not support general save after creation');
     }
     const expectedRevision = revisionOf(record);
     if (expectedRevision === undefined) {
