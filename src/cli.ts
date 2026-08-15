@@ -13,6 +13,12 @@ import {
   type BrokerStatus,
   STARTUP_REPORT_PATH_ENV,
 } from './broker-lifecycle.js';
+import {
+  CandidateService,
+  type CandidateArtifact,
+  type CandidateRecord,
+} from './candidate.js';
+import { SqliteCandidateStore } from './candidate-store.js';
 import { loadConfig } from './config.js';
 import { validateTaskAssessment } from './delegation-policy.js';
 import { AgentKnotHttpClient, type AgentKnotWaitUpdate } from './http-client.js';
@@ -216,6 +222,7 @@ function help(): string {
 Usage:
   agentknot task [objective...] [--route NAME] [--workspace PATH] [--acceptance TEXT] [--constraint TEXT] [--json]
   agentknot task-show WORK_ORDER_ID [--json]
+  agentknot task-candidate WORK_ORDER_ID [--json]
   agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME] [--idempotency-key KEY]
   agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE] [--idempotency-key KEY]
   agentknot orchestrate --request-file PATH [--json] [--handoff-json] [--progress]
@@ -251,7 +258,11 @@ Task options:
   --acceptance TEXT   Acceptance criterion; may be repeated
   --constraint TEXT   Execution constraint; may be repeated
   --base-revision REV Opaque source revision recorded in the immutable WorkOrder command
-  --json              Print the complete WorkOrder, Job, and artifact evidence as JSON
+  --json              Print complete WorkOrder, Job, Candidate, and artifact evidence as JSON
+
+Task Candidate:
+  task-candidate explicitly records or reloads immutable Candidate evidence for the successful
+  bound Job's verified terminal-attempt artifact. It does not review, accept, or apply the result.
 
 Run options:
   --prompt TEXT       Prompt instead of positional text
@@ -556,7 +567,8 @@ function taskArtifactValidation(
 
 function taskNextAction(
   job: JobRecord | undefined,
-  verification: JobArtifactVerificationReport | undefined
+  verification: JobArtifactVerificationReport | undefined,
+  candidate?: CandidateRecord
 ): string {
   if (job === undefined) return 'Bind an admitted Executor Job before checking this task again.';
   if (job.status === 'queued' || job.status === 'running') {
@@ -571,13 +583,17 @@ function taskNextAction(
   if (verification !== undefined && !verification.valid) {
     return 'Inspect the artifact-integrity failure before reviewing any reported changes.';
   }
+  if (candidate !== undefined) {
+    return 'Review the Candidate before recording a disposition; AgentKnot has not reviewed or accepted it.';
+  }
   return 'Review the result and decide whether to accept or apply it; AgentKnot has done neither.';
 }
 
 function formatTaskHuman(
   workOrder: WorkOrderRecord,
   job: JobRecord | undefined,
-  verification: JobArtifactVerificationReport | undefined
+  verification: JobArtifactVerificationReport | undefined,
+  candidate?: CandidateRecord
 ): string {
   const changedFiles = job === undefined ? undefined : taskChangedFiles(job);
   const lines = [
@@ -608,13 +624,20 @@ function formatTaskHuman(
       : changedFiles.length === 0
         ? ['  none']
         : changedFiles.map((file) => `  - ${taskHumanText(file)}`)),
+    ...(candidate === undefined
+      ? []
+      : [
+          '',
+          'Candidate',
+          '  Recorded as immutable evidence for this task result; it has not been reviewed or accepted.',
+        ]),
     '',
     'Tests',
     ...taskWorkerCheckLines(job),
     `  Artifact integrity: ${taskArtifactValidation(job, verification)}`,
     '',
     'Next action',
-    `  ${taskNextAction(job, verification)}`,
+    `  ${taskNextAction(job, verification, candidate)}`,
   ];
   return lines.join('\n');
 }
@@ -622,13 +645,15 @@ function formatTaskHuman(
 function formatTaskJson(
   workOrder: WorkOrderRecord,
   job: JobRecord | undefined,
-  verification: JobArtifactVerificationReport | undefined
+  verification: JobArtifactVerificationReport | undefined,
+  candidate?: CandidateRecord
 ): string {
   return JSON.stringify(
     {
       schemaVersion: 1,
       workOrder,
       ...(job === undefined ? {} : { job }),
+      ...(candidate === undefined ? {} : { candidate }),
       ...(verification === undefined ? {} : { artifactVerification: verification }),
     },
     null,
@@ -640,10 +665,49 @@ function printTaskReport(
   workOrder: WorkOrderRecord,
   job: JobRecord | undefined,
   verification: JobArtifactVerificationReport | undefined,
-  json: boolean
+  json: boolean,
+  candidate?: CandidateRecord
 ): void {
   process.stdout.write(
-    `${json ? formatTaskJson(workOrder, job, verification) : formatTaskHuman(workOrder, job, verification)}\n`
+    `${json ? formatTaskJson(workOrder, job, verification, candidate) : formatTaskHuman(workOrder, job, verification, candidate)}\n`
+  );
+}
+
+function taskCandidateArtifact(job: JobRecord): CandidateArtifact {
+  const attempt = job.completionSummary?.attempt ?? job.result?.attempt ?? job.attempt;
+  const artifact = (job.artifacts ?? []).find(
+    (candidate) => candidate.kind === 'git-patch' && candidate.attempt === attempt
+  );
+  if (artifact === undefined) {
+    throw new Error('Task execution has no recorded terminal-attempt Git patch artifact');
+  }
+  return {
+    path: artifact.path,
+    sha256: artifact.sha256,
+    baseCommit: artifact.baseCommit,
+  };
+}
+
+function sameCandidateArtifact(left: CandidateArtifact, right: CandidateArtifact): boolean {
+  return (
+    left.path === right.path &&
+    left.sha256 === right.sha256 &&
+    left.baseCommit === right.baseCommit
+  );
+}
+
+function taskCandidateArtifactIsVerified(
+  artifact: CandidateArtifact,
+  verification: JobArtifactVerificationReport | undefined
+): boolean {
+  return (
+    verification?.artifacts.some(
+      (entry) =>
+        entry.valid &&
+        entry.artifact.path === artifact.path &&
+        entry.artifact.sha256 === artifact.sha256 &&
+        entry.artifact.baseCommit === artifact.baseCommit
+    ) ?? false
   );
 }
 
@@ -667,6 +731,23 @@ async function openTaskWorkOrders(configPath: string | undefined): Promise<{
   }
   const store = await SqliteWorkOrderStore.open(workOrderStorageDirectory);
   return { store, service: new WorkOrderService({ store }) };
+}
+
+async function openTaskCandidates(configPath: string | undefined): Promise<SqliteCandidateStore> {
+  const loaded = await loadConfig(
+    configPath ?? process.env.AGENTKNOT_CONFIG ?? 'agentknot.config.json'
+  );
+  const candidateStorageDirectory = path.resolve(
+    loaded.baseDirectory,
+    path.join(path.dirname(loaded.config.storage.directory), 'candidates')
+  );
+  if (
+    candidateStorageDirectory === path.resolve(loaded.storageDirectory) ||
+    candidateStorageDirectory === path.resolve(loaded.orchestrationStorageDirectory)
+  ) {
+    throw new Error('Candidate storage directory must be distinct from execution storage');
+  }
+  return SqliteCandidateStore.open(candidateStorageDirectory);
 }
 
 function formatElapsed(milliseconds: number): string {
@@ -785,6 +866,7 @@ function isClientCapableCommand(command: string): boolean {
   return new Set([
     'task',
     'task-show',
+    'task-candidate',
     'run',
     'orchestrate',
     'routes',
@@ -1093,6 +1175,88 @@ async function main(argv: string[]): Promise<void> {
     } finally {
       await runtime?.close();
       await workOrders.store.close();
+    }
+  }
+
+  if (command === 'task-candidate') {
+    const json = takeFlag(args, '--json');
+    const workOrderId = args.shift();
+    if (!workOrderId || args.length > 0) {
+      throw new Error('task-candidate requires exactly one WORK_ORDER_ID');
+    }
+    const workOrders = await openTaskWorkOrders(configPath);
+    let candidates: SqliteCandidateStore | undefined;
+    let runtime: AgentKnotRuntime | undefined;
+    try {
+      candidates = await openTaskCandidates(configPath);
+      const workOrder = await workOrders.service.get(workOrderId);
+      if (workOrder === undefined) {
+        process.stderr.write('Task not found.\n');
+        process.exitCode = 1;
+        return;
+      }
+      if (workOrder.executorJobId === undefined) {
+        throw new Error('Task has no bound Executor Job');
+      }
+      const jobs =
+        remote !== undefined
+          ? { get: (id: string) => remote.getJob(id) }
+          : {
+              get: (id: string) => {
+                if (runtime === undefined) throw new Error('Task runtime is unavailable');
+                return runtime.get(id);
+              },
+            };
+      if (remote === undefined) {
+        runtime = await createRuntime({
+          ...(configPath === undefined ? {} : { configPath }),
+          reconcileOnStartup: false,
+        });
+      }
+      const job = await jobs.get(workOrder.executorJobId);
+      if (job === undefined) {
+        throw new Error('Task execution record is unavailable');
+      }
+      if (job.status !== 'succeeded') {
+        throw new Error('Task execution must succeed before recording or reading its Candidate');
+      }
+      const verification =
+        remote !== undefined
+          ? await remote.verifyArtifacts(job.id)
+          : await runtime!.verifyArtifacts(job.id);
+      const artifact = taskCandidateArtifact(job);
+      const service = new CandidateService({
+        store: candidates,
+        workOrders: workOrders.store,
+        jobs,
+      });
+      let candidate = (await service.list()).find(
+        (record) =>
+          record.workOrderId === workOrder.id &&
+          record.executorJobId === job.id &&
+          sameCandidateArtifact(record.artifact, artifact)
+      );
+      if (candidate === undefined) {
+        if (!taskCandidateArtifactIsVerified(artifact, verification)) {
+          throw new Error(
+            'Task terminal artifact must pass exact integrity verification before recording a Candidate'
+          );
+        }
+        candidate = await service.create({
+          workOrderId: workOrder.id,
+          executorJobId: job.id,
+          artifact,
+        });
+      }
+      printTaskReport(workOrder, job, verification, json, candidate);
+      if (verification === undefined || !verification.valid) process.exitCode = 1;
+      return;
+    } finally {
+      await Promise.all([
+        runtime?.close(),
+        candidates?.close(),
+        workOrders.store.close(),
+      ]);
     }
   }
 

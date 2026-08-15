@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
+import { SqliteCandidateStore } from '../src/candidate-store.js';
 import { SqliteJobStore } from '../src/store.js';
+import type { CandidateRecord } from '../src/candidate.js';
 import type { JobArtifactVerificationReport, JobRecord } from '../src/types.js';
 import { SqliteWorkOrderStore } from '../src/work-order-store.js';
 import type { WorkOrderRecord } from '../src/work-order.js';
@@ -19,6 +21,7 @@ interface TaskJsonOutput {
   schemaVersion: 1;
   workOrder: WorkOrderRecord;
   job?: JobRecord;
+  candidate?: CandidateRecord;
   artifactVerification?: JobArtifactVerificationReport;
 }
 
@@ -40,6 +43,20 @@ async function runCli(configPath: string, ...args: string[]): Promise<{
     }
   );
   return { stdout: String(result.stdout), stderr: String(result.stderr) };
+}
+
+async function runCliFailure(configPath: string, ...args: string[]): Promise<{
+  stdout: string;
+  stderr: string;
+}> {
+  try {
+    await runCli(configPath, ...args);
+  } catch (error: unknown) {
+    assert.ok(typeof error === 'object' && error !== null);
+    const result = error as { stdout?: unknown; stderr?: unknown };
+    return { stdout: String(result.stdout ?? ''), stderr: String(result.stderr ?? '') };
+  }
+  throw new Error('Expected AgentKnot CLI command to fail');
 }
 
 function assertTruncatedTaskField(
@@ -121,6 +138,7 @@ test('task issues a WorkOrder, binds a durable Job, and reloads its result after
 
     let workOrderId = '';
     let jobId = '';
+    let terminalArtifactPath = '';
     const store = await SqliteWorkOrderStore.open(path.join(directory, 'work-orders'), {
       readOnly: true,
     });
@@ -169,8 +187,120 @@ test('task issues a WorkOrder, binds a durable Job, and reloads its result after
           '- Do not modify the source workspace.',
         ].join('\n')
       );
+      const terminalAttempt = executorJob.completionSummary?.attempt ?? executorJob.attempt;
+      const terminalArtifact = executorJob.artifacts?.find(
+        (artifact) => artifact.attempt === terminalAttempt
+      );
+      assert.ok(terminalArtifact);
+      terminalArtifactPath = terminalArtifact.path;
     } finally {
       await jobStore.close();
+    }
+
+    await assert.rejects(stat(path.join(directory, 'candidates')), { code: 'ENOENT' });
+    const originalArtifact = await readFile(terminalArtifactPath);
+    await writeFile(terminalArtifactPath, 'tampered artifact\n');
+    const rejectedCandidate = await runCliFailure(
+      configPath,
+      'task-candidate',
+      workOrderId
+    );
+    assert.equal(rejectedCandidate.stdout, '');
+    assert.match(
+      rejectedCandidate.stderr,
+      /terminal artifact must pass exact integrity verification/u
+    );
+    const emptyCandidateStore = await SqliteCandidateStore.open(
+      path.join(directory, 'candidates'),
+      { readOnly: true }
+    );
+    try {
+      assert.deepEqual(await emptyCandidateStore.list(), []);
+    } finally {
+      await emptyCandidateStore.close();
+    }
+    await writeFile(terminalArtifactPath, originalArtifact);
+
+    const candidateReport = await runCli(configPath, 'task-candidate', workOrderId);
+    assert.match(candidateReport.stdout, /Status\n  Execution completed successfully\./u);
+    assert.match(
+      candidateReport.stdout,
+      /Candidate\n  Recorded as immutable evidence for this task result; it has not been reviewed or accepted\./u
+    );
+    assert.match(candidateReport.stdout, /Artifact integrity: passed/u);
+    assert.match(candidateReport.stdout, /Next action\n  Review the Candidate before recording a disposition/u);
+    assert.doesNotMatch(candidateReport.stdout, new RegExp(`${workOrderId}|${jobId}`, 'u'));
+    assert.doesNotMatch(candidateReport.stdout, /SHA-256|sha256|Base commit|\/artifacts\//u);
+
+    let candidateId = '';
+    const candidateStore = await SqliteCandidateStore.open(path.join(directory, 'candidates'), {
+      readOnly: true,
+    });
+    try {
+      const records = await candidateStore.list();
+      assert.equal(records.length, 1);
+      const candidate = records[0];
+      assert.ok(candidate);
+      candidateId = candidate.id;
+      assert.equal(candidate.workOrderId, workOrderId);
+      assert.equal(candidate.executorJobId, jobId);
+      assert.equal(candidate.events.length, 1);
+      assert.equal(candidate.events[0]?.type, 'candidate.created');
+
+      const sourceJobs = await SqliteJobStore.open(path.join(directory, 'jobs'), {
+        readOnly: true,
+      });
+      try {
+        const sourceJob = await sourceJobs.get(jobId);
+        assert.ok(sourceJob);
+        const terminalAttempt = sourceJob.completionSummary?.attempt ?? sourceJob.attempt;
+        const terminalArtifact = sourceJob.artifacts?.find(
+          (artifact) => artifact.attempt === terminalAttempt
+        );
+        assert.ok(terminalArtifact);
+        assert.deepEqual(candidate.artifact, {
+          path: terminalArtifact.path,
+          sha256: terminalArtifact.sha256,
+          baseCommit: terminalArtifact.baseCommit,
+        });
+        assert.equal(sourceJob.status, 'succeeded');
+      } finally {
+        await sourceJobs.close();
+      }
+
+      const sourceWorkOrders = await SqliteWorkOrderStore.open(path.join(directory, 'work-orders'), {
+        readOnly: true,
+      });
+      try {
+        const sourceWorkOrder = await sourceWorkOrders.get(workOrderId);
+        assert.ok(sourceWorkOrder);
+        assert.equal(sourceWorkOrder.status, 'issued');
+        assert.deepEqual(
+          sourceWorkOrder.events.map((event) => event.type),
+          ['work-order.issued', 'work-order.executor-job.bound']
+        );
+      } finally {
+        await sourceWorkOrders.close();
+      }
+    } finally {
+      await candidateStore.close();
+    }
+
+    const restartedCandidate = JSON.parse(
+      (await runCli(configPath, 'task-candidate', workOrderId, '--json')).stdout
+    ) as TaskJsonOutput;
+    assert.equal(restartedCandidate.candidate?.id, candidateId);
+    assert.equal(restartedCandidate.candidate?.workOrderId, workOrderId);
+    assert.equal(restartedCandidate.candidate?.executorJobId, jobId);
+    assert.equal(restartedCandidate.artifactVerification?.valid, true);
+    const reopenedCandidateStore = await SqliteCandidateStore.open(
+      path.join(directory, 'candidates'),
+      { readOnly: true }
+    );
+    try {
+      assert.equal((await reopenedCandidateStore.list()).length, 1);
+    } finally {
+      await reopenedCandidateStore.close();
     }
 
     const restarted = await runCli(configPath, 'task-show', workOrderId);
