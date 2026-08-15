@@ -21,6 +21,14 @@ import {
 import { SqliteCandidateStore } from './candidate-store.js';
 import { loadConfig } from './config.js';
 import { validateTaskAssessment } from './delegation-policy.js';
+import {
+  DISPOSITION_DECISIONS,
+  DispositionConflictError,
+  DispositionService,
+  type DispositionDecision,
+  type DispositionRecord,
+} from './disposition.js';
+import { SqliteDispositionStore } from './disposition-store.js';
 import { AgentKnotHttpClient, type AgentKnotWaitUpdate } from './http-client.js';
 import { createAgentKnotHttpServer } from './http-server.js';
 import type { JobActivityProjection } from './job-activity.js';
@@ -267,6 +275,8 @@ Usage:
   agentknot task-candidate WORK_ORDER_ID [--json]
   agentknot task-review WORK_ORDER_ID --reviewer NAME --summary TEXT [--finding-json JSON] [--candidate CANDIDATE_ID] [--json]
   agentknot task-reviews WORK_ORDER_ID [--json]
+  agentknot task-disposition WORK_ORDER_ID --decision accept|discard --decided-by NAME --rationale TEXT [--review REVIEW_ID] [--json]
+  agentknot task-dispositions WORK_ORDER_ID [--json]
   agentknot run [prompt...] [--route NAME] [--workspace PATH] [--source NAME] [--idempotency-key KEY]
   agentknot orchestrate [prompt...] --assessment-json JSON [--workspace PATH] [--source NAME] [--delegation MODE] [--idempotency-key KEY]
   agentknot orchestrate --request-file PATH [--json] [--handoff-json] [--progress]
@@ -315,6 +325,14 @@ Task Review:
   --candidate ID      Select one Candidate only when the WorkOrder has more than one
   task-review records supplied review evidence; it does not launch a Reviewer Job or decide.
   task-reviews reloads all Reviews currently linked through the WorkOrder's Candidates.
+
+Task Disposition:
+  --decision VALUE    Final recorded decision: accept or discard
+  --decided-by NAME   Identity of the controller or person making the decision
+  --rationale TEXT    Reason for the final recorded decision
+  --review ID         Select one Review only when the WorkOrder has more than one
+  task-disposition records the supplied decision; it does not infer or apply it.
+  task-dispositions reloads final decisions without applying, deleting, or promoting artifacts.
 
 Run options:
   --prompt TEXT       Prompt instead of positional text
@@ -889,6 +907,159 @@ function formatTaskReviewsJson(
   return JSON.stringify({ schemaVersion: 1, workOrder, candidates, reviews }, null, 2);
 }
 
+function reviewsForCandidates(
+  candidates: CandidateRecord[],
+  reviews: ReviewRecord[]
+): ReviewRecord[] {
+  const candidateIds = new Set(candidates.map((candidate) => candidate.id));
+  return reviews.filter((review) => candidateIds.has(review.candidateId));
+}
+
+function selectTaskDispositionReview(
+  candidates: CandidateRecord[],
+  reviews: ReviewRecord[],
+  requestedReviewId: string | undefined
+): { candidate: CandidateRecord; review: ReviewRecord } {
+  const taskReviews = reviewsForCandidates(candidates, reviews);
+  let review: ReviewRecord;
+  if (requestedReviewId !== undefined) {
+    const selected = taskReviews.find((record) => record.id === requestedReviewId);
+    if (selected === undefined) {
+      throw new Error('The selected Review does not belong to this WorkOrder');
+    }
+    review = selected;
+  } else {
+    if (taskReviews.length === 0) {
+      throw new Error('Task has no Review; record one before creating a disposition');
+    }
+    if (taskReviews.length > 1) {
+      throw new Error('Task has multiple Reviews; select one explicitly with --review REVIEW_ID');
+    }
+    review = taskReviews[0]!;
+  }
+  const candidate = candidates.find((record) => record.id === review.candidateId);
+  if (candidate === undefined) {
+    throw new Error('The selected Review has no Candidate in this WorkOrder');
+  }
+  return { candidate, review };
+}
+
+function dispositionsForTask(
+  candidates: CandidateRecord[],
+  reviews: ReviewRecord[],
+  dispositions: DispositionRecord[]
+): DispositionRecord[] {
+  const candidateIds = new Set(candidates.map((candidate) => candidate.id));
+  const taskReviews = new Map(
+    reviewsForCandidates(candidates, reviews).map((review) => [review.id, review])
+  );
+  return dispositions.filter((disposition) => {
+    const review = taskReviews.get(disposition.reviewId);
+    return (
+      candidateIds.has(disposition.candidateId) &&
+      review !== undefined &&
+      review.candidateId === disposition.candidateId
+    );
+  });
+}
+
+function formatTaskDispositionHuman(
+  workOrder: WorkOrderRecord,
+  review: ReviewRecord,
+  disposition: DispositionRecord
+): string {
+  return [
+    'Task',
+    `  Objective: ${taskHumanText(workOrder.command.objective)}`,
+    '',
+    'Disposition',
+    `  Decision: ${disposition.decision}`,
+    `  Decided by: ${taskHumanText(disposition.decidedBy)}`,
+    `  Rationale: ${taskHumanText(disposition.rationale)}`,
+    `  Review considered: ${taskHumanText(review.reviewer)} — ${taskHumanText(review.summary)}`,
+    '',
+    'Current status',
+    '  The final decision is recorded. No artifact or canonical workspace was changed.',
+    '',
+    'Next action',
+    disposition.decision === 'accept'
+      ? '  Inspect and promote the artifact separately if that action is intended.'
+      : '  The artifact was not applied or deleted; any cleanup remains a separate action.',
+  ].join('\n');
+}
+
+function formatTaskDispositionsHuman(
+  workOrder: WorkOrderRecord,
+  reviews: ReviewRecord[],
+  dispositions: DispositionRecord[]
+): string {
+  const reviewById = new Map(reviews.map((review) => [review.id, review]));
+  const lines = [
+    'Task',
+    `  Objective: ${taskHumanText(workOrder.command.objective)}`,
+    '',
+    'Current status',
+    dispositions.length === 0
+      ? '  No final disposition has been recorded for this task.'
+      : `  ${dispositions.length} final disposition${dispositions.length === 1 ? '' : 's'} ${dispositions.length === 1 ? 'is' : 'are'} recorded. No artifact was applied or promoted.`,
+    '',
+    'Dispositions',
+  ];
+  if (dispositions.length === 0) {
+    lines.push('  none');
+  } else {
+    dispositions.forEach((disposition, index) => {
+      const review = reviewById.get(disposition.reviewId);
+      if (index > 0) lines.push('');
+      lines.push(
+        `  Disposition ${index + 1}`,
+        `    Decision: ${disposition.decision}`,
+        `    Decided by: ${taskHumanText(disposition.decidedBy)}`,
+        `    Rationale: ${taskHumanText(disposition.rationale)}`,
+        ...(review === undefined
+          ? []
+          : [
+              `    Review considered: ${taskHumanText(review.reviewer)} — ${taskHumanText(review.summary)}`,
+            ])
+      );
+    });
+  }
+  lines.push(
+    '',
+    'Next action',
+    dispositions.length === 0
+      ? '  Consider the recorded Reviews, then explicitly record accept or discard.'
+      : '  Treat artifact application, deletion, or promotion as a separate explicit action.'
+  );
+  return lines.join('\n');
+}
+
+function formatTaskDispositionJson(
+  workOrder: WorkOrderRecord,
+  candidate: CandidateRecord,
+  review: ReviewRecord,
+  disposition: DispositionRecord
+): string {
+  return JSON.stringify(
+    { schemaVersion: 1, workOrder, candidate, review, disposition },
+    null,
+    2
+  );
+}
+
+function formatTaskDispositionsJson(
+  workOrder: WorkOrderRecord,
+  candidates: CandidateRecord[],
+  reviews: ReviewRecord[],
+  dispositions: DispositionRecord[]
+): string {
+  return JSON.stringify(
+    { schemaVersion: 1, workOrder, candidates, reviews, dispositions },
+    null,
+    2
+  );
+}
+
 async function openTaskWorkOrders(configPath: string | undefined): Promise<{
   store: SqliteWorkOrderStore;
   service: WorkOrderService;
@@ -943,6 +1114,25 @@ async function openTaskReviews(configPath: string | undefined): Promise<SqliteRe
     throw new Error('Review storage directory must be distinct from execution storage');
   }
   return SqliteReviewStore.open(reviewStorageDirectory);
+}
+
+async function openTaskDispositions(
+  configPath: string | undefined
+): Promise<SqliteDispositionStore> {
+  const loaded = await loadConfig(
+    configPath ?? process.env.AGENTKNOT_CONFIG ?? 'agentknot.config.json'
+  );
+  const dispositionStorageDirectory = path.resolve(
+    loaded.baseDirectory,
+    path.join(path.dirname(loaded.config.storage.directory), 'dispositions')
+  );
+  if (
+    dispositionStorageDirectory === path.resolve(loaded.storageDirectory) ||
+    dispositionStorageDirectory === path.resolve(loaded.orchestrationStorageDirectory)
+  ) {
+    throw new Error('Disposition storage directory must be distinct from execution storage');
+  }
+  return SqliteDispositionStore.open(dispositionStorageDirectory);
 }
 
 function formatElapsed(milliseconds: number): string {
@@ -1522,16 +1712,130 @@ async function main(argv: string[]): Promise<void> {
         return;
       }
       const taskCandidates = await candidatesForWorkOrder(candidates, workOrder);
-      const candidateIds = new Set(taskCandidates.map((candidate) => candidate.id));
-      const taskReviews = (await reviews.list()).filter((review) =>
-        candidateIds.has(review.candidateId)
-      );
+      const taskReviews = reviewsForCandidates(taskCandidates, await reviews.list());
       process.stdout.write(
         `${json ? formatTaskReviewsJson(workOrder, taskCandidates, taskReviews) : formatTaskReviewsHuman(workOrder, taskCandidates, taskReviews)}\n`
       );
       return;
     } finally {
       await Promise.all([
+        reviews?.close(),
+        candidates?.close(),
+        workOrders.store.close(),
+      ]);
+    }
+  }
+
+  if (command === 'task-disposition') {
+    const decisionValue = takeOption(args, '--decision');
+    const decidedBy = takeOption(args, '--decided-by');
+    const rationale = takeOption(args, '--rationale');
+    const selectedReviewId = takeOption(args, '--review');
+    const json = takeFlag(args, '--json');
+    const workOrderId = args.shift();
+    if (!workOrderId || args.length > 0) {
+      throw new Error('task-disposition requires exactly one WORK_ORDER_ID');
+    }
+    if (decisionValue === undefined) {
+      throw new Error('task-disposition requires --decision accept|discard');
+    }
+    if (!DISPOSITION_DECISIONS.includes(decisionValue as DispositionDecision)) {
+      throw new Error('task-disposition --decision must be accept or discard');
+    }
+    if (decidedBy === undefined) {
+      throw new Error('task-disposition requires --decided-by NAME');
+    }
+    if (rationale === undefined) {
+      throw new Error('task-disposition requires --rationale TEXT');
+    }
+    const decision = decisionValue as DispositionDecision;
+    const workOrders = await openTaskWorkOrders(configPath);
+    let candidates: SqliteCandidateStore | undefined;
+    let reviews: SqliteReviewStore | undefined;
+    let dispositions: SqliteDispositionStore | undefined;
+    try {
+      candidates = await openTaskCandidates(configPath);
+      reviews = await openTaskReviews(configPath);
+      dispositions = await openTaskDispositions(configPath);
+      const workOrder = await workOrders.service.get(workOrderId);
+      if (workOrder === undefined) {
+        process.stderr.write('Task not found.\n');
+        process.exitCode = 1;
+        return;
+      }
+      const taskCandidates = await candidatesForWorkOrder(candidates, workOrder);
+      const selected = selectTaskDispositionReview(
+        taskCandidates,
+        await reviews.list(),
+        selectedReviewId
+      );
+      let disposition: DispositionRecord;
+      try {
+        disposition = await new DispositionService({
+          store: dispositions,
+          candidates,
+          reviews,
+        }).record({
+          candidateId: selected.candidate.id,
+          reviewId: selected.review.id,
+          decision,
+          decidedBy,
+          rationale,
+        });
+      } catch (error) {
+        if (error instanceof DispositionConflictError) {
+          throw new Error('A different final disposition is already recorded for this Candidate');
+        }
+        throw error;
+      }
+      process.stdout.write(
+        `${json ? formatTaskDispositionJson(workOrder, selected.candidate, selected.review, disposition) : formatTaskDispositionHuman(workOrder, selected.review, disposition)}\n`
+      );
+      return;
+    } finally {
+      await Promise.all([
+        dispositions?.close(),
+        reviews?.close(),
+        candidates?.close(),
+        workOrders.store.close(),
+      ]);
+    }
+  }
+
+  if (command === 'task-dispositions') {
+    const json = takeFlag(args, '--json');
+    const workOrderId = args.shift();
+    if (!workOrderId || args.length > 0) {
+      throw new Error('task-dispositions requires exactly one WORK_ORDER_ID');
+    }
+    const workOrders = await openTaskWorkOrders(configPath);
+    let candidates: SqliteCandidateStore | undefined;
+    let reviews: SqliteReviewStore | undefined;
+    let dispositions: SqliteDispositionStore | undefined;
+    try {
+      candidates = await openTaskCandidates(configPath);
+      reviews = await openTaskReviews(configPath);
+      dispositions = await openTaskDispositions(configPath);
+      const workOrder = await workOrders.service.get(workOrderId);
+      if (workOrder === undefined) {
+        process.stderr.write('Task not found.\n');
+        process.exitCode = 1;
+        return;
+      }
+      const taskCandidates = await candidatesForWorkOrder(candidates, workOrder);
+      const taskReviews = reviewsForCandidates(taskCandidates, await reviews.list());
+      const taskDispositions = dispositionsForTask(
+        taskCandidates,
+        taskReviews,
+        await dispositions.list()
+      );
+      process.stdout.write(
+        `${json ? formatTaskDispositionsJson(workOrder, taskCandidates, taskReviews, taskDispositions) : formatTaskDispositionsHuman(workOrder, taskReviews, taskDispositions)}\n`
+      );
+      return;
+    } finally {
+      await Promise.all([
+        dispositions?.close(),
         reviews?.close(),
         candidates?.close(),
         workOrders.store.close(),
