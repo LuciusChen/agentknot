@@ -58,6 +58,7 @@ import {
 } from './review.js';
 import { SqliteReviewStore } from './review-store.js';
 import type {
+  JobArtifactVerificationIssue,
   JobArtifactVerificationReport,
   JobEvent,
   JobRecord,
@@ -625,15 +626,66 @@ function taskWorkerCheckLines(job: JobRecord | undefined): string[] {
   ];
 }
 
+type TaskEvidenceStatus =
+  | 'not available'
+  | 'pending'
+  | 'not applicable'
+  | 'unavailable'
+  | 'passed'
+  | 'failed';
+
+const TASK_ARTIFACT_INTEGRITY_ISSUES: ReadonlySet<JobArtifactVerificationIssue> = new Set([
+  'artifact-path-mismatch',
+  'artifact-kind-unsupported',
+  'artifact-file-missing',
+  'artifact-file-unreadable',
+  'artifact-size-limit-exceeded',
+  'artifact-size-mismatch',
+  'artifact-sha256-mismatch',
+]);
+
+const TASK_SOURCE_COMPATIBILITY_ISSUES: ReadonlySet<JobArtifactVerificationIssue> = new Set([
+  'base-commit-mismatch',
+  'base-tree-mismatch',
+]);
+
 function taskArtifactValidation(
   job: JobRecord | undefined,
   verification: JobArtifactVerificationReport | undefined
-): string {
+): TaskEvidenceStatus {
   if (job === undefined) return 'not available';
   if (job.status === 'queued' || job.status === 'running') return 'pending';
   if ((job.artifacts ?? []).length === 0) return 'not applicable';
-  if (verification === undefined) return 'unavailable';
-  return verification.valid ? 'passed' : 'failed';
+  if (verification === undefined || verification.artifacts.length === 0) return 'unavailable';
+  return verification.artifacts.some((entry) =>
+    entry.issues.some((issue) => TASK_ARTIFACT_INTEGRITY_ISSUES.has(issue))
+  )
+    ? 'failed'
+    : 'passed';
+}
+
+function taskSourceCompatibility(
+  job: JobRecord | undefined,
+  verification: JobArtifactVerificationReport | undefined
+): TaskEvidenceStatus {
+  if (job === undefined) return 'not available';
+  if (job.status === 'queued' || job.status === 'running') return 'pending';
+  if ((job.artifacts ?? []).length === 0) return 'not applicable';
+  if (verification === undefined || verification.artifacts.length === 0) return 'unavailable';
+  if (
+    verification.artifacts.some(
+      (entry) =>
+        !entry.source.repositoryAvailable ||
+        entry.issues.includes('source-repository-unavailable')
+    )
+  ) {
+    return 'unavailable';
+  }
+  return verification.artifacts.some((entry) =>
+    entry.issues.some((issue) => TASK_SOURCE_COMPATIBILITY_ISSUES.has(issue))
+  )
+    ? 'failed'
+    : 'passed';
 }
 
 interface TaskCandidatePresentation {
@@ -795,8 +847,24 @@ function taskNextAction(
   if (job.status === 'cancelled') {
     return 'Issue a new task if the requested work is still needed.';
   }
-  if (verification !== undefined && !verification.valid) {
+  const artifactIntegrity = taskArtifactValidation(job, verification);
+  if (artifactIntegrity === 'failed') {
     return 'Inspect the artifact-integrity failure before reviewing any reported changes.';
+  }
+  const sourceCompatibility = taskSourceCompatibility(job, verification);
+  if (sourceCompatibility === 'unavailable') {
+    return 'Inspect the available source and artifact evidence before taking an artifact action; AgentKnot could not establish source compatibility.';
+  }
+  if (sourceCompatibility === 'failed') {
+    const singleDecision =
+      presentation?.length === 1 ? taskCandidateDecision(presentation[0]!) : undefined;
+    if (singleDecision === 'accept') {
+      return 'Determine whether the accepted artifact was already promoted or is stale; do not infer either state from source drift.';
+    }
+    if (singleDecision === 'discard' && presentation !== undefined) {
+      return taskEvidenceNextAction(presentation);
+    }
+    return 'Perform a source compatibility review before taking an artifact action; the artifact base has drifted.';
   }
   if (presentation !== undefined && presentation.length > 0) {
     return taskEvidenceNextAction(presentation);
@@ -861,6 +929,7 @@ function formatTaskHuman(
     'Tests',
     ...taskWorkerCheckLines(job),
     `  Artifact integrity: ${taskArtifactValidation(job, verification)}`,
+    `  Source compatibility: ${taskSourceCompatibility(job, verification)}`,
     '',
     'Next action',
     `  ${taskNextAction(job, verification, candidate, presentation)}`,

@@ -406,3 +406,192 @@ test('task issues a WorkOrder, binds a durable Job, and reloads its result after
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('task reports artifact integrity and source compatibility separately after restart', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentknot-cli-task-drift-'));
+  const workspace = path.join(directory, 'workspace');
+  const configPath = path.join(directory, 'agentknot.config.json');
+  await mkdir(workspace);
+  try {
+    await git(workspace, 'init', '-q');
+    await git(workspace, 'config', 'user.email', 'agentknot-test@example.invalid');
+    await git(workspace, 'config', 'user.name', 'AgentKnot test');
+    await writeFile(path.join(workspace, 'README.md'), 'base\n');
+    await git(workspace, 'add', '--', '.');
+    await git(workspace, 'commit', '-qm', 'base');
+    await writeFile(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          defaultRoute: 'executor',
+          storage: { directory: 'jobs', orchestrationDirectory: 'orchestrations' },
+          workspaceIsolation: { mode: 'git-worktree', directory: 'worktrees' },
+          workers: { mock: { adapter: 'mock', responsePrefix: 'Drift fixture completed' } },
+          routes: {
+            executor: { worker: 'mock', provider: 'test', model: 'drift-fixture' },
+          },
+          delegation: { mode: 'off' },
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    const task = JSON.parse(
+      (
+        await runCli(
+          configPath,
+          'task',
+          'Report a result whose source may later drift.',
+          '--workspace',
+          workspace,
+          '--acceptance',
+          'The result remains available for explicit review.',
+          '--constraint',
+          'Do not apply or promote the artifact.',
+          '--json'
+        )
+      ).stdout
+    ) as TaskJsonOutput;
+    const workOrderId = task.workOrder.id;
+    const artifactPath = task.job?.artifacts?.[0]?.path;
+    assert.ok(artifactPath);
+    const originalArtifact = await readFile(artifactPath);
+
+    const candidate = JSON.parse(
+      (await runCli(configPath, 'task-candidate', workOrderId, '--json')).stdout
+    ) as TaskJsonOutput;
+    assert.ok(candidate.candidate);
+    assert.deepEqual(Object.keys(candidate), [
+      'schemaVersion',
+      'workOrder',
+      'job',
+      'candidate',
+      'artifactVerification',
+    ]);
+
+    await writeFile(artifactPath, 'corrupt artifact\n');
+    const corruptShow = await runCli(configPath, 'task-show', workOrderId);
+    assert.match(corruptShow.stdout, /Artifact integrity: failed/u);
+    assert.match(corruptShow.stdout, /Source compatibility: passed/u);
+    assert.match(
+      corruptShow.stdout,
+      /Next action\n  Inspect the artifact-integrity failure before reviewing any reported changes\./u
+    );
+    const corruptCandidate = await runCliFailure(configPath, 'task-candidate', workOrderId);
+    assert.match(corruptCandidate.stdout, /Artifact integrity: failed/u);
+    assert.match(corruptCandidate.stdout, /Source compatibility: passed/u);
+    await writeFile(artifactPath, originalArtifact);
+
+    await writeFile(path.join(workspace, 'canonical.txt'), 'promoted elsewhere\n');
+    await git(workspace, 'add', '--', 'canonical.txt');
+    await git(workspace, 'commit', '-qm', 'canonical follow-up');
+
+    const driftShow = await runCli(configPath, 'task-show', workOrderId);
+    assert.match(driftShow.stdout, /Artifact integrity: passed/u);
+    assert.match(driftShow.stdout, /Source compatibility: failed/u);
+    assert.match(
+      driftShow.stdout,
+      /Next action\n  Perform a source compatibility review before taking an artifact action; the artifact base has drifted\./u
+    );
+    const driftShowJson = JSON.parse(
+      (await runCli(configPath, 'task-show', workOrderId, '--json')).stdout
+    ) as TaskJsonOutput;
+    assert.deepEqual(Object.keys(driftShowJson), [
+      'schemaVersion',
+      'workOrder',
+      'job',
+      'artifactVerification',
+    ]);
+    assert.deepEqual(driftShowJson.artifactVerification?.artifacts[0]?.issues, [
+      'base-commit-mismatch',
+    ]);
+
+    const driftCandidate = await runCliFailure(
+      configPath,
+      'task-candidate',
+      workOrderId,
+      '--json'
+    );
+    const driftCandidateJson = JSON.parse(driftCandidate.stdout) as TaskJsonOutput;
+    assert.deepEqual(Object.keys(driftCandidateJson), [
+      'schemaVersion',
+      'workOrder',
+      'job',
+      'candidate',
+      'artifactVerification',
+    ]);
+    assert.equal(driftCandidateJson.artifactVerification?.valid, false);
+
+    await runCli(
+      configPath,
+      'task-review',
+      workOrderId,
+      '--reviewer',
+      'drift-reviewer',
+      '--summary',
+      'The accepted result needs source compatibility context.',
+      '--json'
+    );
+    await runCli(
+      configPath,
+      'task-disposition',
+      workOrderId,
+      '--decision',
+      'accept',
+      '--decided-by',
+      'maintainer',
+      '--rationale',
+      'Accept the recorded Candidate for explicit upstream handling.',
+      '--json'
+    );
+
+    const acceptedDriftShow = await runCli(configPath, 'task-show', workOrderId);
+    assert.match(acceptedDriftShow.stdout, /Artifact integrity: passed/u);
+    assert.match(acceptedDriftShow.stdout, /Source compatibility: failed/u);
+    assert.match(
+      acceptedDriftShow.stdout,
+      /Next action\n  Determine whether the accepted artifact was already promoted or is stale; do not infer either state from source drift\./u
+    );
+    const acceptedDriftCandidate = await runCliFailure(
+      configPath,
+      'task-candidate',
+      workOrderId
+    );
+    assert.match(
+      acceptedDriftCandidate.stdout,
+      /Determine whether the accepted artifact was already promoted or is stale/u
+    );
+
+    await rm(workspace, { recursive: true, force: true });
+    const unavailableShow = await runCli(configPath, 'task-show', workOrderId);
+    assert.match(unavailableShow.stdout, /Artifact integrity: passed/u);
+    assert.match(unavailableShow.stdout, /Source compatibility: unavailable/u);
+    assert.match(
+      unavailableShow.stdout,
+      /Next action\n  Inspect the available source and artifact evidence before taking an artifact action; AgentKnot could not establish source compatibility\./u
+    );
+    assert.doesNotMatch(
+      unavailableShow.stdout.slice(unavailableShow.stdout.indexOf('Next action')),
+      /drift|mismatch/iu
+    );
+    const unavailableCandidate = await runCliFailure(
+      configPath,
+      'task-candidate',
+      workOrderId,
+      '--json'
+    );
+    const unavailableCandidateJson = JSON.parse(unavailableCandidate.stdout) as TaskJsonOutput;
+    assert.equal(unavailableCandidateJson.artifactVerification?.valid, false);
+    assert.deepEqual(Object.keys(unavailableCandidateJson), [
+      'schemaVersion',
+      'workOrder',
+      'job',
+      'candidate',
+      'artifactVerification',
+    ]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
