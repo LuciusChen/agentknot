@@ -11,6 +11,7 @@ export * from './durable-subscription.js';
 export * from './http-server.js';
 export * from './job-activity.js';
 export * from './job-list.js';
+export * from './job-output.js';
 export * from './local-discovery.js';
 export * from './mcp-server.js';
 export * from './orchestration.js';

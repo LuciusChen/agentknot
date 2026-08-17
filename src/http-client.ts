@@ -16,12 +16,15 @@ import type {
   JobArtifactPreview,
   JobArtifactVerificationReport,
   JobEvent,
+  JobOutputReadOptions,
+  JobOutputReadResult,
   JobRecord,
   JobRequest,
   WorkerControlCapabilities,
   WorkerControlReceipt,
   WorkerControlRequest,
 } from './types.js';
+import { DEFAULT_OUTPUT_CHUNK_BYTES, MAX_OUTPUT_CHUNK_BYTES } from './record-limits.js';
 
 const HTTP_OPERATION_TIMEOUT_MS = 10_000;
 const MAX_HTTP_RESPONSE_BYTES = 17 * 1024 * 1024;
@@ -138,6 +141,57 @@ function errorMessage(value: unknown): string | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const error = (value as Record<string, unknown>).error;
   return typeof error === 'string' ? error.slice(0, 1_000) : undefined;
+}
+
+function jobOutputResult(
+  value: unknown,
+  expectedJobId: string,
+  expectedSubtaskId: string | undefined,
+  expectedMaxBytes: number
+): JobOutputReadResult {
+  const result = asObject(value, 'job output response');
+  if (
+    result.schemaVersion !== 1 ||
+    result.jobId !== expectedJobId ||
+    result.subtaskId !== expectedSubtaskId
+  ) {
+    throw new AgentKnotHttpClientError('job output response identity is invalid');
+  }
+  if (result.status === 'unavailable') {
+    if (
+      result.reason !== 'job-not-found' &&
+      result.reason !== 'subtask-not-found' &&
+      result.reason !== 'output-unavailable'
+    ) {
+      throw new AgentKnotHttpClientError('job output response reason is invalid');
+    }
+    return result as unknown as JobOutputReadResult;
+  }
+  if (
+    result.status !== 'available' ||
+    typeof result.chunk !== 'string' ||
+    !Number.isSafeInteger(result.cursor) ||
+    (result.cursor as number) < 0 ||
+    typeof result.hasMore !== 'boolean' ||
+    !Number.isSafeInteger(result.totalBytes) ||
+    (result.totalBytes as number) < 0
+  ) {
+    throw new AgentKnotHttpClientError('job output response page is invalid');
+  }
+  const chunkBytes = Buffer.byteLength(result.chunk, 'utf8');
+  if (chunkBytes > MAX_OUTPUT_CHUNK_BYTES || chunkBytes > expectedMaxBytes) {
+    throw new AgentKnotHttpClientError('job output response chunk exceeds the public byte limit');
+  }
+  const end = (result.cursor as number) + chunkBytes;
+  const totalBytes = result.totalBytes as number;
+  if (
+    (result.hasMore === true &&
+      (!Number.isSafeInteger(result.nextCursor) || result.nextCursor !== end || end >= totalBytes)) ||
+    (result.hasMore === false && (result.nextCursor !== undefined || end !== totalBytes))
+  ) {
+    throw new AgentKnotHttpClientError('job output response cursor evidence is invalid');
+  }
+  return result as unknown as JobOutputReadResult;
 }
 
 async function boundedResponseText(response: Response): Promise<string> {
@@ -552,6 +606,23 @@ export class AgentKnotHttpClient {
       if (error instanceof AgentKnotHttpClientError && error.status === 404) return undefined;
       throw error;
     }
+  }
+
+  async readJobOutput(
+    id: string,
+    options: JobOutputReadOptions = {}
+  ): Promise<JobOutputReadResult> {
+    const search = new URLSearchParams();
+    if (options.subtaskId !== undefined) search.set('subtaskId', options.subtaskId);
+    if (options.cursor !== undefined) search.set('cursor', String(options.cursor));
+    if (options.maxBytes !== undefined) search.set('maxBytes', String(options.maxBytes));
+    const query = search.size === 0 ? '' : `?${search.toString()}`;
+    return jobOutputResult(
+      await this.#request(`/v1/jobs/${encodeURIComponent(id)}/output${query}`),
+      id,
+      options.subtaskId,
+      options.maxBytes ?? DEFAULT_OUTPUT_CHUNK_BYTES
+    );
   }
 
   async listJobs(): Promise<JobList> {

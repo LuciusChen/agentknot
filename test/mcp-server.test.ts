@@ -232,6 +232,7 @@ test('MCP explicitly starts and follows a broker without owning its runtime', as
       'agentknot_orchestration_wait',
       'agentknot_orchestration_follow',
       'agentknot_orchestration_cancel',
+      'agentknot_job_output',
       'agentknot_job_control_capabilities',
       'agentknot_job_control',
       'agentknot_artifact_preview',
@@ -333,6 +334,85 @@ test('MCP explicitly starts and follows a broker without owning its runtime', as
     await stopChild(broker);
     if (detachedBrokerRunning) await stopBroker({ environment });
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('MCP job output returns one bounded page in matching text and structured forms', async () => {
+  const calls: string[] = [];
+  const http: Server = createServer((request, response) => {
+    calls.push(`${request.method} ${request.url}`);
+    const url = new URL(request.url ?? '/', 'http://agentknot.test');
+    const match = /^\/v1\/jobs\/([a-zA-Z0-9_-]+)\/output$/u.exec(url.pathname);
+    if (request.method !== 'GET' || match === null) {
+      response.writeHead(404, { 'content-type': 'application/json' });
+      response.end('{"error":"not found"}');
+      return;
+    }
+    const jobId = match[1]!;
+    const subtaskId = url.searchParams.get('subtaskId') ?? undefined;
+    response.writeHead(200, { 'content-type': 'application/json' });
+    if (jobId === 'job_missing') {
+      response.end(JSON.stringify({
+        schemaVersion: 1,
+        status: 'unavailable',
+        jobId,
+        reason: 'job-not-found',
+      }));
+      return;
+    }
+    response.end(JSON.stringify({
+      schemaVersion: 1,
+      status: 'available',
+      jobId,
+      ...(subtaskId === undefined ? {} : { subtaskId }),
+      chunk: '中文',
+      cursor: 0,
+      nextCursor: 6,
+      hasMore: true,
+      totalBytes: 10,
+    }));
+  });
+  http.listen(0, '127.0.0.1');
+  await once(http, 'listening');
+  const address = http.address() as AddressInfo;
+  const mcp = new StdioMcpClient({
+    ...process.env,
+    AGENTKNOT_SERVER_URL: `http://127.0.0.1:${address.port}`,
+  });
+  try {
+    await mcp.initialize();
+    const response = await mcp.callTool('agentknot_job_output', {
+      jobId: 'job_output_fixture',
+      subtaskId: 'subtask-output',
+      cursor: 0,
+      maxBytes: 8,
+    });
+    const page = toolJson(response);
+    assert.deepEqual(response.structuredContent, page);
+    assert.equal(page.chunk, '中文');
+    assert.equal(page.nextCursor, 6);
+    assert.equal(page.hasMore, true);
+    assert.ok(Buffer.byteLength(JSON.stringify(page), 'utf8') < 16 * 1024);
+    assert.ok(
+      calls.some((call) =>
+        call.includes(
+          '/v1/jobs/job_output_fixture/output?subtaskId=subtask-output&cursor=0&maxBytes=8'
+        )
+      )
+    );
+
+    const missingResponse = await mcp.callTool('agentknot_job_output', {
+      jobId: 'job_missing',
+    });
+    const missing = toolJson(missingResponse);
+    assert.deepEqual(missingResponse.structuredContent, missing);
+    assert.equal(missing.status, 'unavailable');
+    assert.equal(missing.reason, 'job-not-found');
+  } finally {
+    await mcp.close();
+    await new Promise<void>((resolve, reject) =>
+      http.close((error) => (error === undefined ? resolve() : reject(error)))
+    );
   }
 });
 

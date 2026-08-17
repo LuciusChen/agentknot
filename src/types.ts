@@ -164,6 +164,42 @@ export interface JobResult {
   metadata?: Record<string, unknown>;
 }
 
+export const JOB_OUTPUT_UNAVAILABLE_REASONS = [
+  'job-not-found',
+  'subtask-not-found',
+  'output-unavailable',
+] as const;
+
+export type JobOutputUnavailableReason = (typeof JOB_OUTPUT_UNAVAILABLE_REASONS)[number];
+
+export interface JobOutputReadOptions {
+  subtaskId?: string;
+  cursor?: number;
+  maxBytes?: number;
+}
+
+export type JobOutputReadResult =
+  | {
+      schemaVersion: 1;
+      status: 'available';
+      jobId: string;
+      subtaskId?: string;
+      chunk: string;
+      cursor: number;
+      nextCursor?: number;
+      hasMore: boolean;
+      totalBytes: number;
+      /** Existing persistence-boundary evidence; the reader never truncates durable output. */
+      outputTruncation?: JobResult['outputTruncation'];
+    }
+  | {
+      schemaVersion: 1;
+      status: 'unavailable';
+      jobId: string;
+      subtaskId?: string;
+      reason: JobOutputUnavailableReason;
+    };
+
 export interface WorkerUsageTokens {
   input: number;
   output: number;

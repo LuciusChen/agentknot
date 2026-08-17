@@ -29,8 +29,10 @@ import type {
   JobArtifactList,
   JobArtifactPreview,
   JobArtifactVerificationReport,
-  JobRecord,
   JobEvent,
+  JobOutputReadOptions,
+  JobOutputReadResult,
+  JobRecord,
   JobRequest,
   RouteDiagnostic,
   StartJobResult,
@@ -92,6 +94,17 @@ export class AgentKnotRuntime {
 
   get(id: string): Promise<JobRecord | undefined> {
     return this.jobs.get(id);
+  }
+
+  getJob(id: string): Promise<JobRecord | undefined> {
+    return this.jobs.get(id);
+  }
+
+  readJobOutput(
+    id: string,
+    options: JobOutputReadOptions = {}
+  ): Promise<JobOutputReadResult> {
+    return this.jobs.readJobOutput(id, options);
   }
 
   waitForJob(id: string, timeoutMs?: number, signal?: AbortSignal): Promise<JobRecord | undefined> {

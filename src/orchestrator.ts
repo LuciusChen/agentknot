@@ -16,6 +16,7 @@ import {
 } from './durable-record-store.js';
 import { DurableExecutionCoordinator } from './durable-execution.js';
 import { isTerminalStatus } from './execution-status.js';
+import { readJobOutputRecord } from './job-output.js';
 import { DurableEventSubscription } from './durable-subscription.js';
 import {
   AttemptWorkerControlChannel,
@@ -58,6 +59,8 @@ import type {
   JobEvent,
   JobEventType,
   JobExecution,
+  JobOutputReadOptions,
+  JobOutputReadResult,
   JobRecord,
   JobRequest,
   JobRoutePoolSelection,
@@ -526,6 +529,13 @@ export class Orchestrator {
 
   async get(id: string): Promise<JobRecord | undefined> {
     return this.#store.get(id);
+  }
+
+  async readJobOutput(
+    id: string,
+    options: JobOutputReadOptions = {}
+  ): Promise<JobOutputReadResult> {
+    return readJobOutputRecord(id, await this.#store.get(id), options);
   }
 
   async list(): Promise<JobRecord[]> {

@@ -13,7 +13,11 @@ import {
 } from './http-client.js';
 import { readLocalDiscovery } from './local-discovery.js';
 import { buildOrchestrationHandoff } from './orchestration-handoff.js';
-import { MAX_WORKER_CONTROL_MESSAGE_BYTES } from './record-limits.js';
+import {
+  MAX_OUTPUT_CHUNK_BYTES,
+  MAX_WORKER_CONTROL_MESSAGE_BYTES,
+  MIN_OUTPUT_CHUNK_BYTES,
+} from './record-limits.js';
 
 const text = z.string().min(1).max(64 * 1024);
 const shortText = z.string().min(1).max(1_000);
@@ -74,6 +78,19 @@ const orchestrationWaitSchema = z
   })
   .strict();
 const jobControlIdSchema = z.object({ id: shortText }).strict();
+const jobOutputSchema = z
+  .object({
+    jobId: shortText,
+    subtaskId: z.string().min(1).max(256).optional(),
+    cursor: z.number().int().nonnegative().optional(),
+    maxBytes: z
+      .number()
+      .int()
+      .min(MIN_OUTPUT_CHUNK_BYTES)
+      .max(MAX_OUTPUT_CHUNK_BYTES)
+      .optional(),
+  })
+  .strict();
 const jobControlSchema = z
   .object({
     id: shortText,
@@ -381,6 +398,25 @@ export function createAgentKnotMcpServer(): McpServer {
         await (await resolveBrokerClient()).cancelOrchestration(id);
         return { accepted: true, orchestrationId: id };
       })
+  );
+
+  server.registerTool(
+    'agentknot_job_output',
+    {
+      title: 'Read AgentKnot job output',
+      description:
+        'Read one bounded UTF-8 page of retained Worker output by exact Job identity. Use only when the summary-first handoff is insufficient.',
+      inputSchema: jobOutputSchema,
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ jobId, subtaskId, cursor, maxBytes }) =>
+      withErrors(async () =>
+        (await resolveBrokerClient()).readJobOutput(jobId, {
+          ...(subtaskId === undefined ? {} : { subtaskId }),
+          ...(cursor === undefined ? {} : { cursor }),
+          ...(maxBytes === undefined ? {} : { maxBytes }),
+        })
+      )
   );
 
   server.registerTool(

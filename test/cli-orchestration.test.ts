@@ -618,7 +618,13 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
   );
   const handoff = JSON.parse(run.stdout) as {
     plan: { decision: string; willDispatch: boolean; assessment: { complexity: string } };
-    children: Array<{ status: string; output?: string; jobId: string }>;
+    children: Array<{
+      status: string;
+      outputAvailable: boolean;
+      outputBytes?: number;
+      completion?: { workerReported: { status: string } };
+      jobId: string;
+    }>;
     artifacts: Array<{
       jobId: string;
       status: string;
@@ -647,7 +653,13 @@ test('CLI compact handoff projects delegated child and verified artifact evidenc
   assert.equal(handoff.plan.assessment.complexity, 'low');
   assert.equal(handoff.children.length, 1);
   assert.equal(handoff.children[0]?.status, 'succeeded');
-  assert.equal(handoff.children[0]?.output, 'Delegated worker created reviewed.txt.');
+  assert.equal('output' in (handoff.children[0] ?? {}), false);
+  assert.equal(handoff.children[0]?.outputAvailable, true);
+  assert.equal(
+    handoff.children[0]?.outputBytes,
+    Buffer.byteLength('Delegated worker created reviewed.txt.', 'utf8')
+  );
+  assert.equal(handoff.children[0]?.completion?.workerReported.status, 'reported');
   assert.equal(handoff.artifacts.length, 1);
   assert.equal(handoff.artifacts[0]?.jobId, handoff.children[0]?.jobId);
   assert.equal(handoff.artifacts[0]?.status, 'verified');

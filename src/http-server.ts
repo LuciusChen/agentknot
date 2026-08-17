@@ -20,6 +20,8 @@ import type {
   JobArtifactPreview,
   JobArtifactVerificationReport,
   JobEvent,
+  JobOutputReadOptions,
+  JobOutputReadResult,
   JobRequest,
   StartJobResult,
   WorkerControlCapabilities,
@@ -148,6 +150,25 @@ function eventCursor(request: IncomingMessage): number | undefined {
   return sequence;
 }
 
+function outputReadOptions(request: IncomingMessage): JobOutputReadOptions {
+  const search = new URL(request.url ?? '/', 'http://127.0.0.1').searchParams;
+  const integer = (name: string): number | undefined => {
+    const raw = search.get(name);
+    if (raw === null) return undefined;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value)) throw new Error(`${name} must be a safe integer`);
+    return value;
+  };
+  const subtaskId = search.get('subtaskId') ?? undefined;
+  const cursor = integer('cursor');
+  const maxBytes = integer('maxBytes');
+  return {
+    ...(subtaskId === undefined ? {} : { subtaskId }),
+    ...(cursor === undefined ? {} : { cursor }),
+    ...(maxBytes === undefined ? {} : { maxBytes }),
+  };
+}
+
 function nextEventSequence(events: ReadonlyArray<{ sequence: number }>, after: number): number {
   return events.reduce((sequence, event) => Math.max(sequence, event.sequence), after);
 }
@@ -250,6 +271,10 @@ function asOrchestrationRequest(value: unknown): OrchestrationRequest {
 export interface AgentKnotHttpRuntime {
   routes(): Array<{ name: string; worker: string; provider: string; model: string }>;
   get(id: string): Promise<JobRecord | undefined>;
+  readJobOutput?(
+    id: string,
+    options?: JobOutputReadOptions
+  ): Promise<JobOutputReadResult>;
   list(): Promise<JobRecord[]>;
   listArtifacts(id: string): Promise<JobArtifactList | undefined>;
   verifyArtifacts(id: string): Promise<JobArtifactVerificationReport | undefined>;
@@ -452,7 +477,7 @@ export function createAgentKnotHttpServer(
         return;
       }
 
-      const match = /^\/v1\/jobs\/([a-zA-Z0-9_-]+)(?:\/(events|cancel|control))?$/.exec(pathname);
+      const match = /^\/v1\/jobs\/([a-zA-Z0-9_-]+)(?:\/(events|cancel|control|output))?$/.exec(pathname);
       if (match) {
         const id = match[1];
         const action = match[2];
@@ -464,6 +489,14 @@ export function createAgentKnotHttpServer(
             return;
           }
           sendJson(response, 200, { job });
+          return;
+        }
+        if (method === 'GET' && action === 'output') {
+          if (!runtime.readJobOutput) {
+            sendJson(response, 501, { error: 'Job output reading is not available on this runtime' });
+            return;
+          }
+          sendJson(response, 200, await runtime.readJobOutput(id, outputReadOptions(request)));
           return;
         }
         if (method === 'GET' && action === 'events') {
