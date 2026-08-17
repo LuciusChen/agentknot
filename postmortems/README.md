@@ -200,3 +200,4 @@ Incident records should also include severity, user/controller impact, immediate
 | [0086](./0086-per-attempt-usage-evidence.md) | Incident / Architecture Decision | Resolved / Accepted | Persist fixed-shape downstream usage per worker attempt |
 | [0087](./0087-pre-settlement-worker-retry-backoff.md) | Incident / Architecture Decision | Resolved / Accepted | Pace pre-settlement worker retries without changing ownership |
 | [0088](./0088-bound-pi-tool-result-context.md) | Incident / Architecture Decision | Resolved / Accepted | Bound Pi text tool results before the next model call |
+| [0089](./0089-summary-first-handoff-real-controller-pilot.md) | Experiment / Architecture Decision | Accepted / Retained | Retain summary-first handoff after a real Controller pilot |
