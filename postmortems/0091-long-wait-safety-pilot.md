@@ -1,7 +1,7 @@
 # 0091: Long-wait safety pilot
 
 - Type: Experiment / Architecture Decision
-- Status: Draft / Awaiting review
+- Status: Accepted / Implemented
 - Date: 2026-08-18
 - Owners: AgentKnot maintainers
 - Affected commit: `0af090ae44caa3f9d322c5eae6c62f70ff2e239b`

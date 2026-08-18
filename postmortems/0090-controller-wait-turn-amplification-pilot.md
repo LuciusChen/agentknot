@@ -1,7 +1,7 @@
 # 0090: Controller wait-turn amplification pilot
 
 - Type: Experiment / Architecture Decision
-- Status: Draft / Awaiting review
+- Status: Accepted / Implemented
 - Date: 2026-08-17
 - Owners: AgentKnot maintainers
 - Related: [durable event subscription 0062](./0062-durable-event-subscription.md), [bounded MCP wait 0075](./0075-bounded-mcp-wait-and-resume-gate.md), [summary-first pilot 0089](./0089-summary-first-handoff-real-controller-pilot.md), [SPEC](../docs/SPEC.md)
