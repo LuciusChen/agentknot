@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { getEventListeners } from 'node:events';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -1535,22 +1536,100 @@ test('OrchestrationService rejects a malformed controller assessment before reco
   assert.equal((await orchestrationStore.list()).length, 0);
 });
 
+test('request abort stops only orchestration observation and permits clean reattachment', async () => {
+  const workspace = await createGitWorkspace('agentknot-orchestration-observer-abort-');
+  const boundedAssessment = singleQualityReviewAssessment('Complete one observable child.');
+  const adapter = new PlannerAndWorkerAdapter(boundedAssessment, 250);
+  const { jobStore, orchestrations } = createServices(adapter, 1, 2, 1);
+
+  try {
+    const started = await orchestrations.start({
+      prompt: 'Complete one observable orchestration.',
+      workspace,
+      assessment: boundedAssessment,
+    });
+    await waitFor(
+      async () => adapter.workerRuns === 1,
+      'the child Worker to start before observation abort'
+    );
+
+    const controller = new AbortController();
+    const observation = orchestrations.wait(started.orchestration.id, 5_000, controller.signal);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 1);
+
+    const abortedAt = Date.now();
+    controller.abort(new Error('stop observing orchestration'));
+    await assert.rejects(observation, /stop observing orchestration/);
+    assert.ok(Date.now() - abortedAt < 1_000, 'request abort should promptly end observation');
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+
+    const stillRunning = await orchestrations.get(started.orchestration.id);
+    assert.ok(stillRunning);
+    assert.notEqual(stillRunning.status, 'cancelled');
+    assert.equal(
+      stillRunning.events.some((event) => event.type === 'orchestration.cancel.requested'),
+      false
+    );
+    const jobsWhileRunning = await jobStore.list();
+    assert.equal(jobsWhileRunning.length, 1);
+    assert.notEqual(jobsWhileRunning[0]?.status, 'cancelled');
+    assert.equal(jobsWhileRunning[0]?.attempt, 1);
+    assert.equal(jobsWhileRunning[0]?.events.some((event) => event.type === 'job.retrying'), false);
+
+    const terminal = await orchestrations.wait(started.orchestration.id, 5_000);
+    assert.equal(terminal?.status, 'succeeded');
+    assert.equal(adapter.workerRuns, 1);
+    assert.equal(terminal?.children.length, 1);
+    assert.equal(
+      terminal?.events.filter((event) => event.type === 'orchestration.child.started').length,
+      1
+    );
+    const jobs = await jobStore.list();
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0]?.status, 'succeeded');
+    assert.equal(jobs[0]?.attempt, 1);
+    assert.equal(jobs[0]?.events.some((event) => event.type === 'job.retrying'), false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('OrchestrationService cancellation stops active child jobs and does not launch more work', async () => {
   const workspace = await createGitWorkspace('agentknot-orchestration-cancel-');
   const adapter = new PlannerAndWorkerAdapter(assessment, 1_000);
-  const { orchestrations } = createServices(adapter);
+  const { jobStore, orchestrations } = createServices(adapter);
 
-  const started = await orchestrations.start({ prompt: 'Run delegated work.', workspace, assessment });
-  while (adapter.workerRuns === 0) await new Promise((resolve) => setTimeout(resolve, 5));
-  await started.cancel();
-  const record = await started.completion;
+  try {
+    const started = await orchestrations.start({ prompt: 'Run delegated work.', workspace, assessment });
+    while (adapter.workerRuns === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    const observationController = new AbortController();
+    const observation = orchestrations.wait(
+      started.orchestration.id,
+      5_000,
+      observationController.signal
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(getEventListeners(observationController.signal, 'abort').length, 1);
+    await started.cancel();
+    const [record, observed] = await Promise.all([started.completion, observation]);
 
-  assert.equal(record.status, 'cancelled');
-  assert.equal(adapter.workerRuns, 1);
-  assert.equal(record.children.length, 1);
-  assert.equal(record.children[0]?.status, 'cancelled');
-  assert.equal(record.events.some((event) => event.type === 'orchestration.cancel.requested'), true);
-  assert.equal(record.events.at(-1)?.type, 'orchestration.cancelled');
+    assert.equal(record.status, 'cancelled');
+    assert.equal(observed?.status, 'cancelled');
+    assert.equal(adapter.workerRuns, 1);
+    assert.equal(record.children.length, 1);
+    assert.equal(record.children[0]?.status, 'cancelled');
+    assert.equal(record.events.some((event) => event.type === 'orchestration.cancel.requested'), true);
+    assert.equal(record.events.at(-1)?.type, 'orchestration.cancelled');
+    const jobs = await jobStore.list();
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0]?.status, 'cancelled');
+    assert.equal(jobs[0]?.attempt, 1);
+    assert.equal(jobs[0]?.events.some((event) => event.type === 'job.retrying'), false);
+    assert.equal(getEventListeners(observationController.signal, 'abort').length, 0);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test('direct and delegated Jobs share capacity and cancellation removes a durable waiter', async () => {

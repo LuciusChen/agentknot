@@ -70,11 +70,18 @@ const orchestrationIdSchema = z.object({ id: shortText }).strict();
 const orchestrationFollowSchema = z
   .object({ id: shortText, afterSequence: z.number().int().nonnegative().default(0) })
   .strict();
+const DEFAULT_ORCHESTRATION_WAIT_MS = 40_000;
+const MAX_ORCHESTRATION_WAIT_MS = 180_000;
 const orchestrationWaitSchema = z
   .object({
     id: shortText,
     afterSequence: z.number().int().nonnegative().default(0),
-    waitMs: z.number().int().min(100).max(40_000).default(40_000),
+    waitMs: z
+      .number()
+      .int()
+      .min(100)
+      .max(MAX_ORCHESTRATION_WAIT_MS)
+      .default(DEFAULT_ORCHESTRATION_WAIT_MS),
   })
   .strict();
 const jobControlIdSchema = z.object({ id: shortText }).strict();
@@ -268,93 +275,101 @@ export function createAgentKnotMcpServer(): McpServer {
     {
       title: 'Wait for AgentKnot orchestration',
       description:
-        'Hold one bounded tool request across durable event batches. Returns the terminal handoff or an active same-ID cursor for idempotent resume; never resubmits work.',
+        'Hold one bounded tool request across durable event batches. The default is 40 seconds; a caller may explicitly request up to 180 seconds when its client tool timeout is longer than waitMs with a reasonable transport margin. A client timeout or request abort stops only this observation: the durable orchestration may still run, so reconnect with the same orchestration ID and cursor and never resubmit work. The longer bound does not guarantee lower token use, cost, or latency. Returns the terminal handoff or an active same-ID cursor for idempotent resume.',
       inputSchema: orchestrationWaitSchema,
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ id, afterSequence, waitMs }, context) =>
       withErrors(async () => {
         const client = await resolveBrokerClient();
-        const deadline = AbortSignal.timeout(waitMs);
-        const waitSignal = AbortSignal.any([context.mcpReq.signal, deadline]);
-        const initial = await client.getOrchestration(id, waitSignal);
-        if (initial === undefined) throw new Error(`Orchestration not found: ${id}`);
-        const initialSequence = lastEventSequence(initial.events);
-        if (afterSequence > initialSequence) {
-          throw new Error(
-            `Orchestration cursor ${afterSequence} is ahead of durable sequence ${initialSequence}`
-          );
-        }
-        const resumeRecord =
-          isTerminalStatus(initial.status) || afterSequence === initialSequence
-            ? initial
-            : {
-                ...initial,
-                events: initial.events.filter((event) => event.sequence <= afterSequence),
-              };
-        let progress: AgentKnotWaitProgress | undefined;
+        const deadline = new AbortController();
+        const deadlineTimer = setTimeout(
+          () => deadline.abort(new Error(`Orchestration wait exceeded ${waitMs}ms`)),
+          waitMs
+        );
+        const waitSignal = AbortSignal.any([context.mcpReq.signal, deadline.signal]);
         const pendingNotifications: Promise<void>[] = [];
-        let progressUpdates = 0;
-        const progressToken = context.mcpReq._meta?.progressToken;
-        const reportProgress = (update: AgentKnotWaitUpdate): void => {
-          if (update.connectivity === 'connected' && update.progress !== undefined) {
-            progress = update.progress;
-          }
-          if (progressToken === undefined) return;
-          let message: string;
-          if (update.connectivity === 'connected') {
-            if (update.progress === undefined) return;
-            message = waitProgressMessage(update.progress);
-          } else {
-            message = `disconnected reconnect=${update.attempt}/${update.maxAttempts}`;
-          }
-          progressUpdates += 1;
-          pendingNotifications.push(
-            context.mcpReq.notify({
-              method: 'notifications/progress',
-              params: {
-                progressToken,
-                progress: progressUpdates,
-                message,
-              },
-            }).catch(() => undefined)
-          );
-        };
-        let record = resumeRecord;
-        let nextSequence = afterSequence;
         try {
-          record = await client.waitForOrchestration(
-            resumeRecord,
-            (update) => {
-              if (update.connectivity === 'connected') nextSequence = update.nextSequence;
-              reportProgress(update);
-            },
-            waitSignal
-          );
-          nextSequence = lastEventSequence(record.events);
-        } catch (error) {
-          if (
-            context.mcpReq.signal.aborted ||
-            !deadline.aborted ||
-            error !== waitSignal.reason
-          ) {
-            throw error;
+          const initial = await client.getOrchestration(id, waitSignal);
+          if (initial === undefined) throw new Error(`Orchestration not found: ${id}`);
+          const initialSequence = lastEventSequence(initial.events);
+          if (afterSequence > initialSequence) {
+            throw new Error(
+              `Orchestration cursor ${afterSequence} is ahead of durable sequence ${initialSequence}`
+            );
           }
-        }
-        await Promise.all(pendingNotifications);
-        if (isTerminalStatus(record.status)) {
-          return {
-            state: 'terminal',
-            nextSequence,
-            terminal: await buildOrchestrationHandoff(client, record),
+          const resumeRecord =
+            isTerminalStatus(initial.status) || afterSequence === initialSequence
+              ? initial
+              : {
+                  ...initial,
+                  events: initial.events.filter((event) => event.sequence <= afterSequence),
+                };
+          let progress: AgentKnotWaitProgress | undefined;
+          let progressUpdates = 0;
+          const progressToken = context.mcpReq._meta?.progressToken;
+          const reportProgress = (update: AgentKnotWaitUpdate): void => {
+            if (update.connectivity === 'connected' && update.progress !== undefined) {
+              progress = update.progress;
+            }
+            if (progressToken === undefined) return;
+            let message: string;
+            if (update.connectivity === 'connected') {
+              if (update.progress === undefined) return;
+              message = waitProgressMessage(update.progress);
+            } else {
+              message = `disconnected reconnect=${update.attempt}/${update.maxAttempts}`;
+            }
+            progressUpdates += 1;
+            pendingNotifications.push(
+              context.mcpReq.notify({
+                method: 'notifications/progress',
+                params: {
+                  progressToken,
+                  progress: progressUpdates,
+                  message,
+                },
+              }).catch(() => undefined)
+            );
           };
+          let record = resumeRecord;
+          let nextSequence = afterSequence;
+          try {
+            record = await client.waitForOrchestration(
+              resumeRecord,
+              (update) => {
+                if (update.connectivity === 'connected') nextSequence = update.nextSequence;
+                reportProgress(update);
+              },
+              waitSignal
+            );
+            nextSequence = lastEventSequence(record.events);
+          } catch (error) {
+            if (
+              context.mcpReq.signal.aborted ||
+              !deadline.signal.aborted ||
+              error !== waitSignal.reason
+            ) {
+              throw error;
+            }
+          }
+          if (isTerminalStatus(record.status)) {
+            return {
+              state: 'terminal',
+              nextSequence,
+              terminal: await buildOrchestrationHandoff(client, record),
+            };
+          }
+          return {
+            state: 'active',
+            id,
+            nextSequence,
+            ...(progress === undefined ? {} : { progress }),
+          };
+        } finally {
+          clearTimeout(deadlineTimer);
+          await Promise.all(pendingNotifications);
         }
-        return {
-          state: 'active',
-          id,
-          nextSequence,
-          ...(progress === undefined ? {} : { progress }),
-        };
       })
   );
 

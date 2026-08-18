@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import {
   createServer,
   type IncomingMessage,
@@ -11,7 +11,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import { stopBroker } from '../src/broker-lifecycle.js';
@@ -91,6 +91,13 @@ class StdioMcpClient {
 
   notify(method: string, params?: object): void {
     this.#child.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`);
+  }
+
+  abandonRequest(id: number, reason: string): void {
+    const pending = this.#pending.get(id);
+    if (pending === undefined) return;
+    this.#pending.delete(id);
+    pending.reject(new Error(reason));
   }
 
   async initialize(): Promise<void> {
@@ -417,10 +424,50 @@ test('MCP job output returns one bounded page in matching text and structured fo
 });
 
 test('MCP wait resumes the same durable cursor and cancels its in-flight follow', async () => {
+  const timerRoot = await mkdtemp(path.join(os.tmpdir(), 'agentknot-mcp-wait-timer-'));
+  const timerHook = path.join(timerRoot, 'timer-hook.mjs');
+  const timerLog = path.join(timerRoot, 'timer.log');
+  await writeFile(
+    timerHook,
+    `import { appendFileSync } from 'node:fs';
+const log = process.env.AGENTKNOT_TEST_TIMER_LOG;
+const originalSetTimeout = globalThis.setTimeout;
+const originalClearTimeout = globalThis.clearTimeout;
+const tracked = new Map();
+let nextId = 1;
+globalThis.setTimeout = function (callback, delay, ...args) {
+  const handle = Reflect.apply(originalSetTimeout, globalThis, [callback, delay, ...args]);
+  if (log && [100, 40000, 40001, 179999, 180000].includes(delay)) {
+    const id = nextId++;
+    tracked.set(handle, id);
+    appendFileSync(log, 'set ' + id + ' ' + delay + '\\n');
+  }
+  return handle;
+};
+globalThis.clearTimeout = function (handle) {
+  const id = tracked.get(handle);
+  if (log && id !== undefined) {
+    tracked.delete(handle);
+    appendFileSync(log, 'clear ' + id + '\\n');
+  }
+  return Reflect.apply(originalClearTimeout, globalThis, [handle]);
+};
+`
+  );
   const calls: string[] = [];
-  let mode: 'active' | 'deadline-hanging' | 'terminal' | 'follow-hanging' | 'record-hanging' = 'active';
+  let mode:
+    | 'active'
+    | 'deadline-hanging'
+    | 'terminal'
+    | 'progress-terminal'
+    | 'progress-hanging'
+    | 'durable-cancellation'
+    | 'broker-error'
+    | 'follow-hanging'
+    | 'record-hanging' = 'active';
   let hangingRequestArrived: (() => void) | undefined;
   let hangingRequestClosed: (() => void) | undefined;
+  let durableCancellationResponse: ServerResponse | undefined;
   const armHangingRequest = (): { arrived: Promise<void>; closed: Promise<void> } => ({
     arrived: new Promise<void>((resolve) => {
       hangingRequestArrived = resolve;
@@ -455,11 +502,39 @@ test('MCP wait resumes the same durable cursor and cancels its in-flight follow'
     ],
     result: { action: 'delegated', artifactReview: { status: 'checked', conflicts: [], unavailable: [] } },
   };
+  const cancelledTerminal = {
+    ...terminal,
+    status: 'cancelled',
+    events: [
+      terminal.events[0],
+      { sequence: 2, type: 'orchestration.cancelled' },
+    ],
+  };
   const http: Server = createServer((request, response) => {
     calls.push(`${request.method} ${request.url}`);
+    if (
+      request.method === 'POST' &&
+      request.url === '/v1/orchestrations/orchestration_wait_fixture/cancel'
+    ) {
+      response.writeHead(202, { 'content-type': 'application/json' });
+      response.end('{"accepted":true}');
+      const waiting = durableCancellationResponse;
+      durableCancellationResponse = undefined;
+      setImmediate(() => {
+        if (waiting === undefined || waiting.destroyed) return;
+        waiting.writeHead(200, { 'content-type': 'application/json' });
+        waiting.end(JSON.stringify({ nextSequence: 2, orchestration: cancelledTerminal }));
+      });
+      return;
+    }
     if (request.url === '/v1/orchestrations/orchestration_wait_fixture') {
       if (mode === 'record-hanging') {
         observeHangingRequest(request, response);
+        return;
+      }
+      if (mode === 'broker-error') {
+        response.writeHead(500, { 'content-type': 'application/json' });
+        response.end('{"error":"injected broker error"}');
         return;
       }
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -481,6 +556,16 @@ test('MCP wait resumes the same durable cursor and cancels its in-flight follow'
       response.end('{"error":"not found"}');
       return;
     }
+    if (mode === 'durable-cancellation') {
+      durableCancellationResponse = response;
+      observeHangingRequest(request, response);
+      return;
+    }
+    const after = Number(new URL(request.url, 'http://agentknot.test').searchParams.get('after'));
+    if (mode === 'progress-hanging' && after >= 1) {
+      observeHangingRequest(request, response);
+      return;
+    }
     if (mode === 'follow-hanging' || mode === 'deadline-hanging') {
       observeHangingRequest(request, response);
       return;
@@ -490,7 +575,11 @@ test('MCP wait resumes the same durable cursor and cancels its in-flight follow'
       response.end(JSON.stringify({ nextSequence: 2, orchestration: terminal }));
       return;
     }
-    const after = Number(new URL(request.url, 'http://agentknot.test').searchParams.get('after'));
+    if (mode === 'progress-terminal' && after >= 1) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ nextSequence: 2, orchestration: terminal }));
+      return;
+    }
     setTimeout(() => {
       if (response.destroyed) return;
       response.writeHead(202, { 'content-type': 'application/json' });
@@ -515,9 +604,80 @@ test('MCP wait resumes the same durable cursor and cancels its in-flight follow'
   const mcp = new StdioMcpClient({
     ...process.env,
     AGENTKNOT_SERVER_URL: `http://127.0.0.1:${address.port}`,
+    AGENTKNOT_TEST_TIMER_LOG: timerLog,
+    NODE_OPTIONS: [
+      process.env.NODE_OPTIONS,
+      `--import=${pathToFileURL(timerHook).href}`,
+    ].filter((value) => value !== undefined && value !== '').join(' '),
   });
   try {
     await mcp.initialize();
+    const listed = await mcp.request('tools/list', {});
+    const waitTool = (listed.tools as Array<{
+      name: string;
+      inputSchema: { properties?: Record<string, Record<string, unknown>> };
+    }>).find((tool) => tool.name === 'agentknot_orchestration_wait');
+    assert.ok(waitTool);
+    assert.deepEqual(waitTool.inputSchema.properties?.waitMs, {
+      type: 'integer',
+      minimum: 100,
+      maximum: 180_000,
+      default: 40_000,
+    });
+
+    mode = 'terminal';
+    const terminalShapes: string[] = [];
+    for (const waitMs of [undefined, 100, 40_000, 40_001, 179_999, 180_000] as const) {
+      const result = toolJson(
+        await mcp.callTool('agentknot_orchestration_wait', {
+          id: terminal.id,
+          afterSequence: 0,
+          ...(waitMs === undefined ? {} : { waitMs }),
+        })
+      );
+      assert.equal(result.state, 'terminal');
+      terminalShapes.push(JSON.stringify(Object.keys(result).sort()));
+    }
+    assert.equal(new Set(terminalShapes).size, 1, 'waitMs must not change the response shape');
+
+    for (const waitMs of [99, 180_001, 0, -1, 1.5, '180000', null]) {
+      const callsBeforeValidation = calls.length;
+      const timerLogBeforeValidation = await readFile(timerLog, 'utf8');
+      const rejected = await mcp.callTool('agentknot_orchestration_wait', {
+        id: terminal.id,
+        afterSequence: 0,
+        waitMs,
+      });
+      assert.equal(rejected.isError, true, `waitMs=${String(waitMs)} should be rejected`);
+      assert.equal(calls.length, callsBeforeValidation, 'invalid waitMs must not reach the broker');
+      assert.equal(
+        await readFile(timerLog, 'utf8'),
+        timerLogBeforeValidation,
+        'invalid waitMs must not create a deadline timer'
+      );
+    }
+    // Raw JSON cannot represent NaN or Infinity. They arrive as null if a JavaScript caller
+    // serializes them, so the public transport test above intentionally covers null instead.
+
+    mode = 'progress-terminal';
+    const notificationsBeforeLongWait = mcp.notifications.length;
+    const longWait = toolJson(
+      await mcp.callTool(
+        'agentknot_orchestration_wait',
+        { id: terminal.id, afterSequence: 0, waitMs: 180_000 },
+        { progressToken: 'long-wait-progress' }
+      )
+    );
+    assert.equal(longWait.state, 'terminal');
+    assert.ok(mcp.notifications.slice(notificationsBeforeLongWait).some((notification) =>
+      notification.method === 'notifications/progress' &&
+      notification.params?.progressToken === 'long-wait-progress'));
+    const notificationsAfterLongWait = mcp.notifications.length;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(mcp.notifications.length, notificationsAfterLongWait);
+
+    mode = 'active';
+    const activeCallStart = calls.length;
     const active = toolJson(
       await mcp.callTool(
         'agentknot_orchestration_wait',
@@ -528,12 +688,13 @@ test('MCP wait resumes the same durable cursor and cancels its in-flight follow'
     assert.equal(active.state, 'active');
     assert.equal(active.id, terminal.id);
     assert.equal(active.nextSequence, 1);
-    const eventCalls = calls.filter((call) => call.includes('/events?after='));
+    const activeCalls = calls.slice(activeCallStart);
+    const eventCalls = activeCalls.filter((call) => call.includes('/events?after='));
     assert.ok(eventCalls.length >= 2);
     assert.ok(eventCalls[0]?.endsWith('events?after=0'));
     assert.ok(eventCalls.slice(1).every((call) => call.endsWith('events?after=1')));
     assert.equal(
-      calls.filter((call) => call === `GET /v1/orchestrations/${terminal.id}`).length,
+      activeCalls.filter((call) => call === `GET /v1/orchestrations/${terminal.id}`).length,
       1,
       'the bounded wait must not add a deadline fallback snapshot'
     );
@@ -564,20 +725,79 @@ test('MCP wait resumes the same durable cursor and cancels its in-flight follow'
     assert.equal((resumed.terminal as { id: string }).id, terminal.id);
     assert.equal(calls.some((call) => call.startsWith('POST ')), false);
 
-    mode = 'follow-hanging';
+    mode = 'progress-hanging';
     let hanging = armHangingRequest();
     const pending = mcp.beginRequest('tools/call', {
       name: 'agentknot_orchestration_wait',
-      arguments: { id: terminal.id, afterSequence: 1, waitMs: 40_000 },
+      arguments: { id: terminal.id, afterSequence: 0, waitMs: 180_000 },
+      _meta: { progressToken: 'abort-progress' },
     });
-    void pending.result.catch(() => undefined);
+    const pendingSettlement = pending.result.then(
+      (result) => ({ result }),
+      (error: Error) => ({ error })
+    );
     await hanging.arrived;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(mcp.notifications.some((notification) =>
+      notification.method === 'notifications/progress' &&
+      notification.params?.progressToken === 'abort-progress'));
     mcp.notify('notifications/cancelled', { requestId: pending.id, reason: 'test cancellation' });
     await Promise.race([
       hanging.closed,
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('cancelled MCP wait did not abort its HTTP follow')), 1_000)),
     ]);
+    mcp.abandonRequest(pending.id, 'test client stopped awaiting cancelled request');
+    const abortedWait = await pendingSettlement;
+    if ('result' in abortedWait) assert.equal(abortedWait.result.isError, true);
+    else assert.match(abortedWait.error.message, /stopped awaiting cancelled request/);
+    const notificationsAfterAbort = mcp.notifications.length;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(mcp.notifications.length, notificationsAfterAbort);
+
+    mode = 'terminal';
+    const reattachedAfterAbort = toolJson(
+      await mcp.callTool('agentknot_orchestration_wait', {
+        id: terminal.id,
+        afterSequence: 1,
+        waitMs: 100,
+      })
+    );
+    assert.equal(reattachedAfterAbort.state, 'terminal');
+    assert.equal((reattachedAfterAbort.terminal as { id: string }).id, terminal.id);
+
+    mode = 'durable-cancellation';
+    hanging = armHangingRequest();
+    const longWaitCancelled = mcp.callTool('agentknot_orchestration_wait', {
+      id: terminal.id,
+      afterSequence: 1,
+      waitMs: 180_000,
+    });
+    await hanging.arrived;
+    assert.deepEqual(
+      toolJson(await mcp.callTool('agentknot_orchestration_cancel', { id: terminal.id })),
+      { accepted: true, orchestrationId: terminal.id }
+    );
+    const cancelledWaitResult = toolJson(await longWaitCancelled);
+    assert.equal(cancelledWaitResult.state, 'terminal');
+    assert.equal(
+      (cancelledWaitResult.terminal as { status: string }).status,
+      'cancelled'
+    );
+    assert.equal(
+      calls.filter((call) =>
+        call === `POST /v1/orchestrations/${terminal.id}/cancel`).length,
+      1
+    );
+    assert.equal(calls.some((call) => call === 'POST /v1/orchestrations'), false);
+
+    mode = 'broker-error';
+    const brokerError = await mcp.callTool('agentknot_orchestration_wait', {
+      id: terminal.id,
+      afterSequence: 1,
+      waitMs: 180_000,
+    });
+    assert.equal(brokerError.isError, true);
 
     mode = 'record-hanging';
     hanging = armHangingRequest();
@@ -585,7 +805,10 @@ test('MCP wait resumes the same durable cursor and cancels its in-flight follow'
       name: 'agentknot_orchestration_wait',
       arguments: { id: terminal.id, afterSequence: 1 },
     });
-    void preflight.result.catch(() => undefined);
+    const preflightSettlement = preflight.result.then(
+      (result) => ({ result }),
+      (error: Error) => ({ error })
+    );
     await hanging.arrived;
     mcp.notify('notifications/cancelled', { requestId: preflight.id, reason: 'test cancellation' });
     await Promise.race([
@@ -593,9 +816,33 @@ test('MCP wait resumes the same durable cursor and cancels its in-flight follow'
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('cancelled MCP wait did not abort its record read')), 1_000)),
     ]);
+    mcp.abandonRequest(preflight.id, 'test client stopped awaiting cancelled preflight');
+    const abortedPreflight = await preflightSettlement;
+    if ('result' in abortedPreflight) assert.equal(abortedPreflight.result.isError, true);
+    else assert.match(abortedPreflight.error.message, /stopped awaiting cancelled preflight/);
+
+    const timerEvents = (await readFile(timerLog, 'utf8')).trim().split('\n');
+    const timers = new Map<string, { delay: number; cleared: boolean }>();
+    for (const event of timerEvents) {
+      const [kind, id, delay] = event.split(' ');
+      if (kind === 'set' && id !== undefined && delay !== undefined) {
+        timers.set(id, { delay: Number(delay), cleared: false });
+      } else if (kind === 'clear' && id !== undefined) {
+        const timer = timers.get(id);
+        assert.ok(timer, `clear must refer to a tracked timer: ${event}`);
+        timer.cleared = true;
+      }
+    }
+    assert.deepEqual(
+      new Set([...timers.values()].map((timer) => timer.delay)),
+      new Set([100, 40_000, 40_001, 179_999, 180_000]),
+      'the handler must pass each explicit duration to setTimeout without clamping'
+    );
+    assert.ok([...timers.values()].every((timer) => timer.cleared));
   } finally {
     await mcp.close();
     await new Promise<void>((resolve, reject) =>
       http.close((error) => error === undefined ? resolve() : reject(error)));
+    await rm(timerRoot, { recursive: true, force: true });
   }
 });
